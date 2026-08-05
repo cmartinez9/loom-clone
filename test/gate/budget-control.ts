@@ -34,6 +34,7 @@
  *
  * The second branch is deliberately not an escape hatch. The compositor is never
  * excused from compositing: it must still hold the ceiling the control just measured
+ * *and* miss the budget no more often than the host itself did
  * ({@link expectTracksControl}), so a compositor that has actually got slow fails here
  * on any host, fast or slow. Only §8's *absolute* number is ever deferred, and only on
  * the evidence of a measurement taken in the same frames. `test/phase6-gate.test.ts`
@@ -131,6 +132,20 @@ export const CLEARS_BUDGET = 1;
  * is running on, which is the compositor's fault however slow that host is — the
  * 66.67 ms deliberately-slowed path in the harness clears this by more than 2.5×, on
  * any control reading that could have excused it.
+ *
+ * ## Why this ceiling cannot be the only thing asked of the deferred branch
+ *
+ * It is a multiple of a number measured on the same main thread the compositor runs on,
+ * so a regression that saturates that thread inflates the very ceiling it is judged
+ * against. Measured, not hypothesised: the same regression patched into
+ * `Compositor.render` — 20 ms on one frame in thirty — was caught on one run by 2.4 ms
+ * (a 39.00 ms frame against a 36.60 ms ceiling) and missed on three others by 7 to
+ * 67 ms, because the play control read 36.50, 40.60 and 75.30 ms beside it and earned
+ * ceilings of 54.75, 60.90 and 112.95 ms. Twenty-seven to twenty-nine frames per run
+ * sat at three times §8's budget and the gate passed. Detection in that band was luck.
+ *
+ * So {@link expectTracksControl} discriminates on *how often* as well as on *how badly*
+ * — see {@link overBudgetRate}.
  */
 export const TRACKS_CONTROL = 1.5;
 
@@ -296,11 +311,44 @@ export function environmentSustainsBudget(control: ControlPhase, budgetMs: numbe
 }
 
 /**
+ * Over-budget samples as a share of samples taken.
+ *
+ * The statistic the deferred branch discriminates on, beside the worst reading. A host
+ * stall is a *few* windows of a phase — this project's stalled runners missed the budget
+ * on 1 and 2 frames of 360 — while a compositor that has got slow misses it on frame
+ * after frame, at whatever rate the regression fires.
+ *
+ * The share is the one figure on this branch that the thing under test cannot inflate.
+ * The spin runs immediately *after* the frame body rather than inside it, so nothing the
+ * compositor does lands in a spin's window, while everything the host does lands in
+ * both — and lands in the spin's more readily, since 8.33 ms of arithmetic needs only
+ * another 8.33 ms of stall to miss a 60 Hz refresh, where a 0.20 ms composite needs
+ * sixteen. Whatever ceiling the compositor lifts by saturating the thread, it cannot
+ * lift the host's own share of missed windows above its own.
+ *
+ * Zero samples is zero rather than a division: a phase that measured nothing has shown
+ * nothing, and the gate asserts both counts separately so an empty one fails there.
+ */
+export function overBudgetRate(overBudget: number, count: number): number {
+  return count === 0 ? 0 : overBudget / count;
+}
+
+/**
  * The branch where the host, not the compositor, missed §8's number.
  *
  * Returns the line the caller should report. **Throws — the gate fails — whenever the
  * compositor is the one that came up short**, which is what stops this branch from
- * being a way to pass by compositing slowly on a busy machine.
+ * being a way to pass by compositing slowly on a busy machine. Two things are asked of
+ * it, because the first was not enough on its own:
+ *
+ * - **how badly** the worst frame missed, against {@link TRACKS_CONTROL}× the worst spin;
+ * - **how often** the budget was missed at all, against how often this host missed it in
+ *   the same frames ({@link overBudgetRate}).
+ *
+ * The second is a plain `>` against the control's own share, with no factor in it. A
+ * factor there would be a number tuned until a known regression separated, judged
+ * against a statistic a stalling host inflates — which is the circularity the ceiling
+ * above already has, one level up.
  */
 export function expectTracksControl(evidence: BudgetEvidence): string {
   const { what, budgetMs, measured, control } = evidence;
@@ -314,12 +362,27 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
         `however slow the machine is. ${figures(control, budgetMs)}`,
     );
   }
+  const frameShare = overBudgetRate(measured.overBudget, measured.count);
+  const spinShare = overBudgetRate(control.overBudget, control.count);
+  if (frameShare > spinShare) {
+    throw new Error(
+      `${what}: ${measured.overBudget} of ${measured.count} frames over the ${fmt(budgetMs)} ms ` +
+        `budget (${pct(frameShare)}), a larger share than this host missed it on of its own ` +
+        `spins — ${control.overBudget} of ${control.count} (${pct(spinShare)}), the same ` +
+        `${fmt(control.targetMs)} ms of arithmetic in these same frames. A host that stalls ` +
+        `stalls a window here and there and stalls the spin at least as readily as the ` +
+        `frame; a compositor missing the budget this much more often than the host is doing ` +
+        `it for its own reasons. Worst frame ${fmt(measured.maxMs)} ms at frame ` +
+        `${measured.maxAt}. ${figures(control, budgetMs)}`,
+    );
+  }
   return (
     `${what}: this environment cannot sustain the ${fmt(budgetMs)} ms frame budget §8 requires — ` +
     `${figures(control, budgetMs)}. The worst frame was ${fmt(measured.maxMs)} ms ` +
-    `(${measured.overBudget} of ${measured.count} frames over budget) and is held to tracking ` +
-    `that measured ceiling instead. See test/gate/budget-control.ts; §8's number is asserted ` +
-    `exactly as written on any host whose control clears it.`
+    `(${measured.overBudget} of ${measured.count} frames over budget, ${pct(frameShare)}, against ` +
+    `the host's own ${pct(spinShare)}) and is held to tracking that measured ceiling instead. ` +
+    `See test/gate/budget-control.ts; §8's number is asserted exactly as written on any host ` +
+    `whose control clears it.`
   );
 }
 
@@ -336,4 +399,9 @@ function figures(control: ControlPhase, budgetMs: number): string {
 /** Readable in a failure message; never used for the comparison itself. */
 function fmt(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+/** A share, said out loud. Like {@link fmt}, never the comparison itself. */
+function pct(share: number): string {
+  return `${(share * 100).toFixed(2)}%`;
 }

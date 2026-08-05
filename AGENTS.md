@@ -283,7 +283,20 @@ a gap lives in `recording.json`, never in the container.
   when the compositor was compositing in 0.20 ms. Two things keep it from being an escape hatch: on
   the deferred branch the compositor is still held to the ceiling the control just
   measured, and the harness runs the shipping `PreviewLoop` over a deliberately-slowed
-  compositor in the same run, which the gate requires to fail. **A control paced per
+  compositor in the same run, which the gate requires to fail. That ceiling is
+  `TRACKS_CONTROL` × a number measured on the main thread the compositor saturates, so
+  it rises with the regression it judges: a 20 ms-on-one-frame-in-thirty mutation of
+  `Compositor.render` put 27–29 play frames at 3× budget and still passed, three runs
+  out of three. The deferred branch therefore also discriminates on **how often** — the
+  compositor's over-budget share of frames against the host's own share of spins, which
+  the compositor cannot inflate because the spin runs after the frame body. **The share
+  is necessary and not sufficient, and the numbers say where it stops**: quiet, it
+  separates (3.33% of frames against 0.98% of spins); under sustained load the control's
+  8.33 ms window needs 8.33 ms more of stall where a 0.20 ms composite needs sixteen, so
+  the host's share runs ahead of the regression's (22.16% against 3.75%) and the middle
+  band survives. Do not close it with a factor on the share — that is the ceiling's own
+  circularity one level up. It is safe to keep because it can only ever fire on a phase
+  that already missed §8. **A control paced per
   frame is a bug**: half a budget per frame is a whole thread on a 120 Hz panel, and
   the version that did that starved decode until every scrub target timed out at four
   seconds. It is paced by the wall clock instead.

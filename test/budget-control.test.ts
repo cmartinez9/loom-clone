@@ -29,6 +29,7 @@ import {
   environmentSustainsBudget,
   expectTracksControl,
   NO_CONTROL,
+  overBudgetRate,
   SLOW_COMPOSITE_MS,
   TRACKS_CONTROL,
   type BudgetEvidence,
@@ -167,16 +168,30 @@ describe('the frame budget is enforced against a measured environment', () => {
    * stretched the other. It is not the only shape, and {@link TRACKS_CONTROL} exists
    * precisely because a stall can land in one and not the other. Past
    * `SLOWED_MS / TRACKS_CONTROL` a stall in the control *alone* lifts the ceiling above
-   * everything the slowed path burns, so a gate that required the throw there would fail
-   * for the host's stall — the one thing this file exists to stop. §8's absolute number
-   * still catches the slowed path, and that is what `test/phase6-gate.test.ts` asserts on
-   * both of its branches, with the throw kept to the branch below where it cannot go
-   * wrong.
+   * everything the slowed path burns — so the ceiling on its own would report there, and
+   * a gate that required the throw would fail for the host's stall, which is the one
+   * thing this file exists to stop.
+   *
+   * The share is what still catches it there, and it takes a great deal more than a
+   * stall to lift: a host that missed the budget on as large a fraction of its own spins
+   * as the slowed compositor missed it on of its frames. Both have to go before the
+   * slowed path is merely reported, which is why `test/phase6-gate.test.ts` keeps the
+   * required throw to the branch where the phase's own control cleared the budget, and
+   * asserts §8's absolute number against the slowed path on both.
    */
-  it('CONTROL: a stall in the control alone lifts the ceiling past the slowed path', () => {
+  it('CONTROL: only a host stalled in both statistics lifts the slowed path clear', () => {
     const beyond = control({ maxMs: SLOWED_MS / TRACKS_CONTROL + 1, overBudget: 6 });
     expect(environmentSustainsBudget(beyond, FRAME_BUDGET_MS)).toBe(false);
-    expect(expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, beyond))).toContain(
+    // The ceiling has nothing left to say about it: 66.67 ms of burn under a ceiling
+    // this host's own stall earned.
+    expect(SLOWED_MS).toBeLessThan(beyond.maxMs * TRACKS_CONTROL);
+    // The share does. 24 frames of 360 against the host's own 6 of 360.
+    expect(() =>
+      expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, beyond)),
+    ).toThrow(/a larger share than this host missed it on of its own spins/);
+    // And only a host that stalled as often as the slowed path missed reports instead.
+    const asOften = control({ maxMs: SLOWED_MS / TRACKS_CONTROL + 1, overBudget: 24 });
+    expect(expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, asOften))).toContain(
       'this environment cannot sustain',
     );
     // Which is why the absolute pair is what the gate asserts against the slowed path
@@ -227,6 +242,60 @@ describe('the frame budget is enforced against a measured environment', () => {
     // What excused it before: the ceiling the deferred branch would have earned sat
     // above the offending frame, so that branch had nothing to say about it either.
     expect(measured.maxMs).toBeLessThan(host.maxMs * TRACKS_CONTROL);
+  });
+
+  /**
+   * The case that put a share beside the ceiling, and the honest edge of what it buys.
+   *
+   * Measured, from the same regression as the case above — 20 ms on one frame in thirty,
+   * patched into the real `Compositor.render` — run seven times against this gate. The
+   * ceiling on its own is `TRACKS_CONTROL` × a number taken on the main thread the
+   * regression is saturating, so it rises with the thing it is judging: three runs put
+   * 27–29 play frames at three times §8's budget and passed, the play control having read
+   * 36.50, 40.60 and 75.30 ms and earned ceilings of 54.75, 60.90 and 112.95 ms.
+   *
+   * How *often* is the statistic the compositor cannot inflate — the spin runs after the
+   * frame body, so none of the regression's own burn lands in it — and on a quiet host it
+   * separates cleanly: 30 of 900 play frames, 3.33%, against 2 of 204 spins, 0.98%.
+   *
+   * It is not sufficient, and the second half of this test says where it stops. Under
+   * sustained load the control's 8.33 ms window needs only another 8.33 ms of stall to
+   * miss the budget where a 0.20 ms composite needs sixteen, so the host's own share runs
+   * *ahead* of the regression's — 43 of 194 spins, 22.16%, beside 27 of 720 frames,
+   * 3.75%, on a box with 20 spinners on it. That reading is exactly why there is no
+   * factor here to make it separate: a share a stalling host inflates would be the
+   * ceiling's own circularity one level up, and tuning one until a known mutation failed
+   * would be fitting the instrument to the defect it is meant to find.
+   */
+  it('CONTROL: a regression missing the budget oftener than the host fails on the share', () => {
+    // Quiet host, measured: the ceiling excuses it and the share does not.
+    const host = control({ count: 204, maxMs: 23.7, maxAt: 114, meanMs: 8.54, overBudget: 2 });
+    const regressed = evidence({ count: 900, maxMs: 20.3, maxAt: 256, overBudget: 30 }, host);
+    expect(environmentSustainsBudget(host, FRAME_BUDGET_MS)).toBe(false);
+    expect(regressed.measured.maxMs).toBeLessThan(host.maxMs * TRACKS_CONTROL);
+    expect(() => expectTracksControl(regressed)).toThrow(/30 of 900 frames over/);
+
+    // And the edge, measured on the same commit under load: a host missing the budget on
+    // 22% of its own spins says nothing about a compositor missing it on 4% of frames,
+    // so both this branch's bounds are lifted and the deferral is reported as one.
+    const stalling = control({ count: 194, maxMs: 62.5, maxAt: 41, meanMs: 14.37, overBudget: 43 });
+    const underLoad = evidence({ count: 720, maxMs: 60.9, maxAt: 256, overBudget: 27 }, stalling);
+    expect(expectTracksControl(underLoad)).toContain('this environment cannot sustain');
+    // Reported with both shares in it, so the deferral CI reads names what it excused.
+    expect(expectTracksControl(underLoad)).toContain('3.75%');
+    expect(expectTracksControl(underLoad)).toContain("host's own 22.16%");
+  });
+
+  it('CONTROL: the share can only ever fire on a phase that already missed §8', () => {
+    // The one property that makes this safe to add to an acceptance gate: it is not a
+    // new way to fail a good run. With no frame over budget the share is zero and
+    // nothing under it, however healthy or wretched the host beside it was.
+    for (const host of [JUST_OVER, STALLED, control({ maxMs: 62.5, overBudget: 43, count: 194 })]) {
+      expect(overBudgetRate(0, 900)).toBe(0);
+      expect(expectTracksControl(evidence({ maxMs: host.maxMs, overBudget: 0 }, host))).toContain(
+        'this environment cannot sustain',
+      );
+    }
   });
 
   it('CONTROL: a control that measured nothing enforces the bound rather than lifting it', () => {

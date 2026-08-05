@@ -343,8 +343,9 @@ describe('phase 6 gate: 4K scrub and play', () => {
       // frames — so "the compositor got slow" and "this host will not give any program
       // a whole frame" can never be mistaken for one another. Where the host clears the
       // budget the four assertions below are exactly §8's, unchanged; where it cannot,
-      // the shortfall is reported and the compositor is held to the ceiling that
-      // control just measured, which is the part that stops this being an escape hatch.
+      // the shortfall is reported and the compositor is held to what that control
+      // measured instead — the ceiling it earned, and the share of windows it missed the
+      // budget on — which is the part that stops this being an escape hatch.
       // `test/gate/budget-control.ts` argues it; the slow-compositor control below and
       // `test/budget-control.test.ts` prove it.
       const shortfalls: string[] = [];
