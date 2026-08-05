@@ -4,6 +4,8 @@
  *   dist/main/index.cjs      esbuild — Electron main
  *   dist/preload/index.cjs   esbuild — the contextBridge surface
  *   dist/renderer/           vite    — one HTML entry per window
+ *   dist/native/             clang   — the cursor and click sampler (macOS-only,
+ *                                      like the rest of this app)
  *
  * Main and preload are bundled to **CommonJS**. A sandboxed preload is
  * CommonJS-only in Electron, and matching main to it keeps one module format in
@@ -21,6 +23,7 @@ import { build as viteBuild } from 'vite';
 import { rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { buildNativeSampler } from '../packages/sampler/native/build.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = resolve(root, 'dist');
@@ -56,6 +59,10 @@ async function main() {
   if (!watch) await rm(dist, { recursive: true, force: true });
 
   await Promise.all([
+    // `dist/native/loom-input-sampler` — the phase-5 cursor and click sampler. One
+    // `clang` call; see `packages/sampler/native/build.mjs`. In watch mode it is
+    // built once, because a `.m` file changing is not something `--watch` observes.
+    buildNativeSampler(),
     ...nodeBundles.map(async (options) => {
       if (!watch) return esbuildBuild(options);
       const ctx = await esbuildContext(options);
