@@ -54,21 +54,32 @@ packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it w
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
+packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
+packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    loom:// protocol, IPC.
-apps/renderer/     renderer windows. Library, recorder HUD and the hidden capture
-                   page today; overlay and editor later.
+apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture page
+                   and the preview loop today; overlay and editor later.
+test/              gates that span more than one package, in a real Electron renderer.
 ```
 
-Later phases add `packages/edl`, `packages/compositor`, `packages/decode` and
-`apps/export` beside these (report §1.3). The report also lists `apps/capture`; the
-hidden capture page lives in `apps/renderer/src/capture/` instead, because a window
-in this repo is a role in `apps/main/src/windows.ts` plus an entry in
-`apps/renderer/vite.config.ts`, and a second renderer app would fork that.
+Later phases add `packages/edl` and `apps/export` beside these (report §1.3). The
+report also lists `apps/capture`; the hidden capture page lives in
+`apps/renderer/src/capture/` instead, because a window in this repo is a role in
+`apps/main/src/windows.ts` plus an entry in `apps/renderer/vite.config.ts`, and a
+second renderer app would fork that.
+
+`decode` and `compositor` are **pure**: DOM types, no `node:`, no `electron`, no I/O,
+enforced in `eslint.config.mjs`. They reach the world through three narrow seams —
+a `ByteRangeReader`, a `DecoderFactory`, and the GL context they are handed. Wiring a
+real captured part to `SourceReader` needs exactly a byte-range reader, a
+`loom.index/1` sidecar and a `VideoDecoderConfig`; `source-reader.ts` says so at the
+top, including the one thing an adapter has to decide (where the `avcC` description
+comes from after a restart, since `recording.json` does not carry it).
 
 ## The four rules that are not style preferences
 
@@ -83,6 +94,9 @@ in this repo is a role in `apps/main/src/windows.ts` plus an entry in
    against a ~2 MB/s need). `packages/ipc/test/ipc-boundary.test.ts` fails the build
    if `VideoFrame`, `AudioData`, `ImageBitmap` or friends appear in the contract or
    the preload. The preload exposes named channels only — never a generic `invoke`.
+   And every `VideoFrame` has exactly one owner, `FrameRing`, with a `FrameLedger`
+   that throws on the _first_ frame past the ring cap (report §10.2). A leak here does
+   not throw on its own — the decoder just stops producing frames.
 3. **The bundle identifier is frozen.** `com.github.cmartinez9.loom-clone`, declared
    once in `apps/main/src/identity.ts`. macOS TCC keys every permission grant on it;
    changing it costs the user Screen Recording, Camera, Microphone and Accessibility,
@@ -168,6 +182,58 @@ rewriting a growing JSON once a second for the length of the recording.
   _process_ death leaves the old bytes or the new ones, never a mixture — proved by
   `packages/format/test/kill-mid-write.test.ts`, which includes a naive-writer control
   so it cannot pass vacuously.
+- **Never `flush()` a `VideoDecoder` mid-stream.** Chromium requires a keyframe as the
+  first chunk after `configure()` _and after every `flush()`_, so flushing to learn
+  that outputs have landed forces a re-seek and a whole re-decoded GOP on the next
+  frame of ordinary playback. `flush` is deliberately absent from `VideoDecoderLike`;
+  `SourceReader` waits on the output callback instead.
+- **`prime()` is called ~60×/s and must not disturb decode that is already running.**
+  A prime whose range is already requested rides along with the in-flight one rather
+  than superseding it, and "the ring does not hold `t`" only means re-seek when the
+  ring has moved _past_ `t` or the decoder has gone idle. Getting either wrong turns
+  every rendered frame into a seek that discards the decode it just started.
+- **`Compositor.render` does not clear when it is handed no frame — it returns.** §4.3's
+  "a miss holds the previous frame" is kept by leaving the render target alone; a clear
+  before the null check turns every backward scrub into a black flash. The loop cannot
+  hold instead, because the frame it would keep belongs to the ring and the seek closes
+  it. The target is filled with the background at construction and on `resize`, which is
+  where the first composite gets its background from.
+- **The `VideoFrame` → texture upload is the whole frame budget, off hardware decode.**
+  ANGLE binds an IOSurface for free (§12.4, 0.000 ms) only when the decoder is the
+  hardware one; on any VM — so on CI — frames are CPU-backed and the same
+  `texImage2D` converts and uploads 30 MB, measured at 4.8 ms of a 16.7 ms budget
+  while the draw and the blit cost 0.01 ms. `Compositor.render` therefore uploads once
+  per frame _of the recording_, not once per composite, and `texSubImage2D` into a
+  pre-sized texture is 2.6× slower, not faster — it misses Chromium's fast path.
+- **The phase 6 gate is `npm test`, in a real Electron renderer.** `test/gate/` builds
+  a harness with esbuild, launches Electron, encodes a 4K VFR fixture with
+  `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
+  number is painted into every frame and read back out of the framebuffer, so a fast
+  blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
+  passes. It judges the 16 ms budget on **the single worst frame, with no allowance**,
+  in both phases. That bound was once relaxed to a p99 plus a one-in-a-hundred
+  allowance on the strength of a CI run reporting a 19 ms frame — and the next round
+  proved that run came off a lost WebGL context returning stale pixels (below), so the
+  number was partly fabricated. **A measurement from an instrument since proven
+  unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
+  re-measure, then decide. If a genuine frame over budget turns up on the fixed
+  instrument, that is a decision to take with real numbers, not a threshold to adjust.
+- **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
+  no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
+  untouched — so a reused scratch array keeps the last picture it really read and
+  `Compositor.readPixels`'s in-place flip turns every other reading upside down. That
+  is how one GitHub macOS runner ("Apple Paravirtual device") produced a set of
+  plausible-looking wrong frame numbers and a control that could not see its own
+  black, on a commit whose other run of the same SHA passed. `readPixels` now throws
+  instead (an exporter would otherwise encode fabricated frames), the gate harness
+  aborts the run at the first sign of it, and `test/phase6-gate.test.ts` re-launches
+  **only** for that — never for a run that measured and came out over budget. Both
+  halves are pinned by tests rather than by comment:
+  `packages/compositor/test/context-loss.test.ts` (with a control proving the fake
+  really does model the silent no-op) and `test/relaunch-policy.test.ts`, which
+  enumerates every bad-run shape and requires that none of them earns a second launch.
+  A retry around an acceptance gate is how a real defect gets to look like weather;
+  it stays defensible only while it stays this narrow.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is

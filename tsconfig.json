@@ -30,6 +30,7 @@
     "packages/*/test/**/*.ts",
     "apps/*/src/**/*.ts",
     "apps/*/test/**/*.ts",
+    "test/**/*.ts",
     "scripts/**/*.mjs",
     "*.config.ts",
     "apps/*/*.config.ts"

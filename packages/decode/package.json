@@ -1,0 +1,16 @@
+{
+  "name": "@loom/decode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The one decode path: frame index, frame ring, VFR frameAt over a WebCodecs VideoDecoder.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@loom/format": "0.1.0"
+  }
+}
