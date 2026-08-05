@@ -720,17 +720,18 @@ export class ProjectStore {
       // as two seconds recovered, and mark the other four truncated. So a track
       // whose last part ended for a recorded reason is excluded — and when every
       // track ended that way, what the user still has is the longest of them.
+      //
+      // The reason is read from the **repaired** document, not the one on disk, so
+      // that it and `endSec` always come from the same part. A part announced in
+      // `recording.json` whose file the crash landed before creating is dropped by
+      // the repair; taking the reason from it would let a part that contributed
+      // nothing to `endSec` decide whether the track was running.
       const running: number[] = [];
       const everyEnd: number[] = [];
-      for (const [doc, track] of [
-        [recording.tracks.screen, screen],
-        [recording.tracks.webcam, webcam],
-        [recording.tracks.mic, mic],
-        [recording.tracks.system, system],
-      ] as const) {
+      for (const track of [screen, webcam, mic, system]) {
         if (track === null) continue;
         everyEnd.push(track.endSec);
-        if (!endedForARecordedReason(doc?.parts.at(-1))) running.push(track.endSec);
+        if (!endedForARecordedReason(track.track.parts.at(-1))) running.push(track.endSec);
       }
       const shortestEndSec =
         running.length > 0
