@@ -135,13 +135,27 @@ static void emitData(NSData *line) { emitBytes(line.bytes, line.length); }
  */
 static double finite4(double value) { return isfinite(value) ? value : 0.0; }
 
+/*
+ * `snprintf` returns the length it *would* have written, so a truncated line reports
+ * more than the buffer holds. Emitting that many bytes would read off the end of the
+ * stack buffer and put a corrupt line on the wire; the line is dropped instead, and
+ * counted, because a lost line that is counted is the rule this file already keeps.
+ */
+static void emitFormatted(const char *line, int length, size_t capacity) {
+  if (length > 0 && (size_t)length < capacity) {
+    emitBytes(line, (size_t)length);
+    return;
+  }
+  atomic_fetch_add(&gDroppedLines, 1);
+}
+
 static void emitCursorLine(uint64_t tUs, double x, double y, const char *shape, NSInteger mask) {
   char line[192];
   int length = snprintf(line, sizeof(line),
                         "{\"k\":\"cursor\",\"tUs\":%llu,\"x\":%.4f,\"y\":%.4f,\"c\":\"%s\","
                         "\"m\":%ld}",
                         (unsigned long long)tUs, finite4(x), finite4(y), shape, (long)mask);
-  if (length > 0) emitBytes(line, (size_t)length);
+  emitFormatted(line, length, sizeof(line));
 }
 
 static void emitClickLine(uint64_t tUs, bool down, int64_t button, double x, double y,
@@ -152,7 +166,7 @@ static void emitClickLine(uint64_t tUs, bool down, int64_t button, double x, dou
                         "\"y\":%.4f,\"m\":%ld}",
                         (unsigned long long)tUs, down ? "down" : "up", (long long)button,
                         finite4(x), finite4(y), (long)mask);
-  if (length > 0) emitBytes(line, (size_t)length);
+  emitFormatted(line, length, sizeof(line));
 }
 
 static void emitObject(NSDictionary *object) {

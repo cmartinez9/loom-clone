@@ -35,6 +35,10 @@ async function withRecording<T>(run: (harness: Harness) => Promise<T>): Promise<
   try {
     await store.loadSettings();
     const { id, paths } = await store.create('Events');
+    // Opened explicitly: these writes never open a bundle on their own, because the
+    // sampler drives them from timers and a straggler must not re-take the lock of a
+    // recording the caller has closed.
+    await store.openProject(id);
     return await run({ store, id, dir: paths.dir });
   } finally {
     await store.closeAll();
@@ -59,7 +63,7 @@ const CURSOR_INDEX = (sha: string): CursorIndexDoc => ({
 const SHA = 'a'.repeat(64);
 
 describe('event logs', () => {
-  it('appends NDJSON and opens the project on demand', async () => {
+  it('appends NDJSON to an open project', async () => {
     await withRecording(async ({ store, id, dir }) => {
       await store.appendEventLog(id, 'cursor', '{"t":0.0163,"x":0.5,"y":0.5,"c":"a","m":0}\n');
       await store.appendEventLog(id, 'cursor', '{"t":0.0246,"x":0.5,"y":0.5,"c":"a","m":0}\n');
@@ -126,6 +130,38 @@ describe('event logs', () => {
       await expect(store.appendEventLog('nope', 'cursor', '{"t":1}\n')).rejects.toBeInstanceOf(
         UnknownRecordingError,
       );
+    });
+  });
+
+  it('refuses a late write rather than re-opening a closed project', async () => {
+    await withRecording(async ({ store, id, dir }) => {
+      await store.appendEventLog(id, 'cursor', '{"t":1}\n');
+      await store.close(id);
+
+      // The sampler writes from timers, so a straggler can arrive after the caller
+      // has closed the recording. It must surface as a typed refusal: re-opening
+      // would re-take the bundle lock and hold a closed recording open for the rest
+      // of the session, and dropping it silently would lose cursor data the user
+      // believes was captured. The ordering contract is: stop the sampler, then
+      // close the project.
+      await expect(store.appendEventLog(id, 'cursor', '{"t":2}\n')).rejects.toBeInstanceOf(
+        UnknownRecordingError,
+      );
+      await expect(store.syncEventLog(id, 'cursor')).rejects.toBeInstanceOf(UnknownRecordingError);
+      await expect(store.createEventLog(id, 'clicks')).rejects.toBeInstanceOf(
+        UnknownRecordingError,
+      );
+      await expect(store.writeCursorImage(id, SHA, new Uint8Array())).rejects.toBeInstanceOf(
+        UnknownRecordingError,
+      );
+      await expect(store.writeCursorIndex(id, CURSOR_INDEX(SHA))).rejects.toBeInstanceOf(
+        UnknownRecordingError,
+      );
+
+      // Still released, and the log still ends where `close` left it.
+      expect(await exists(join(dir, BUNDLE.lock))).toBe(false);
+      expect(await readFile(join(dir, BUNDLE.cursorLog), 'utf8')).toBe('{"t":1}\n');
+      expect(await exists(join(dir, BUNDLE.clickLog))).toBe(false);
     });
   });
 });

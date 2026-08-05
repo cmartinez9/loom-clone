@@ -31,6 +31,7 @@ export {
   CLICK_SOURCE,
   DEFAULT_FLUSH_MS,
   DEFAULT_SAMPLE_HZ,
+  DEFAULT_START_TIMEOUT_MS,
   DEFAULT_SYNC_MS,
   InputSampler,
   type InputSamplerOptions,
@@ -50,6 +51,7 @@ export {
   HELPER_PATH_ENV,
   defaultHelperPath,
   probeInput,
+  unpackedHelperPath,
   type InputProbe,
   type ProbeOptions,
 } from './native.ts';

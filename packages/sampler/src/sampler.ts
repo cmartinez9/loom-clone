@@ -41,6 +41,14 @@ export const DEFAULT_SAMPLE_HZ = 120;
 export const DEFAULT_FLUSH_MS = 100;
 export const DEFAULT_SYNC_MS = 1000;
 
+/**
+ * How long `start()` waits for the helper's first status line.
+ *
+ * The same bound `probeInput()` uses, for the same reason: a helper that spawns and
+ * then never speaks must become a reported failure, not a recording that never begins.
+ */
+export const DEFAULT_START_TIMEOUT_MS = 5000;
+
 /** `RecordingEvents.clicks.source` — the mechanism, so a log is diagnosable later. */
 export const CLICK_SOURCE = 'cgeventtap';
 
@@ -68,6 +76,15 @@ export interface InputSamplerOptions {
   displayId?: number;
   flushMs?: number;
   syncMs?: number;
+  /**
+   * How long `start()` waits for the helper's first status line before giving up.
+   *
+   * A helper that spawns and then hangs — a stale binary behind `LOOM_INPUT_SAMPLER`,
+   * an AppKit call that blocks in a session with no window server — would otherwise
+   * leave `start()` pending forever, which is the one failure this module's contract
+   * does not allow: a helper that cannot report is reported, never waited on.
+   */
+  startTimeoutMs?: number;
   /** Called on every click-capability transition — never on every sample. */
   onCapability?: (capability: ClickCapability) => void;
   /** Background failures with no caller to return to. Logged loudly by default. */
@@ -98,6 +115,15 @@ export class InputSampler {
 
   /** The last thing the helper said about the tap, unembellished. */
   private tap: ClickTapState;
+  /**
+   * The most recent timestamp the helper reported.
+   *
+   * The clock a transition is stamped with when the helper is no longer there to
+   * stamp it — the last instant it was known to be alive. Starts at `t0Us`, so a
+   * helper that never spoke at all puts its refusal at the top of the recording
+   * rather than at a fabricated negative time.
+   */
+  private lastTUs: number;
   /** Set the first time the tap is confirmed live. `clicks.ndjson` exists from then on. */
   private clicksEverLive = false;
   private degradedAtSec: number | null = null;
@@ -128,11 +154,13 @@ export class InputSampler {
       displayId: options.displayId ?? 0,
       flushMs: options.flushMs ?? DEFAULT_FLUSH_MS,
       syncMs: options.syncMs ?? DEFAULT_SYNC_MS,
+      startTimeoutMs: options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
       sink: options.sink,
       t0Us: options.t0Us,
       ...(options.onCapability === undefined ? {} : { onCapability: options.onCapability }),
       ...(options.onError === undefined ? {} : { onError: options.onError }),
     };
+    this.lastTUs = options.t0Us;
     this.tap = {
       available: false,
       // Not `null`. Before the helper has spoken, "clicks are fine" is not something
@@ -210,13 +238,21 @@ export class InputSampler {
 
     const ready = new Promise<void>((fulfil) => {
       this.readyResolve = fulfil;
-      // A helper that dies before saying anything must not hang `start()`.
+      // A helper that dies before saying anything must not hang `start()`. Both are
+      // resolved on `close` rather than `exit` so the handler below — which turns the
+      // death into a capability — has already run when this settles.
       child.once('error', fulfil);
-      child.once('exit', fulfil);
+      child.once('close', fulfil);
     });
 
+    // `close`, not `exit`. `exit` fires when the process is reaped, which can be
+    // while the last chunk it wrote is still in the pipe; `close` is the event that
+    // means stdout has been drained. The helper flushes and returns from `main`
+    // microseconds later, so the final flush window — the last samples, any
+    // `cursorimg` in it, the `bye` — is exactly what `exit` would leave behind for a
+    // `data` event that arrives after `stop()` has already finished writing.
     this.exit = new Promise<void>((fulfil) => {
-      child.once('exit', (code, signal) => {
+      child.once('close', (code, signal) => {
         this.child = null;
         for (const line of this.splitter.flush()) this.handleLine(line);
         if (this.state === 'running') {
@@ -248,7 +284,22 @@ export class InputSampler {
     }, this.options.syncMs);
     this.syncTimer.unref?.();
 
+    const overdue = setTimeout(() => {
+      if (this.state !== 'running') return;
+      // The helper is alive and mute. Killing it is part of the failure: a process
+      // that never reported would otherwise go on sampling into a pipe nobody reads
+      // for the life of the app.
+      child.kill('SIGTERM');
+      this.fail(
+        'helper-failed',
+        `the input sampler did not report its status within ` +
+          `${String(this.options.startTimeoutMs)} ms`,
+      );
+    }, this.options.startTimeoutMs);
+    overdue.unref?.();
+
     await ready;
+    clearTimeout(overdue);
     return this.capability;
   }
 
@@ -331,6 +382,7 @@ export class InputSampler {
       if (raw.trim().length > 0) this.unparseableLines += 1;
       return;
     }
+    if (line.k !== 'cursorimg' && line.tUs > this.lastTUs) this.lastTUs = line.tUs;
     switch (line.k) {
       case 'hello':
         if (line.version !== HELPER_PROTOCOL_VERSION) {
@@ -531,17 +583,25 @@ export class InputSampler {
     }
   }
 
+  /**
+   * The helper is gone. Report it as the click-availability transition it is.
+   *
+   * Through `applyTapState`, not around it: a helper that dies after the tap was live
+   * leaves a populated `clicks.ndjson` that stops being a faithful record at a
+   * particular moment, and that moment belongs in `cursor.ndjson` and in
+   * `degradedAtSec` like every other transition. Stamped with the last time the helper
+   * reported, which is the last instant the log is known to be trustworthy.
+   */
   private fail(
     reason: Extract<ClickUnavailableReason, `helper-${string}`>,
     problem: string,
   ): ClickCapability {
     this.state = 'stopped';
     this.clearTimers();
+    this.applyTapState({ ...this.tap, available: false, reason }, this.lastTUs);
     // Whatever was buffered when the helper went is still real data.
     this.flushNow();
-    this.tap = { ...this.tap, available: false, reason };
     this.report(new Error(problem));
-    this.options.onCapability?.(this.capability);
     this.readyResolve?.();
     this.readyResolve = null;
     return this.capability;

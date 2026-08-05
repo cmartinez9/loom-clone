@@ -11,7 +11,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   parseHelperLine,
@@ -31,11 +31,28 @@ export const HELPER_BASENAME = 'loom-input-sampler';
 export const HELPER_PATH_ENV = 'LOOM_INPUT_SAMPLER';
 
 /**
+ * Rewrite a path that points *into* the asar archive to the unpacked copy beside it.
+ *
+ * Electron patches `fs` so a read of `…/app.asar/x` transparently finds the file
+ * inside the archive. `child_process.spawn` gets no such courtesy: it hands the
+ * literal string to `uv_spawn`, which knows nothing about asar. So the helper that
+ * `electron-builder.yml`'s `asarUnpack` puts in `app.asar.unpacked/` has to be *named*
+ * where it actually sits, or every packaged install reports `helper-missing` about a
+ * binary that shipped correctly.
+ *
+ * A no-op in development and in tests, where the segment is absent.
+ */
+export function unpackedHelperPath(path: string): string {
+  return path.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
+}
+
+/**
  * `dist/native/loom-input-sampler`, beside the JavaScript bundles.
  *
  * Main is bundled to `dist/main/index.cjs`, so at runtime this resolves the same way
  * in development and in a packaged app — which is the same reason there is no dev
- * server (CLAUDE.md, sharp edges).
+ * server (CLAUDE.md, sharp edges). The one difference a package makes is the asar
+ * archive, which {@link unpackedHelperPath} takes off the end.
  */
 export function defaultHelperPath(): string {
   const override = process.env[HELPER_PATH_ENV];
@@ -44,7 +61,7 @@ export function defaultHelperPath(): string {
   // and its sibling is `dist/native`. Running it unbundled — only tests do — has no
   // meaningful default, which is what the environment override is for.
   const here = typeof __dirname === 'string' ? __dirname : dirname(fileURLToPath(import.meta.url));
-  return resolve(here, '..', 'native', HELPER_BASENAME);
+  return unpackedHelperPath(resolve(here, '..', 'native', HELPER_BASENAME));
 }
 
 export interface InputProbe {

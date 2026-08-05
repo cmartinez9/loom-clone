@@ -181,13 +181,61 @@ describe('InputSampler', () => {
   });
 
   it('survives a helper that dies, and says so instead of reporting zeros', async () => {
-    const { sampler } = await runScenario('crash');
+    const { sink, sampler } = await runScenario('crash');
 
     expect(sampler.capability.available).toBe(false);
     expect(sampler.capability.reason).toBe('helper-failed');
     expect(sampler.capability.count).toBeNull();
     expect(sampler.health.clicks).toBeNull();
     expect(sampler.recordingEvents().clicks?.available).toBe(false);
+
+    // A helper that goes away is a click-availability transition like any other, so
+    // it lands in `cursor.ndjson` too. A capability that lives only in memory is
+    // gone by the time anyone reads the recording.
+    const transitions = sink.lines('cursor').filter((line) => line['e'] === 'clicks');
+    expect(transitions.at(-1)).toMatchObject({ available: false, reason: 'helper-failed' });
+  });
+
+  it('marks when a live tap stopped being trustworthy if the helper dies', async () => {
+    const { sink, sampler } = await runScenario('granted-then-crash');
+
+    // The clicks it caught are real; the log stops being a faithful record at the
+    // moment the helper went, and that moment is both in memory and on disk.
+    expect(sampler.capability.count).toBe(1);
+    expect(sampler.capability.reason).toBe('helper-failed');
+    expect(sampler.capability.liveThroughout).toBe(false);
+    expect(sampler.capability.degradedAtSec).toBeCloseTo(2, 6);
+
+    const transitions = sink.lines('cursor').filter((line) => line['e'] === 'clicks');
+    expect(transitions).toHaveLength(2);
+    expect(transitions[1]).toMatchObject({ t: 2, available: false, reason: 'helper-failed' });
+  });
+
+  it('bounds the wait for a helper that spawns and never speaks', async () => {
+    const previous = process.env['LOOM_FAKE_SCENARIO'];
+    process.env['LOOM_FAKE_SCENARIO'] = 'silent';
+    try {
+      const sink = new MemorySink();
+      const sampler = new InputSampler({
+        sink,
+        helperPath: FAKE,
+        t0Us: 0,
+        startTimeoutMs: 200,
+        onError: () => undefined,
+      });
+
+      // Without a bound this never resolves, and a recording starts by waiting
+      // forever on a helper that will never answer.
+      const capability = await sampler.start();
+      await sampler.stop();
+
+      expect(capability.reason).toBe('helper-failed');
+      expect(capability.count).toBeNull();
+      expect(sink.logs.has('clicks')).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env['LOOM_FAKE_SCENARIO'];
+      else process.env['LOOM_FAKE_SCENARIO'] = previous;
+    }
   });
 
   it('survives a helper that is not there', async () => {

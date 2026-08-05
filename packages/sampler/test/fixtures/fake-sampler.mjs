@@ -85,6 +85,19 @@ const SCENARIOS = {
   ],
 
   /**
+   * The tap comes up live and the *helper* dies under it. The log is populated and
+   * real, and stops being a faithful record at a knowable moment — which has to be
+   * recorded, because "one click happened" and "one click was captured before we
+   * went blind" are different facts.
+   */
+  'granted-then-crash': [
+    { k: 'hello', version: 1, pid: process.pid, tUs: T0, monotonicUs: T0, hz: 120, shapeNames: 17 },
+    { k: 'status', tUs: T0, clicks: LIVE },
+    { k: 'click', tUs: T0 + 500_000, e: 'down', b: 0, x: 0.25, y: 0.25, m: 0 },
+    { k: 'cursor', tUs: T0 + 2_000_000, x: 0.5, y: 0.5, c: '', m: 0 },
+  ],
+
+  /**
    * TCC says the process is trusted and the tap still will not come up — the
    * "granted, now relaunch" case the captain's decision requires be handled.
    */
@@ -135,7 +148,10 @@ if (scenario === 'future-protocol') {
   process.stdout.write(`${JSON.stringify({ k: 'status', tUs: T0, clicks: LIVE })}\n`);
 }
 
-const lines = SCENARIOS[scenario] ?? SCENARIOS.granted;
+// `silent` spawns cleanly and never says a word — a stale binary behind the override,
+// or an AppKit call that blocks without a window server. `start()` has to bound its
+// wait rather than leave a recording waiting on a helper that will never answer.
+const lines = scenario === 'silent' ? [] : (SCENARIOS[scenario] ?? SCENARIOS.granted);
 // Written as one chunk on purpose: the real helper batches on a 100 ms timer, so the
 // reader must cope with many lines per chunk — and with a chunk that splits a line,
 // which the interleaved partial write below produces.
@@ -143,6 +159,8 @@ const text = lines.map((line) => `${JSON.stringify(line)}\n`).join('');
 const split = Math.max(1, Math.floor(text.length / 2) + 3);
 process.stdout.write(text.slice(0, split));
 process.stdout.write(text.slice(split));
+
+if (scenario === 'granted-then-crash') process.exit(4);
 
 // Stay alive until the parent says stop or closes the pipe, exactly like the helper.
 process.stdin.setEncoding('utf8');

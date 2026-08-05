@@ -14,7 +14,13 @@
  */
 
 import { join } from 'node:path';
-import { InputSampler, type ClickCapability, type EventLogSink } from '@loom/sampler';
+import {
+  HELPER_BASENAME,
+  InputSampler,
+  unpackedHelperPath,
+  type ClickCapability,
+  type EventLogSink,
+} from '@loom/sampler';
 import type { CursorIndexDoc, EventLogKind, RecordingId } from '@loom/format';
 import type { ProjectStore } from './project-store.ts';
 
@@ -82,6 +88,12 @@ export interface StartInputSamplerOptions {
  * Resolves once click capability is known, so the caller can put the truth into
  * `recording.json`'s `capture.permissions.accessibility` before the first frame
  * rather than guessing at it afterwards.
+ *
+ * **The project must already be open, and it must stay open until `sampler.stop()`
+ * has resolved.** Sampling writes from timers, so a `store.close(id)` that lands
+ * first turns the tail of the cursor log into an `UnknownRecordingError` reported
+ * through `onError`. `ProjectStore`'s event-log section states the same contract from
+ * the other side.
  */
 export async function startInputSampler(options: StartInputSamplerOptions): Promise<InputSampler> {
   const sampler = new InputSampler({
@@ -109,7 +121,10 @@ export async function startInputSampler(options: StartInputSamplerOptions): Prom
  * archive by `electron-builder.yml` because an executable inside an archive cannot
  * be run. Passed explicitly rather than left to the package's own default so the one
  * place that knows this layout is the one place that owns `dist/`.
+ *
+ * `unpackedHelperPath` is not optional decoration: `spawn` is not asar-aware, so the
+ * path has to name `app.asar.unpacked/` rather than rely on the `fs` shim.
  */
 export function helperPathFor(distRoot: string): string {
-  return join(distRoot, 'native', 'loom-input-sampler');
+  return unpackedHelperPath(join(distRoot, 'native', HELPER_BASENAME));
 }
