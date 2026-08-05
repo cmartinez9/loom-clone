@@ -26,8 +26,14 @@
  *   editor mid-export must not kill the export.
  */
 
-import { BrowserWindow, nativeTheme, shell, type BrowserWindowConstructorOptions } from 'electron';
-import { appUrl } from '@loom/ipc';
+import {
+  BrowserWindow,
+  ipcMain,
+  nativeTheme,
+  shell,
+  type BrowserWindowConstructorOptions,
+} from 'electron';
+import { CHANNEL, appUrl } from '@loom/ipc';
 
 export type WindowRole =
   'library' | 'recorder-hud' | 'countdown' | 'drawing-overlay' | 'capture' | 'editor' | 'export';
@@ -47,6 +53,31 @@ interface RoleSpec {
 function groundColor(): string {
   return nativeTheme.shouldUseDarkColors ? '#100E09' : '#F4F0E4';
 }
+
+/**
+ * The recorder HUD's shipping geometry, and the one window in the app that changes
+ * size without a user dragging it.
+ *
+ * §7.4's camera banner and the error line sit on a shelf *below* the 92 px bar, and
+ * the HUD clips at its own height — so for as long as this window was a fixed 92 px
+ * the banner rendered at y=92 and no pixel of it ever reached the user. Reserving
+ * the shelf permanently is the wrong fix: it is 45 px of empty paper floating over
+ * the desktop for every recording that goes fine. Main grows the window by the
+ * measured height of the shelf while there is something on it, and puts it straight
+ * back afterwards. The bar itself never moves — macOS anchors a programmatic resize
+ * at the top-left — so the controls stay exactly where the user last saw them.
+ */
+const HUD_SIZE = { width: 420, height: 92 } as const;
+
+/**
+ * The tallest shelf main will grow to.
+ *
+ * The number comes from a renderer, so it is a request, not a fact. A HUD that
+ * asked for a thousand pixels — a bug, or a compromised renderer — would get a
+ * window covering the screen it is recording, on top of everything, unclosable.
+ * Two banners' worth is more than §7.4 or an error line can produce.
+ */
+const HUD_MAX_NOTICE_PX = 200;
 
 const ROLES: Record<WindowRole, RoleSpec> = {
   library: {
@@ -69,7 +100,7 @@ const ROLES: Record<WindowRole, RoleSpec> = {
     visible: true,
     contentProtected: true,
     multiple: false,
-    options: { width: 420, height: 92, frame: false, resizable: false, alwaysOnTop: true },
+    options: { ...HUD_SIZE, frame: false, resizable: false, alwaysOnTop: true },
   },
   countdown: {
     page: 'countdown.html',
@@ -147,6 +178,43 @@ export class WindowRegistry {
 
   constructor(options: RegistryOptions) {
     this.options = options;
+  }
+
+  /**
+   * Listen for the HUD reporting how tall its notice shelf is, and size the window
+   * to it. Call once, beside the other `ipcMain` registrations.
+   *
+   * Registered against the sender's role rather than trusted from the payload: the
+   * preload is shared by every window, so `recorder.noticeHeight` exists in the
+   * library and in the capture page too, and neither may resize the HUD. Same rule
+   * as `recorder.start` — a capability is only as narrow as main makes it.
+   */
+  installHudNoticeFit(): void {
+    ipcMain.on(CHANNEL.recorderNoticeHeight, (event, raw: unknown) => {
+      const sender = BrowserWindow.fromWebContents(event.sender);
+      if (sender === null || this.roleOf(sender) !== 'recorder-hud') return;
+      this.fitHudNotice(sender, raw);
+    });
+  }
+
+  /**
+   * Grow the HUD to fit its notice shelf, and shrink it back when the shelf empties.
+   *
+   * `resizable: false` is about the *user*: the bar has no grip and cannot be
+   * dragged bigger. macOS still honours a programmatic `setContentSize` on it, so
+   * the flag stays on and the window keeps its top-left corner while the shelf
+   * appears below the controls.
+   */
+  private fitHudNotice(window: BrowserWindow, raw: unknown): void {
+    const requested = typeof raw === 'number' && Number.isFinite(raw) ? Math.ceil(raw) : 0;
+    const notice = Math.min(Math.max(requested, 0), HUD_MAX_NOTICE_PX);
+    const height = HUD_SIZE.height + notice;
+    const [, current] = window.getContentSize();
+    // A resize to the size it already is still costs a relayout of the bar, and the
+    // HUD is the window with a timer running in it. The renderer only reports on a
+    // change, so this is the second of the two guards, not the only one.
+    if (current === height) return;
+    window.setContentSize(HUD_SIZE.width, height);
   }
 
   /**

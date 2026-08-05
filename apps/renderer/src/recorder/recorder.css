@@ -8,6 +8,12 @@
 
    The whole bar is a drag region; the controls opt out through the `button`
    rule in components.css.
+
+   `.hud` is the 92 px bar and nothing below it belongs to it: the notice and
+   error lines sit on a shelf underneath, which exists only while it has words
+   on it. The window is 92 px tall for exactly as long as that shelf is empty —
+   main grows it to fit and shrinks it straight back (`windows.ts`), which is
+   why neither line reserves height here.
    ============================================================================ */
 
 body {

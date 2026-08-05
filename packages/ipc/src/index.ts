@@ -427,6 +427,21 @@ export interface RecorderApi {
   start(options?: Partial<CaptureOptions>): Promise<{ recordingId: RecordingId }>;
   stop(): Promise<void>;
   onStatus(callback: (status: RecorderStatus) => void): Unsubscribe;
+  /**
+   * How many pixels of notice the HUD has below its bar — §7.4's camera banner,
+   * the error line, or `0` for neither.
+   *
+   * The HUD window ships at 420x92 with `overflow: hidden`, so a banner appended
+   * below the bar renders at y=92 and no part of it is ever on screen. Main grows
+   * the window by exactly this many pixels while there is something to read and
+   * shrinks it straight back to 420x92 when there is not, so the bar never carries
+   * empty paper for a notice that is not there.
+   *
+   * The renderer measures because only the renderer can: how tall an error line is
+   * depends on the length of the message and on fonts main cannot see. Main sizes,
+   * because the window is main's. A number, not a boolean, for the same reason.
+   */
+  noticeHeight(px: number): void;
 }
 
 // ---------------------------------------------------------------- capture
@@ -578,6 +593,8 @@ export const CHANNEL = {
   recorderOpen: 'loom.recorder.open',
   recorderStart: 'loom.recorder.start',
   recorderStop: 'loom.recorder.stop',
+  /** send-only, the HUD -> main. How tall its notice shelf is right now. */
+  recorderNoticeHeight: 'loom.recorder.noticeHeight',
   /** event: main -> renderer */
   recorderStatus: 'loom.recorder.status',
 
@@ -614,6 +631,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.appRevealRoot,
   CHANNEL.libraryReveal,
   CHANNEL.recorderOpen,
+  CHANNEL.recorderNoticeHeight,
   CHANNEL.captureMeta,
   CHANNEL.captureChunk,
   CHANNEL.capturePartEnded,

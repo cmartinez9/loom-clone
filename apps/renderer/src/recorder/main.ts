@@ -33,6 +33,9 @@ const stopButton = must('stop') as HTMLButtonElement;
 const errorLine = must('error');
 const cameraLine = must('camera');
 
+/** The last shelf height main was told about. `-1` so the first report is sent. */
+let reportedNoticeHeight = -1;
+
 function must(id: string): HTMLElement {
   const element = document.getElementById(id);
   if (element === null) throw new Error(`recorder.html is missing #${id}`);
@@ -49,6 +52,7 @@ const PHASE_LABEL: Record<RecorderStatus['phase'], string> = {
 
 recordButton.addEventListener('click', () => {
   errorLine.hidden = true;
+  reportNoticeHeight();
   recordButton.disabled = true;
   void loom.recorder.start().catch((error: unknown) => {
     recordButton.disabled = false;
@@ -100,6 +104,28 @@ function render(status: RecorderStatus): void {
     errorLine.textContent = status.error;
     errorLine.hidden = false;
   }
+
+  reportNoticeHeight();
+}
+
+/**
+ * Tell main how tall the notice shelf below the bar is, so it can size the window
+ * to it.
+ *
+ * The shelf is measured rather than assumed because its height is not ours to know
+ * in advance: an error line wraps to as many lines as the message needs. What is
+ * reported is the shelf *alone*, not the document — main owns the 92 px bar and adds
+ * this to it, so "no notice" is structurally a return to the shipping geometry
+ * rather than a number this file has to get right.
+ *
+ * Sent only when it changes. `render` runs on every status push, four times a
+ * second for the length of a recording, and the answer is the same every time.
+ */
+function reportNoticeHeight(): void {
+  const height = cameraLine.offsetHeight + errorLine.offsetHeight;
+  if (height === reportedNoticeHeight) return;
+  reportedNoticeHeight = height;
+  loom.recorder.noticeHeight(height);
 }
 
 /**
@@ -140,4 +166,5 @@ function renderCamera(status: RecorderStatus): void {
 function showError(error: unknown): void {
   errorLine.textContent = error instanceof Error ? error.message : String(error);
   errorLine.hidden = false;
+  reportNoticeHeight();
 }
