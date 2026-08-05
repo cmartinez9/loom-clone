@@ -196,6 +196,19 @@ export class Compositor {
     return this.#target.framebuffer;
   }
 
+  /**
+   * Whether the driver has taken the context away.
+   *
+   * A lost context does not throw: every GL call becomes a no-op and every query
+   * answers `null`. Nothing here can recover from it — the program, the textures and
+   * the render target are all gone with it — so the value of asking is that a caller
+   * can say *"the context was lost"* instead of reporting whatever it happened to be
+   * holding. {@link readPixels} asks on the caller's behalf; see the reason there.
+   */
+  get contextLost(): boolean {
+    return this.gl.isContextLost();
+  }
+
   resize(outputSize: readonly [number, number]): void {
     this.#assertLive();
     const width = Math.max(1, Math.round(outputSize[0]));
@@ -357,10 +370,19 @@ export class Compositor {
    *
    * This is a synchronous GPU stall. It belongs in a test and in the export loop,
    * never in the preview loop.
+   *
+   * **Throws on a lost context rather than returning `out`.** A lost context makes
+   * `gl.readPixels` a no-op, so the caller's buffer keeps whatever was in it — the
+   * frame before, for an exporter reading back every frame into one scratch array,
+   * and the flip below then turns even *that* into pixels nothing ever drew. Handing
+   * those back as a composite is worse than failing: it is fabricated output, and it
+   * looks exactly like a real one.
    */
   readPixels(out?: Uint8Array): Uint8Array {
     this.#assertLive();
     const gl = this.gl;
+    if (gl.isContextLost())
+      throw new GlError('the WebGL context was lost; there is nothing to read');
     const [width, height] = this.#outputSize;
     const bytes = width * height * 4;
     const buffer = out !== undefined && out.byteLength >= bytes ? out : new Uint8Array(bytes);

@@ -216,6 +216,16 @@ rewriting a growing JSON once a second for the length of the recording.
   and moves run to run, while the same code measures 0.3 ms on the hardware it ships
   on. The allowance is stated where it is used, with what a regression would do to
   those numbers instead.
+- **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
+  no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
+  untouched — so a reused scratch array keeps the last picture it really read and
+  `Compositor.readPixels`'s in-place flip turns every other reading upside down. That
+  is how one GitHub macOS runner ("Apple Paravirtual device") produced a set of
+  plausible-looking wrong frame numbers and a control that could not see its own
+  black, on a commit whose other run of the same SHA passed. `readPixels` now throws
+  instead (an exporter would otherwise encode fabricated frames), the gate harness
+  aborts the run at the first sign of it, and `test/phase6-gate.test.ts` re-launches
+  **only** for that — never for a run that measured and came out over budget.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is

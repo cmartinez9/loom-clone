@@ -67,6 +67,26 @@ function log(message: string): void {
   window.gate.log(message);
 }
 
+/**
+ * Whether the driver has taken the WebGL context away, and where we noticed.
+ *
+ * A lost context is silent by design: every GL call becomes a no-op, `readPixels`
+ * leaves the caller's buffer exactly as it was, and `getParameter` answers `null`.
+ * On a shared paravirtual GPU that has happened here mid-run, and without this the
+ * gate went on measuring: the readback scratch kept the last frame it had really
+ * read, `compositor.readPixels`'s in-place flip turned every other reading upside
+ * down, and what came out was a plausible-looking set of wrong frame numbers and a
+ * control that could no longer see its own black. The instrument dying has to be
+ * distinguishable from a result, so the run is abandoned the moment it is seen.
+ */
+const lost: { where: string | null } = { where: null };
+
+function checkContext(gl: WebGL2RenderingContext, where: string): void {
+  if (lost.where === null && !gl.isContextLost()) return;
+  lost.where ??= where;
+  throw new Error(`the WebGL context was lost (noticed at ${lost.where}); the gate cannot measure`);
+}
+
 function snapshot(metrics: {
   count: number;
   maxMs: number;
@@ -225,8 +245,17 @@ async function run(): Promise<GateReport> {
     preserveDrawingBuffer: false,
   });
   if (gl === null) throw new Error('no WebGL2 context; the gate cannot run');
+  // Recorded rather than prevented: every GL object this run depends on — the
+  // program, the screen texture, the render target — goes with the context, so there
+  // is nothing to restore into. What matters is knowing, and knowing early.
+  canvas.addEventListener('webglcontextlost', () => {
+    lost.where ??= 'the webglcontextlost event';
+  });
   const compositor = new Compositor(gl, VIEWPORT);
-  log(`webgl2 renderer: ${describeRenderer(gl)}`);
+  // Read here rather than only at the end: a context lost mid-run answers `null` to
+  // every query, and "unknown" in the report should not be the first anyone hears.
+  const glRenderer = describeRenderer(gl);
+  log(`webgl2 renderer: ${glRenderer}`);
 
   const chosen = await chooseScheduler();
   const clock = counting(chosen.scheduler);
@@ -257,6 +286,10 @@ async function run(): Promise<GateReport> {
   const probe = new Uint8Array(PROBE_PX * PROBE_PX * 4);
   const content = contentRect(FIXTURE_SIZE, VIEWPORT);
   const centreLuma = (): number => {
+    // Before the read, not after: a no-op `readPixels` would leave `probe` holding
+    // the last picture it really saw, and every sample from then on would report a
+    // lit composite whatever was — or was not — on screen.
+    checkContext(gl, 'the settle probe');
     const x = Math.round(content.x + content.width / 2 - PROBE_PX / 2);
     // `readPixels` is bottom-up; the centre of the picture is the centre either way.
     const y = Math.round(VIEWPORT[1] - content.y - content.height / 2 - PROBE_PX / 2);
@@ -317,6 +350,7 @@ async function run(): Promise<GateReport> {
     const settleMs = performance.now() - startedAt;
     // One more frame so the composite reflects the settled ring, then read back.
     await clock.after(2);
+    checkContext(gl, `the readback for scrub target ${String(i)}`);
     compositor.readPixels(pixels);
     scrubChecks.push({
       targetSec,
@@ -344,6 +378,7 @@ async function run(): Promise<GateReport> {
     // efficiently; the frame-number band can.
     if (loop.time >= nextSampleAtSec && playSamples.length < 6) {
       const atSec = loop.time;
+      checkContext(gl, `the readback at ${atSec.toFixed(2)}s of playback`);
       compositor.readPixels(pixels);
       playSamples.push({
         atSec,
@@ -379,8 +414,9 @@ async function run(): Promise<GateReport> {
 
   return {
     ok: true,
+    contextLost: false,
     environment: {
-      glRenderer: describeRenderer(gl),
+      glRenderer,
       scheduler: chosen.mode,
       hardwareEncode: part.hardwareAcceleration,
       electron: navigator.userAgent,
@@ -438,6 +474,7 @@ run().then(
     return window.gate.finish({
       ok: false,
       error: message,
+      contextLost: lost.where !== null,
       environment: {
         glRenderer: 'unknown',
         scheduler: 'raf',

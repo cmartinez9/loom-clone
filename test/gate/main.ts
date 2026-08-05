@@ -81,6 +81,7 @@ function failureReport(error: string): GateReport {
   return {
     ok: false,
     error,
+    contextLost: false,
     environment: {
       glRenderer: 'unknown',
       scheduler: 'raf',

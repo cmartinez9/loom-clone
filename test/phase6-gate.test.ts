@@ -55,6 +55,24 @@ const FRAME_BUDGET_MS = 1000 / 60;
  */
 const STALL_MS = FRAME_BUDGET_MS * 3;
 const GATE_TIMEOUT_MS = 300_000;
+/** Per launch, so a hung run leaves room for the attempts after it. */
+const ATTEMPT_TIMEOUT_MS = 120_000;
+/**
+ * Launches allowed before a lost WebGL context is called a failure.
+ *
+ * The **only** thing retried, and nothing else is: a run that measured and came out
+ * over budget, or short of frames, or holding a leaked frame, is reported exactly
+ * once. A lost context is not a measurement — the driver takes the program, the
+ * textures and the render target away mid-run, every GL call after it is a no-op and
+ * every query answers `null`, so what the harness would report is whatever it was
+ * holding when the lights went out. Observed once on a GitHub macOS runner (an
+ * "Apple Paravirtual device"), on a commit whose other run of the same SHA passed.
+ *
+ * Two launches rather than one because a second loss in a row is no longer a shared
+ * host having a moment; two rather than five because retrying is how a real defect
+ * gets to look like weather.
+ */
+const GATE_ATTEMPTS = 2;
 
 /**
  * Frames a phase may spend over budget: one in a hundred, and never fewer than one.
@@ -142,7 +160,7 @@ async function runGate(): Promise<RunResult> {
         '--out',
         out,
         '--timeout',
-        String(GATE_TIMEOUT_MS - 30_000),
+        String(ATTEMPT_TIMEOUT_MS),
       ],
       {
         cwd: root,
@@ -176,9 +194,31 @@ async function runGate(): Promise<RunResult> {
   }
 }
 
+/**
+ * Launch the gate until it produces a measurement, or run out of attempts.
+ *
+ * See {@link GATE_ATTEMPTS}: a lost context is the one and only outcome that is
+ * retried, and the last report is returned either way so the assertions below judge
+ * a real run — including one whose context was lost twice, which they fail on.
+ */
+async function runGateUntilMeasured(): Promise<RunResult> {
+  let result = await runGate();
+  for (let attempt = 2; attempt <= GATE_ATTEMPTS && result.report.contextLost; attempt++) {
+    console.log(
+      `the gate's WebGL context was lost (${result.report.error ?? 'no detail'}); ` +
+        `launch ${String(attempt)} of ${String(GATE_ATTEMPTS)}`,
+    );
+    result = await runGate();
+  }
+  return result;
+}
+
 function describeRun(report: GateReport): string {
   return [
     '',
+    // First, and only when there is one: a run that gave up early reports zeroes for
+    // everything below, and the reason it gave up is the only line worth reading.
+    ...(report.error === undefined || report.error === '' ? [] : [`error        ${report.error}`]),
     `renderer     ${report.environment.glRenderer}`,
     `scheduler    ${report.environment.scheduler}   encode: ${report.environment.hardwareEncode}`,
     `fixture      ${String(report.fixture.width)}x${String(report.fixture.height)} ` +
@@ -213,12 +253,15 @@ describe('phase 6 gate: 4K scrub and play', () => {
   it(
     'holds the 16 ms frame budget at 1440p and never exceeds the ring cap',
     async () => {
-      const { report, exitCode } = await runGate();
+      const { report, exitCode } = await runGateUntilMeasured();
       const detail = describeRun(report);
       // Printed unconditionally: a gate whose numbers are only visible when it
       // fails tells you nothing about the headroom you had while it passed.
       console.log(detail);
 
+      // First, because it is the one thing that makes every number below a fiction
+      // rather than a reading — and by here it has already happened twice.
+      expect(report.contextLost, detail).toBe(false);
       expect(report.error ?? '', detail).toBe('');
       expect(report.ok, detail).toBe(true);
       expect(exitCode, detail).toBe(0);

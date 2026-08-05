@@ -65,6 +65,15 @@ export interface GateFixture {
 export interface GateReport {
   ok: boolean;
   error?: string;
+  /**
+   * The renderer's WebGL context was taken away mid-run.
+   *
+   * Not a result: it is the instrument dying, and every number after it is stale.
+   * The run is abandoned as soon as it is noticed and the gate re-runs, because a
+   * driver that drops a context on a shared paravirtual GPU is telling you about the
+   * host, not about this commit. `test/phase6-gate.test.ts` has the whole story.
+   */
+  contextLost: boolean;
   environment: GateEnvironment;
   fixture: GateFixture;
   viewport: [number, number];
