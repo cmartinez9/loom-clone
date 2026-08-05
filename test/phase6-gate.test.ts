@@ -34,6 +34,7 @@ import { describe, expect, it } from 'vitest';
 import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -185,6 +186,38 @@ interface RunResult {
   output: string;
 }
 
+/**
+ * The Electron executable — refusing to *fetch* it here.
+ *
+ * `require('electron')` installs the runtime when it is missing: ~300 MB downloaded
+ * and unzipped, synchronously, in whichever process asked first. This gate is that
+ * process on a fresh CI runner, and the seconds either side of the download are the
+ * ones it spends judging its worst frame against 16.7 ms with no allowance — three
+ * vCPUs, the writeback of 300 MB of dirty pages, and macOS validating the signature of
+ * an app bundle written moments ago the first time it is exec'd. None of that is the
+ * preview being slow, and all of it lands inside the window.
+ *
+ * So the runtime is installed with the dependencies instead
+ * (`scripts/install-electron-runtime.mjs`, run from `postinstall`), and if that did not
+ * happen this says so and names the command, rather than measuring through it. Same
+ * reason `scripts/smoke-capture.mjs` refuses to start without the screen-recording
+ * grant instead of failing three layers down.
+ */
+function electronBinary(): string {
+  const require = createRequire(import.meta.url);
+  const moduleDir = dirname(require.resolve('electron'));
+  const installed = existsSync(join(moduleDir, 'path.txt')) && existsSync(join(moduleDir, 'dist'));
+  if (!installed) {
+    throw new Error(
+      'the Electron runtime is not on disk, and fetching it from here would put a ' +
+        '~300 MB download and unzip inside the window this gate measures. Run ' +
+        '`node scripts/install-electron-runtime.mjs` (npm ci runs it) first.',
+    );
+  }
+  const binary = require('electron') as unknown as string;
+  return binary;
+}
+
 async function runGate(): Promise<RunResult> {
   const dir = await mkdtemp(join(tmpdir(), 'loom-gate-'));
   try {
@@ -195,8 +228,7 @@ async function runGate(): Promise<RunResult> {
     await mkdir(join(fixtureDir, 'media'), { recursive: true });
     await buildHarness(harnessDir);
 
-    const require = createRequire(import.meta.url);
-    const electron = require('electron') as unknown as string;
+    const electron = electronBinary();
 
     const child = spawn(
       electron,
