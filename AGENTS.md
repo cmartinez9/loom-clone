@@ -271,6 +271,18 @@ a gap lives in `recording.json`, never in the container.
   now read a slice (one row for the frame code, 8×8 px for the settle probe), which is
   what the settle probe's own comment had said to do since phase 6. Anything added to
   those windows has to be cheap, or it is not measuring the preview any more.
+  A genuine over-budget frame did eventually turn up on the fixed instrument — 17.60 ms
+  of 360 beside a 5.50 ms p99, on a host that also stretched the warmup frame to 39 ms —
+  and the decision taken was **not** to touch `FRAME_BUDGET_MS`, add a tolerance or
+  switch to a percentile. `test/gate/budget-control.ts` measures what the host itself
+  can sustain, in the same frames, and §8's bound is asserted exactly as written
+  wherever that control clears it. Two things keep it from being an escape hatch: on
+  the deferred branch the compositor is still held to the ceiling the control just
+  measured, and the harness runs the shipping `PreviewLoop` over a deliberately-slowed
+  compositor in the same run, which the gate requires to fail. **A control paced per
+  frame is a bug**: half a budget per frame is a whole thread on a 120 Hz panel, and
+  the version that did that starved decode until every scrub target timed out at four
+  seconds. It is paced by the wall clock instead.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the

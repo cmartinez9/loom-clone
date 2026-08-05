@@ -30,11 +30,28 @@
  *     either happens or does not — and a run that flashed the background through
  *     every backward scrub would otherwise pass 1, 2 and 3 unchanged. The detector
  *     has a control of its own at the end of the run.
+ *
+ * ## Making the *budget* mean something on a host that cannot hold it
+ *
+ * §8's bound is asserted on the worst frame with no allowance, which is right, and on
+ * a shared paravirtual CI host that bound has been decided by the host rather than by
+ * the renderer. So an environment control runs inside the measured phases' own frames —
+ * a fixed span of arithmetic with none of this code in it, taken a quarter of the wall
+ * clock at a time — and a second control runs a deliberately-slowed compositor through
+ * the same instrument so the first can never become an escape hatch.
+ * `budget-control.ts` is the whole argument; `test/phase6-gate.test.ts` is where both
+ * are judged.
  */
 
 import { Compositor, contentRect, describeRenderer } from '@loom/compositor';
 import { DemuxIndex, fetchByteRangeReader, hasWebCodecs, SourceReader } from '@loom/decode';
-import { PreviewLoop, type FrameScheduler } from '../../apps/renderer/src/preview/index.ts';
+import {
+  FRAME_BUDGET_MS,
+  PreviewLoop,
+  type FrameScheduler,
+  type PreviewSource,
+} from '../../apps/renderer/src/preview/index.ts';
+import { burn, controlSink, EnvironmentControl, NO_CONTROL } from './budget-control.ts';
 import { CODE_BIT_COUNT, codeCellCenter, FIXTURE_SIZE, generate4kPart } from './fixture.ts';
 import type { GateBridge, GateReport, PhaseMetrics, PlaySample, ScrubCheck } from './report.ts';
 
@@ -60,6 +77,18 @@ const PROBE_PX = 8;
  * exactly 0. The threshold sits far from both.
  */
 const BLACK_LUMA = 8;
+/**
+ * The control for the environment control: how far past the budget a deliberately
+ * slowed compositor is pushed, and for how many frames.
+ *
+ * Four budgets, not one over: the point is not that a slowed compositor scrapes past
+ * the line but that it fails on either branch of the judgement — including the branch
+ * that has just excused the host — and 66.67 ms clears the `TRACKS_CONTROL` ceiling on
+ * any control reading that could have got there. Twenty-four frames costs under two
+ * seconds and is enough for the gate to insist the phase really ran.
+ */
+const SLOW_COMPOSITE_MS = FRAME_BUDGET_MS * 4;
+const SLOW_CONTROL_FRAMES = 24;
 
 const logs: string[] = [];
 function log(message: string): void {
@@ -151,8 +180,20 @@ async function chooseScheduler(): Promise<{ scheduler: FrameScheduler; mode: 'ra
   };
 }
 
-/** A scheduler wrapper that lets the gate await "n more frames". */
-function counting(inner: FrameScheduler): {
+/**
+ * A scheduler wrapper that lets the gate await "n more frames", and offers each of
+ * them to the environment control.
+ *
+ * `afterFrame` is called immediately after the measured frame body returns, inside the
+ * same scheduler dispatch. That placement is the whole value of the control: it is
+ * exposed to the same host, in the same window, in the same frames as the measurement
+ * it is a control for, rather than describing a machine from a second earlier. See
+ * `budget-control.ts`.
+ */
+function counting(
+  inner: FrameScheduler,
+  afterFrame: () => void,
+): {
   scheduler: FrameScheduler;
   frames: () => number;
   after: (n: number) => Promise<void>;
@@ -163,6 +204,7 @@ function counting(inner: FrameScheduler): {
     request: (callback) =>
       inner.request((nowMs) => {
         callback(nowMs);
+        afterFrame();
         frames += 1;
         for (let i = waiters.length - 1; i >= 0; i--) {
           const waiter = waiters[i];
@@ -275,7 +317,11 @@ async function run(): Promise<GateReport> {
   log(`webgl2 renderer: ${glRenderer}`);
 
   const chosen = await chooseScheduler();
-  const clock = counting(chosen.scheduler);
+  // Armed per phase, below. Until then it is inert and costs a branch a frame.
+  const control = new EnvironmentControl();
+  const clock = counting(chosen.scheduler, () => {
+    control.tick();
+  });
   const trouble: { loopError: Error | null; stalled: string | null } = {
     loopError: null,
     stalled: null,
@@ -363,6 +409,14 @@ async function run(): Promise<GateReport> {
   await clock.after(WARMUP_FRAMES);
   const warmup = snapshot(loop.metrics);
   loop.metrics.reset();
+  // Armed at exactly the frame the scrub phase's own metrics start from, and offered
+  // every scheduler dispatch from here on — it spins on the ones a wall clock says to,
+  // not on every one, because the display's refresh rate is not this gate's to choose.
+  // What it does cost, a quarter of the thread, is deliberate: a control that costs
+  // nothing is never exposed to what it exists to catch, since a host stall lands
+  // inside a window in proportion to how much of the clock that window occupies.
+  // `budget-control.ts` argues both halves.
+  control.arm();
 
   // "The picture went black" only means something once there is a picture.
   const litAt = performance.now();
@@ -425,7 +479,9 @@ async function run(): Promise<GateReport> {
   }
   await clock.after(2);
   const scrub = snapshot(loop.metrics);
+  const scrubControl = control.snapshot();
   loop.metrics.reset();
+  control.reset();
 
   // ---- play --------------------------------------------------------------
   const hitsBefore = reader.stats.hits;
@@ -450,7 +506,65 @@ async function run(): Promise<GateReport> {
     }
   }
   const play = snapshot(loop.metrics);
+  const playControl = control.snapshot();
+  control.reset();
   loop.stop();
+  // Read here, not at the end: the slow-compositor control below moves them.
+  const playHits = reader.stats.hits - hitsBefore;
+  const playMisses = reader.stats.misses - missesBefore;
+
+  // ---- the control for the environment control ---------------------------
+  // The two phases above defer §8's absolute number to a host that can hold it, on the
+  // evidence of a spin measured in their own frames. That deferral is only honest
+  // while a compositor that has actually got slow still fails — otherwise the deferred
+  // branch is a way to pass by compositing badly on a busy machine, and the bound
+  // proves nothing anywhere. So the shipping `PreviewLoop` is run again here over a
+  // deliberately-slowed compositor: the real one, wrapped so that `render` burns
+  // {@link SLOW_COMPOSITE_MS} on top of the composite it just did, inside the frame
+  // body the gate measures. The environment control keeps spinning beside it, and
+  // `test/phase6-gate.test.ts` requires the same judgement that excused the host to
+  // fail this. Nothing in `packages/compositor` is touched; what is proved is the
+  // gate's judgement, which is the thing that changed.
+  //
+  // Its source is a stub that never has a frame, so `Compositor.render` holds the
+  // previous picture (§4.3) and the decoder, the ring and the reader's statistics are
+  // left exactly as playback finished with them.
+  const slowSource: PreviewSource = {
+    frameAt: () => null,
+    prime: () => Promise.resolve(),
+    release: () => undefined,
+    hasSourceFrameAt: () => false,
+    liveFrames: 0,
+    ringCapacity: reader.ringCapacity,
+  };
+  const slowLoop = new PreviewLoop({
+    compositor: {
+      render: (frames, state) => {
+        compositor.render(frames, state);
+        burn(SLOW_COMPOSITE_MS);
+      },
+      present: () => {
+        compositor.present();
+      },
+    },
+    screen: slowSource,
+    durationSec: part.durationSec,
+    scheduler: clock.scheduler,
+  });
+  control.arm();
+  slowLoop.start();
+  await clock.after(SLOW_CONTROL_FRAMES);
+  slowLoop.stop();
+  const slowFrames = snapshot(slowLoop.metrics);
+  const slowControl = control.snapshot();
+  control.disarm();
+  log(
+    `control: a compositor slowed by ${SLOW_COMPOSITE_MS.toFixed(2)} ms measured ` +
+      `${slowFrames.maxMs.toFixed(2)} ms worst over ${slowFrames.count} frames, beside a ` +
+      `${slowControl.maxMs.toFixed(2)} ms worst spin`,
+  );
+  // Read once, so nothing above can be optimised away as a loop with no result.
+  log(`control spins accumulated ${controlSink().toFixed(3)}`);
 
   // ---- the control for the count above -----------------------------------
   // Phase 6's first cut cleared the render target before it discovered it had no
@@ -501,13 +615,19 @@ async function run(): Promise<GateReport> {
     warmup,
     scrub,
     play,
+    control: { scrub: scrubControl, play: playControl },
+    slowCompositor: {
+      injectedMs: SLOW_COMPOSITE_MS,
+      frames: slowFrames,
+      control: slowControl,
+    },
     scrubChecks,
     settleSamples,
     settleBlackFrames,
     controlDetectsBlack,
     playSamples,
-    playHits: stats.hits - hitsBefore,
-    playMisses: stats.misses - missesBefore,
+    playHits,
+    playMisses,
     decodedFrames: stats.decoded,
     seeks: stats.seeks,
     bytesRead: stats.bytesRead,
@@ -562,6 +682,12 @@ run().then(
       warmup: EMPTY_METRICS,
       scrub: EMPTY_METRICS,
       play: EMPTY_METRICS,
+      control: { scrub: NO_CONTROL, play: NO_CONTROL },
+      slowCompositor: {
+        injectedMs: SLOW_COMPOSITE_MS,
+        frames: EMPTY_METRICS,
+        control: NO_CONTROL,
+      },
       scrubChecks: [],
       settleSamples: 0,
       settleBlackFrames: 0,

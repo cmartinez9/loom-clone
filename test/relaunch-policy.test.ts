@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { CONTROL_PERIOD_MS, CONTROL_TARGET_MS } from './gate/budget-control.ts';
 import { shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
 
@@ -23,6 +24,17 @@ const EMPTY_METRICS = {
   meanMs: 0,
   p50Ms: 0,
   p99Ms: 0,
+  overBudget: 0,
+};
+
+/** A control that found the host healthy: half a budget of arithmetic, taking it. */
+const HEALTHY_CONTROL = {
+  targetMs: CONTROL_TARGET_MS,
+  periodMs: CONTROL_PERIOD_MS,
+  count: 962,
+  maxMs: 8.6,
+  maxAt: 411,
+  meanMs: 8.4,
   overBudget: 0,
 };
 
@@ -56,6 +68,15 @@ function report(overrides: Partial<GateReport> = {}): GateReport {
     warmup: { ...EMPTY_METRICS, count: 12 },
     scrub: { ...EMPTY_METRICS, count: 112 },
     play: { ...EMPTY_METRICS, count: 962 },
+    control: {
+      scrub: { ...HEALTHY_CONTROL, count: 112, maxAt: 40 },
+      play: HEALTHY_CONTROL,
+    },
+    slowCompositor: {
+      injectedMs: 66.67,
+      frames: { ...EMPTY_METRICS, count: 24, maxMs: 67.2, maxAt: 3, overBudget: 24 },
+      control: { ...HEALTHY_CONTROL, count: 24, maxAt: 9 },
+    },
     scrubChecks: [],
     playSamples: [],
     settleSamples: 40,
@@ -89,6 +110,23 @@ describe('the gate relaunches only for a lost context', () => {
     ['black frames while settling', { settleBlackFrames: 7 }],
     ['a black-detection control that did not fire', { controlDetectsBlack: false }],
     ['mostly misses', { playHits: 10, playMisses: 900 }],
+    // The environment control is a *reading* too, on both of its branches. A host
+    // that could not hold the budget is reported once and a compositor that could not
+    // hold the ceiling that host earned fails once; neither buys another launch.
+    [
+      'on a host whose control could not hold the budget',
+      {
+        play: { ...EMPTY_METRICS, count: 962, maxMs: 21.4, overBudget: 2 },
+        control: {
+          scrub: { ...HEALTHY_CONTROL, count: 112, maxAt: 40 },
+          play: { ...HEALTHY_CONTROL, maxMs: 84.1, overBudget: 3 },
+        },
+      },
+    ],
+    [
+      'holding a slow-compositor control that did not fail',
+      { slowCompositor: { injectedMs: 0, frames: EMPTY_METRICS, control: HEALTHY_CONTROL } },
+    ],
     ['not ok', { ok: false }],
     ['an error', { error: 'no WebGL2 context; the gate cannot run' }],
     [

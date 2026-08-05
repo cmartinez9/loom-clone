@@ -3,13 +3,20 @@
  *
  * Shared by the harness that produces it, the Electron main that writes it out and
  * the vitest file that asserts on it. Dependency-free on purpose: it is imported
- * into three different bundles with three different module formats.
+ * into three different bundles with three different module formats. The one import
+ * below is `import type` and so is erased entirely — `ControlPhase` is declared beside
+ * the control that produces it, and re-exported here so a reader of the report shape
+ * has the whole document in one place.
  *
  * Architecture report §8, phase 6's gate: *"Scrub and play a 4K fixture with no
  * frame over 16 ms at 1440p viewport; live `VideoFrame` count never exceeds the ring
  * cap."* Both halves are here, and so is everything needed to tell a real pass from
  * a vacuous one — because a preview that renders nothing renders it very quickly.
  */
+
+import type { ControlPhase } from './budget-control.ts';
+
+export type { ControlPhase };
 
 export interface PhaseMetrics {
   /** Frames measured. */
@@ -70,6 +77,39 @@ export interface GateFixture {
   encodeMs: number;
 }
 
+/**
+ * The measured environment control, and the proof that it is not an escape hatch.
+ *
+ * `test/gate/budget-control.ts` is the whole argument. In short: §8's bound is the
+ * compositor's to meet on any host whose control clears it, and on a host whose
+ * control does not, the shortfall is reported with the measured figure and the
+ * compositor is held to the ceiling that control just demonstrated.
+ */
+export interface GateBudgetControl {
+  /** Measured in the scrub phase's own frames. */
+  scrub: ControlPhase;
+  /** Measured in the play phase's own frames. */
+  play: ControlPhase;
+}
+
+/**
+ * CONTROL. A deliberately-slowed compositor path, measured by the same instrument in
+ * the same run, with the environment control still spinning beside it.
+ *
+ * The control above defers §8's absolute number on a host that cannot hold it. This is
+ * what keeps that honest: a compositor that cannot hold the budget must fail the gate
+ * on any host that can — and must fail the tracking bound even on one that cannot.
+ * `test/phase6-gate.test.ts` asserts both branches of that.
+ */
+export interface GateSlowCompositor {
+  /** Milliseconds burned inside `render`, on top of the real composite. */
+  injectedMs: number;
+  /** What the shipping `PreviewLoop` measured while that was happening. */
+  frames: PhaseMetrics;
+  /** The environment control, measured in those same frames. */
+  control: ControlPhase;
+}
+
 export interface GateReport {
   ok: boolean;
   error?: string;
@@ -95,6 +135,10 @@ export interface GateReport {
   warmup: PhaseMetrics;
   scrub: PhaseMetrics;
   play: PhaseMetrics;
+  /** What this host could sustain, measured in the very frames above. */
+  control: GateBudgetControl;
+  /** CONTROL for that control: a compositor that cannot hold the budget. */
+  slowCompositor: GateSlowCompositor;
   scrubChecks: ScrubCheck[];
   /**
    * Composites sampled *while* each scrub was settling, not once it had settled.
