@@ -46,12 +46,17 @@
 import { Compositor, contentRect, describeRenderer } from '@loom/compositor';
 import { DemuxIndex, fetchByteRangeReader, hasWebCodecs, SourceReader } from '@loom/decode';
 import {
-  FRAME_BUDGET_MS,
   PreviewLoop,
   type FrameScheduler,
   type PreviewSource,
 } from '../../apps/renderer/src/preview/index.ts';
-import { burn, controlSink, EnvironmentControl, NO_CONTROL } from './budget-control.ts';
+import {
+  burn,
+  controlSink,
+  EnvironmentControl,
+  NO_CONTROL,
+  SLOW_COMPOSITE_MS,
+} from './budget-control.ts';
 import { CODE_BIT_COUNT, codeCellCenter, FIXTURE_SIZE, generate4kPart } from './fixture.ts';
 import type { GateBridge, GateReport, PhaseMetrics, PlaySample, ScrubCheck } from './report.ts';
 
@@ -78,16 +83,11 @@ const PROBE_PX = 8;
  */
 const BLACK_LUMA = 8;
 /**
- * The control for the environment control: how far past the budget a deliberately
- * slowed compositor is pushed, and for how many frames.
+ * How long the control for the environment control runs for.
  *
- * Four budgets, not one over: the point is not that a slowed compositor scrapes past
- * the line but that it fails on either branch of the judgement — including the branch
- * that has just excused the host — and 66.67 ms clears the `TRACKS_CONTROL` ceiling on
- * any control reading that could have got there. Twenty-four frames costs under two
- * seconds and is enough for the gate to insist the phase really ran.
+ * Twenty-four frames at {@link SLOW_COMPOSITE_MS} apiece costs under two seconds, and is
+ * enough for the gate to insist the phase really ran rather than judging two frames.
  */
-const SLOW_COMPOSITE_MS = FRAME_BUDGET_MS * 4;
 const SLOW_CONTROL_FRAMES = 24;
 
 const logs: string[] = [];

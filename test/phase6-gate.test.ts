@@ -271,6 +271,25 @@ function describeRun(report: GateReport): string {
   ].join('\n');
 }
 
+/**
+ * What the tracking ceiling made of the deliberately-slowed compositor, said out loud
+ * without failing on it.
+ *
+ * Only ever called on the branch where the slow phase's own control was stalled, and
+ * so where the ceiling that control earned may legitimately sit above the 66.67 ms the
+ * slowed path burns. Which of the two happened is worth recording — a ceiling that
+ * still caught the slowed path on a stalled host is the deferred branch working — but
+ * neither outcome is a verdict on this commit, so both come back as a line rather than
+ * as a thrown assertion.
+ */
+function trackingOutcome(evidence: BudgetEvidence): string {
+  try {
+    return `that ceiling did not reach it: ${expectTracksControl(evidence)}`;
+  } catch (error) {
+    return `that ceiling caught it anyway: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 describe('phase 6 gate: 4K scrub and play', () => {
   it(
     'holds the 16 ms frame budget at 1440p and never exceeds the ring cap',
@@ -363,22 +382,47 @@ describe('phase 6 gate: 4K scrub and play', () => {
       const slow = report.slowCompositor;
       expect(slow.frames.count, detail).toBeGreaterThanOrEqual(12);
       expect(slow.control.count, detail).toBeGreaterThanOrEqual(12);
+      // §8's number, against the slowed path, on every host and both branches. The
+      // harness burns four budgets inside `render` on each of these frames, so this
+      // pair is deterministic rather than a matter of the host's mood: the only way it
+      // stops holding is the slowed path stopping being slow, which is exactly how
+      // this proof would rot into a formality nobody noticed had stopped proving
+      // anything.
+      expect(slow.frames.overBudget, detail).toBeGreaterThan(0);
+      expect(slow.frames.maxMs, detail).toBeGreaterThan(FRAME_BUDGET_MS);
+
+      const slowEvidence: BudgetEvidence = {
+        what: 'the deliberately-slowed compositor',
+        budgetMs: FRAME_BUDGET_MS,
+        measured: slow.frames,
+        control: slow.control,
+      };
       if (environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)) {
-        // The host can hold the budget, so §8's number is what a slow compositor is
-        // held to — and it fails on it, on the same two assertions as above.
-        expect(slow.frames.overBudget, detail).toBeGreaterThan(0);
-        expect(slow.frames.maxMs, detail).toBeGreaterThan(FRAME_BUDGET_MS);
+        // The host held the budget through this phase too, so the ceiling its control
+        // earned is at most `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 20 ms
+        // against 66.67 ms of injected burn. The deferred branch's bound is therefore
+        // proved here as well, and not only §8's absolute one.
+        expect(() => expectTracksControl(slowEvidence), detail).toThrow(
+          /cannot hold this machine's own ceiling/,
+        );
       } else {
-        // And where it cannot, the compositor is still held to the ceiling the control
-        // just measured — which a compositor this slow blows straight through.
-        expect(() =>
-          expectTracksControl({
-            what: 'the deliberately-slowed compositor',
-            budgetMs: FRAME_BUDGET_MS,
-            measured: slow.frames,
-            control: slow.control,
-          }),
-        ).toThrow(/cannot hold this machine's own ceiling/);
+        // And where this phase's own control was stalled, that tracking bound is
+        // reported rather than required of it. A control reading past
+        // `SLOW_COMPOSITE_MS / TRACKS_CONTROL` — 44.44 ms, well inside what these
+        // runners have done to a spin — earns a ceiling above the 66.67 ms this path
+        // burns, so demanding the throw would fail the gate for the host's stall,
+        // which is the one thing the environment control exists to stop. The absolute
+        // pair above still holds, and `test/budget-control.test.ts` pins both sides of
+        // that boundary so the branch cannot quietly widen.
+        shortfalls.push(
+          `the slow-compositor control ran beside a host that could not sustain the budget in ` +
+            `those frames (worst spin ${slow.control.maxMs.toFixed(2)} ms of a ` +
+            `${slow.control.targetMs.toFixed(2)} ms target), so its tracking ceiling is reported ` +
+            `rather than required — ${trackingOutcome(slowEvidence)}. §8's own number was ` +
+            `asserted against the slowed path either way, and ${String(slow.frames.overBudget)} of ` +
+            `${String(slow.frames.count)} frames missed it, the worst by ` +
+            `${(slow.frames.maxMs - FRAME_BUDGET_MS).toFixed(2)} ms.`,
+        );
       }
 
       for (const shortfall of shortfalls) await annotate(shortfall, 'warning');

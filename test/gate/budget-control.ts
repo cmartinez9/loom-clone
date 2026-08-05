@@ -36,8 +36,12 @@
  * ({@link expectTracksControl}), so a compositor that has actually got slow fails here
  * on any host, fast or slow. Only §8's *absolute* number is ever deferred, and only on
  * the evidence of a measurement taken in the same frames. `test/phase6-gate.test.ts`
- * proves both branches against a deliberately-slowed compositor path measured in the
- * same run, and `test/budget-control.test.ts` proves the policy itself.
+ * runs a deliberately-slowed compositor through the same instrument in the same run and
+ * requires it to miss §8's number whichever branch this host took, and to miss the
+ * tracking ceiling as well wherever that phase's own control cleared the budget — the
+ * one place the ceiling is guaranteed to sit below {@link SLOW_COMPOSITE_MS}, since a
+ * stalled control can earn one above it. `test/budget-control.test.ts` proves the policy
+ * itself, that boundary included.
  *
  * ## Why a spin, and why half a budget of it
  *
@@ -115,6 +119,24 @@ export const CLEARS_BUDGET = 0.8;
  * reading that could have excused it.
  */
 export const TRACKS_CONTROL = 1.5;
+
+/**
+ * The control for this control: how far past the budget the harness pushes a
+ * deliberately-slowed compositor, burned inside `render` on every frame of that phase.
+ *
+ * Four budgets, not one over. The point is not that a slowed compositor scrapes past the
+ * line but that it fails whichever branch of the judgement above the host puts it on —
+ * §8's absolute number on any host at all, and additionally {@link TRACKS_CONTROL}'s
+ * ceiling wherever the phase's own control cleared the budget, since the most such a
+ * control can earn is `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` and this clears
+ * that by more than three times.
+ *
+ * It lives here, beside the two constants it has to stay in that relation to, rather
+ * than in the harness that burns it: the relation is what `test/phase6-gate.test.ts`'s
+ * slow-compositor branch turns on, and `test/budget-control.test.ts` pins it from this
+ * declaration rather than from a copy of the number.
+ */
+export const SLOW_COMPOSITE_MS = FRAME_BUDGET_MS * 4;
 
 /** One phase's worth of control samples, measured beside that phase's frames. */
 export interface ControlPhase {

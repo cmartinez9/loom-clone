@@ -97,9 +97,11 @@ export interface GateBudgetControl {
  * the same run, with the environment control still spinning beside it.
  *
  * The control above defers §8's absolute number on a host that cannot hold it. This is
- * what keeps that honest: a compositor that cannot hold the budget must fail the gate
- * on any host that can — and must fail the tracking bound even on one that cannot.
- * `test/phase6-gate.test.ts` asserts both branches of that.
+ * what keeps that honest: a compositor that cannot hold the budget must miss §8's number
+ * on every host, whichever branch that host took — and must miss the measured ceiling
+ * too wherever the host was well enough for that ceiling to be able to see it.
+ * `test/phase6-gate.test.ts` asserts the first on both branches and the second on the
+ * branch where it holds; `test/budget-control.test.ts` pins where that is.
  */
 export interface GateSlowCompositor {
   /** Milliseconds burned inside `render`, on top of the real composite. */

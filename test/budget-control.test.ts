@@ -29,14 +29,19 @@ import {
   environmentSustainsBudget,
   expectTracksControl,
   NO_CONTROL,
+  SLOW_COMPOSITE_MS,
   TRACKS_CONTROL,
   type BudgetEvidence,
   type ControlPhase,
 } from './gate/budget-control.ts';
 
 const FRAME_BUDGET_MS = 1000 / 60;
-/** What the harness's deliberately-slowed compositor burns inside `render`. */
-const SLOWED_MS = FRAME_BUDGET_MS * 4;
+/**
+ * What the harness's deliberately-slowed compositor burns inside `render` — the
+ * declaration itself, not a copy of the number, because the boundary this file pins is
+ * between that burn and the two policy constants beside it.
+ */
+const SLOWED_MS = SLOW_COMPOSITE_MS;
 
 function control(overrides: Partial<ControlPhase> = {}): ControlPhase {
   return { ...NO_CONTROL, count: 360, maxMs: 8.4, maxAt: 100, meanMs: 8.36, ...overrides };
@@ -146,6 +151,43 @@ describe('the frame budget is enforced against a measured environment', () => {
     expect(
       expectTracksControl(evidence({ maxMs: 40 * TRACKS_CONTROL - 0.1 }, control({ maxMs: 40 }))),
     ).toContain('this environment cannot sustain');
+  });
+
+  /**
+   * The limit of that half, and why the gate does not demand it of a host whose own
+   * control was stalled.
+   *
+   * The case above has both numbers absorbing the same stall, which is the ordinary
+   * shape — the spin runs immediately after the frame body, so a host that stretched one
+   * stretched the other. It is not the only shape, and {@link TRACKS_CONTROL} exists
+   * precisely because a stall can land in one and not the other. Past
+   * `SLOWED_MS / TRACKS_CONTROL` a stall in the control *alone* lifts the ceiling above
+   * everything the slowed path burns, so a gate that required the throw there would fail
+   * for the host's stall — the one thing this file exists to stop. §8's absolute number
+   * still catches the slowed path, and that is what `test/phase6-gate.test.ts` asserts on
+   * both of its branches, with the throw kept to the branch below where it cannot go
+   * wrong.
+   */
+  it('CONTROL: a stall in the control alone lifts the ceiling past the slowed path', () => {
+    const beyond = control({ maxMs: SLOWED_MS / TRACKS_CONTROL + 1, overBudget: 6 });
+    expect(environmentSustainsBudget(beyond, FRAME_BUDGET_MS)).toBe(false);
+    expect(expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, beyond))).toContain(
+      'this environment cannot sustain',
+    );
+    // Which is why the absolute pair is what the gate asserts against the slowed path
+    // on every host: four budgets burned inside `render` miss §8's number regardless of
+    // what the machine was doing beside them.
+    expect(SLOWED_MS).toBeGreaterThan(FRAME_BUDGET_MS);
+
+    // And on the branch where the throw *is* required — the slow phase's own control
+    // cleared the budget — no reading can lift the ceiling that far: the most one can
+    // earn there is 20 ms, against 66.67 ms of burn.
+    const clearing = control({ maxMs: FRAME_BUDGET_MS * CLEARS_BUDGET });
+    expect(environmentSustainsBudget(clearing, FRAME_BUDGET_MS)).toBe(true);
+    expect(FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL).toBeLessThan(SLOWED_MS);
+    expect(() =>
+      expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, clearing)),
+    ).toThrow(/cannot hold this machine's own ceiling/);
   });
 
   it('CONTROL: a control that measured nothing enforces the bound rather than lifting it', () => {
