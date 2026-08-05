@@ -1,7 +1,7 @@
 /**
  * Regenerate the encoded-frame fixture the capture tests replay.
  *
- *   node scripts/make-capture-fixture.mjs [--out <path>] [--seconds 10] [--size 320x180]
+ *   node scripts/make-capture-fixture.mjs [--out <path>] [--seconds 10] [--size 320x180] [--fps 30]
  *
  * The crash gate has to feed the *production* writer real encoded H.264, and it
  * has to do it on a machine with no display, no screen-recording permission and no

@@ -34,11 +34,12 @@
  *
  * Phase 0 shipped `library` and `project`. Phase 1 adds `recorder` — `start`,
  * `stop` and `onStatus`, with the `CaptureOptions` and `RecorderStatus` the screen
- * spine actually needs. `devices` and `preflight` belong to phase 2 (permissions
- * and first run) and `export` to phase 8; both stay absent rather than stubbed,
- * because a guessed shape that thirteen workers compile against is worse than no
- * shape. Adding a namespace is three lines here, one handler in main, and one line
- * in the preload.
+ * spine actually needs, plus an `open` the §1.4 sketch has no name for: the library
+ * asks for the HUD, and the HUD owns the recording (§1.2). `devices` and `preflight`
+ * belong to phase 2 (permissions and first run) and `export` to phase 8; both stay
+ * absent rather than stubbed, because a guessed shape that thirteen workers compile
+ * against is worse than no shape. Adding a namespace is three lines here, one handler
+ * in main, and one line in the preload.
  *
  * ## What must never cross
  *

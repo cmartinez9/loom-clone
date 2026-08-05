@@ -14,12 +14,12 @@
  *
  * ## Two source modes, and exactly what each one proves
  *
- * - **`--source screen`** (the default) is the whole leg: `desktopCapturer`
+ * - **the default, with no flag,** is the whole leg: `desktopCapturer`
  *   enumeration, `setDisplayMediaRequestHandler` authorising the capture frame, and
  *   `getDisplayMedia` handing back a real ScreenCaptureKit track. It needs the
  *   Screen Recording grant and refuses to run without it, because a run that starts
  *   without it produces black frames or no frames and looks like a bug in our code.
- * - **`--source synthetic`** replaces **only** the display-source acquisition — one
+ * - **`--synthetic`** replaces **only** the display-source acquisition — one
  *   assignment to `navigator.mediaDevices.getDisplayMedia`, evaluated in the real
  *   capture page — with a canvas stream. Everything downstream is the shipped path:
  *   the same `MediaStreamTrackProcessor` loop, the same `VideoEncoder`, the same

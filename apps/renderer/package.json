@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Renderer windows: library today; HUD, overlay and editor as later phases land.",
+  "description": "Renderer windows: library, recorder HUD and the hidden capture page today; overlay and editor as later phases land.",
   "dependencies": {
     "@loom/design": "0.1.0",
     "@loom/format": "0.1.0",

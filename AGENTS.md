@@ -163,12 +163,12 @@ describe them as working:
    frames.** `windows.test.ts` asserts the flag is set on the role; nothing has
    watched the pixels.
 
-Why they are open: a machine that has not granted Screen Recording to the *terminal*
+Why they are open: a machine that has not granted Screen Recording to the _terminal_
 cannot run the leg that would prove any of them, and granting it to a dev binary
 proves the wrong thing anyway, because a dev build inherits the terminal's TCC (§7,
 trap 6) — a pass there would not predict a packaged build.
 
-What *is* covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
+What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
 replaces only `navigator.mediaDevices.getDisplayMedia`, in the real capture page, and
 drives the shipped `MediaStreamTrackProcessor` → `VideoEncoder` → encoded-chunk IPC →
 `ProjectStore` → fragmented MP4 → finalize path end to end. Without `--synthetic` the

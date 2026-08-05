@@ -1,7 +1,7 @@
 /**
  * Record once through the real capture page, and say what came out.
  *
- *   npm run build && node scripts/smoke-capture.mjs [--seconds 4] [--synthetic]
+ *   npm run build && node scripts/smoke-capture.mjs [--seconds 4] [--synthetic] [--keep]
  *
  * The automated gate replays encoded frames from a fixture, because a CI runner has
  * no display, no GPU and no Screen Recording grant. That covers everything from the
