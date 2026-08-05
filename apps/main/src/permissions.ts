@@ -94,7 +94,27 @@ export interface PermissionManagerOptions {
    * class's.
    */
   onSetupComplete: () => void;
+  /**
+   * Bring the first-run explanation back, after setup has been completed once.
+   *
+   * A user who pressed Continue with Screen Recording refused has a recorder that
+   * cannot record; without this there is no route back to the explanation or the
+   * System Settings deep links. Injected for the same reason as
+   * {@link onSetupComplete}.
+   */
+  onOpenSetup: () => void;
 }
+
+/**
+ * How long a click-tap answer is reused before the helper is run again.
+ *
+ * The other three legs of a probe are `systemPreferences` reads; this one spawns the
+ * native sampler. `refresh()` runs on every window focus, so without a window here
+ * alt-tabbing forks a process per switch — beside the helper a live recording is
+ * already running. Nothing can change the answer without `axTrusted` changing or time
+ * passing, and both invalidate it.
+ */
+const TAP_PROBE_TTL_MS = 3000;
 
 /**
  * Read one of the three media grants. macOS is the only source; nothing here
@@ -152,14 +172,18 @@ export class PermissionManager {
    * Settings writes started by this class, serialized.
    *
    * One chain, so a relaunch can wait for all of them without knowing which are in
-   * flight, and so two asks in quick succession cannot interleave two read-modify-
-   * writes of the same file.
+   * flight. Ordering against every *other* settings write is `ProjectStore`'s, which
+   * serializes the read-modify-write itself — this chain is about knowing when ours
+   * have landed, not about who wins.
    */
   private pending: Promise<unknown> = Promise.resolve();
+  /** The last click-tap answer and when it was taken. See {@link TAP_PROBE_TTL_MS}. */
+  private tapProbe: { axTrusted: boolean; tapLive: boolean | null; atMs: number } | null = null;
+  /** A tap probe already running, so concurrent probes share one helper process. */
+  private tapProbeInFlight: Promise<boolean | null> | null = null;
 
   constructor(options: PermissionManagerOptions) {
     this.options = options;
-    this.accessibilityAsked = options.store.setup.accessibilityOpenedAt !== null;
   }
 
   // -------------------------------------------------------------------- probe
@@ -172,10 +196,11 @@ export class PermissionManager {
    * skipped entirely when no probe is wired.
    */
   async probe(): Promise<PermissionReport> {
+    const axTrusted = readAxTrusted();
     const accessibility: AccessibilityDetail = {
-      axTrusted: readAxTrusted(),
-      tapLive: await this.probeTap(),
-      settingsOpened: this.accessibilityAsked,
+      axTrusted,
+      tapLive: await this.probeTap(axTrusted),
+      settingsOpened: this.accessibilityEverAsked(),
     };
 
     const report: PermissionReport = {
@@ -207,22 +232,54 @@ export class PermissionManager {
   }
 
   /**
+   * Whether this app has ever pointed the user at the Accessibility pane — in this
+   * session, or in one before it.
+   *
+   * Read on every probe rather than latched once. `settings.json` is loaded
+   * asynchronously at launch, so anything that reads it at construction time is
+   * reading the fresh-install default, and the relaunch offer this field exists to
+   * survive is exactly what would be lost.
+   */
+  private accessibilityEverAsked(): boolean {
+    return this.accessibilityAsked || this.options.store.setup.accessibilityOpenedAt !== null;
+  }
+
+  /**
    * Whether a live event tap is delivering. `null` when nothing looked.
    *
    * A probe that throws returns `null`, not `false`: "the helper fell over" and "the
    * tap is dead" are different diagnoses, and the second one drives a relaunch
    * prompt that would be wrong for the first.
+   *
+   * Coalesced and briefly cached, because this is the one leg of a probe that costs a
+   * process (see {@link TAP_PROBE_TTL_MS}). Never cached across a change in
+   * `axTrusted`: that is the input the answer depends on.
    */
-  private async probeTap(): Promise<boolean | null> {
+  private async probeTap(axTrusted: boolean): Promise<boolean | null> {
     const probe = this.options.clickTapProbe;
     if (probe === null || probe === undefined) return null;
-    try {
-      const result = await probe();
-      return result.clicks.tapEnabled;
-    } catch (error) {
-      console.error('[permissions] click-tap probe failed:', error);
-      return null;
+
+    const cached = this.tapProbe;
+    if (
+      cached !== null &&
+      cached.axTrusted === axTrusted &&
+      Date.now() - cached.atMs < TAP_PROBE_TTL_MS
+    ) {
+      return cached.tapLive;
     }
+
+    this.tapProbeInFlight ??= probe()
+      .then((result) => result.clicks.tapEnabled)
+      .catch((error: unknown) => {
+        console.error('[permissions] click-tap probe failed:', error);
+        return null;
+      })
+      .then((tapLive: boolean | null) => {
+        this.tapProbe = { axTrusted, tapLive, atMs: Date.now() };
+        this.tapProbeInFlight = null;
+        return tapLive;
+      });
+    return this.tapProbeInFlight;
   }
 
   // ------------------------------------------------------------------ request
@@ -436,6 +493,10 @@ export class PermissionManager {
       },
     );
 
+    ipcMain.on(CHANNEL.setupOpen, () => {
+      this.options.onOpenSetup();
+    });
+
     ipcMain.handle(CHANNEL.setupState, (): SetupState => this.options.store.setup);
 
     ipcMain.handle(CHANNEL.setupComplete, async (): Promise<void> => {
@@ -453,6 +514,7 @@ export class PermissionManager {
       CHANNEL.permissionsOpenSettings,
       CHANNEL.permissionsRelaunch,
       CHANNEL.recorderPreflight,
+      CHANNEL.setupOpen,
       CHANNEL.setupState,
       CHANNEL.setupComplete,
     ]) {

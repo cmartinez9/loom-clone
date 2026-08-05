@@ -95,6 +95,14 @@ function row(facts: Readonly<PermissionFacts>, report: PermissionReport): HTMLLI
   li.className = 'perm';
   li.dataset['state'] = status;
   li.dataset['optional'] = String(!facts.required);
+  // Accessibility's wire status is honest and blunt: `AXIsProcessTrusted()` is a
+  // boolean, so "refused" and "never asked" are both `denied`. The row is styled from
+  // the conclusion instead, because a first-run screen that paints the most invasive
+  // ask in refusal red before it has been asked is telling the user something that
+  // has not happened.
+  if (facts.kind === 'accessibility') {
+    li.dataset['ax'] = concludeAccessibility(report.accessibility);
+  }
 
   const granted = status === 'granted';
   const glyph = document.createElement('span');

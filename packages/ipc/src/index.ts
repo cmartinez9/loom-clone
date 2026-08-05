@@ -543,6 +543,15 @@ export interface PermissionsApi {
 export interface SetupApi {
   state(): Promise<SetupState>;
   /**
+   * Reopen the first-run window. Send-only, like `recorder.open`.
+   *
+   * Setup is not only a first run. A user who pressed Continue with Screen Recording
+   * refused has a recorder that cannot record, and the explanation and the System
+   * Settings deep links they need are all on that window — so the library keeps a
+   * route back to it rather than making a reinstall the only way there.
+   */
+  open(): void;
+  /**
    * Mark first-run setup finished and hand over to the library.
    *
    * Finished, not satisfied: the captain's decision is explicit that declining the
@@ -708,6 +717,8 @@ export const CHANNEL = {
   /** event: main -> renderer, on focus after a status changed */
   permissionsChanged: 'loom.permissions.changed',
 
+  /** send-only */
+  setupOpen: 'loom.setup.open',
   setupState: 'loom.setup.state',
   setupComplete: 'loom.setup.complete',
 
@@ -760,6 +771,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.libraryReveal,
   CHANNEL.permissionsOpenSettings,
   CHANNEL.permissionsRelaunch,
+  CHANNEL.setupOpen,
   CHANNEL.recorderOpen,
   CHANNEL.recorderNoticeHeight,
   CHANNEL.captureMeta,

@@ -94,16 +94,16 @@ let store: ProjectStore;
 let relaunches = 0;
 let broadcasts = 0;
 let handovers = 0;
+let setupOpens = 0;
+
+type TapProbe = () => Promise<{ clicks: { axTrusted: boolean; tapEnabled: boolean } }>;
 
 function makeManager(
-  clickTapProbe:
-    | (() => Promise<{
-        clicks: { axTrusted: boolean; tapEnabled: boolean };
-      }>)
-    | null = null,
+  clickTapProbe: TapProbe | null = null,
+  over: ProjectStore = store,
 ): InstanceType<typeof PermissionManager> {
   return new PermissionManager({
-    store,
+    store: over,
     clickTapProbe,
     relaunchApp: () => {
       relaunches += 1;
@@ -114,6 +114,19 @@ function makeManager(
     onSetupComplete: () => {
       handovers += 1;
     },
+    onOpenSetup: () => {
+      setupOpens += 1;
+    },
+  });
+}
+
+/** A store over the same settings file, as the process that comes back builds one. */
+function reopenStore(): ProjectStore {
+  return new ProjectStore({
+    recordingsRoot: join(scratch, 'recordings'),
+    settingsPath: join(scratch, 'settings.json'),
+    appVersion: '0.1.0',
+    trash: () => Promise.resolve(),
   });
 }
 
@@ -130,14 +143,10 @@ beforeEach(async () => {
   relaunches = 0;
   broadcasts = 0;
   handovers = 0;
+  setupOpens = 0;
 
   scratch = await mkdtemp(join(tmpdir(), 'loom-perm-'));
-  store = new ProjectStore({
-    recordingsRoot: join(scratch, 'recordings'),
-    settingsPath: join(scratch, 'settings.json'),
-    appVersion: '0.1.0',
-    trash: () => Promise.resolve(),
-  });
+  store = reopenStore();
   await store.loadSettings();
 });
 
@@ -193,6 +202,37 @@ describe('probing', () => {
     expect(report.accessibility.tapLive).toBeNull();
   });
 
+  it('does not fork a helper per probe', async () => {
+    // `refresh()` runs on every window focus and the tap leg spawns the native
+    // sampler, so an unguarded probe forks a process per alt-tab — during a recording,
+    // beside the helper the sampler is already running. Concurrent probes share one
+    // run, and a probe moments later reuses its answer.
+    let spawns = 0;
+    const manager = makeManager(() => {
+      spawns += 1;
+      return Promise.resolve({ clicks: { axTrusted: false, tapEnabled: false } });
+    });
+
+    await Promise.all([manager.probe(), manager.probe(), manager.probe()]);
+    await manager.probe();
+
+    expect(spawns).toBe(1);
+  });
+
+  it('re-runs the tap probe when axTrusted changes, because that is its input', async () => {
+    let spawns = 0;
+    const manager = makeManager(() => {
+      spawns += 1;
+      return Promise.resolve({ clicks: { axTrusted: harness.axTrusted, tapEnabled: true } });
+    });
+
+    await manager.probe();
+    harness.axTrusted = true;
+    await manager.probe();
+
+    expect(spawns).toBe(2);
+  });
+
   it('marks a dev binary untrustworthy however good the answers look', async () => {
     harness.packaged = false;
     for (const kind of ['screen', 'camera', 'microphone']) harness.media.set(kind, 'granted');
@@ -227,8 +267,17 @@ describe('requesting', () => {
 
   it('remembers the ask across a relaunch, which is the whole point of persisting it', async () => {
     await makeManager().request('accessibility');
-    // A fresh manager over the same settings — i.e. the process that comes back.
-    const afterRestart = makeManager();
+
+    // The process that comes back, built the way `index.ts` builds one: a fresh store
+    // over the same settings file, and — the part that matters — a manager
+    // constructed *before* those settings have been read, because loading them is
+    // asynchronous and the manager is not. Reading `store.setup` at construction
+    // therefore reads the fresh-install default, and this launch shows the user
+    // "Allow" again instead of the relaunch they just performed.
+    const restarted = reopenStore();
+    const afterRestart = makeManager(null, restarted);
+    await restarted.loadSettings();
+
     const report = await afterRestart.probe();
     expect(report.accessibility.settingsOpened).toBe(true);
   });
@@ -326,6 +375,7 @@ describe('the ipc surface', () => {
     for (const channel of owned) expect(harness.handlers.has(channel)).toBe(true);
     expect(harness.listeners.has(CHANNEL.permissionsOpenSettings)).toBe(true);
     expect(harness.listeners.has(CHANNEL.permissionsRelaunch)).toBe(true);
+    expect(harness.listeners.has(CHANNEL.setupOpen)).toBe(true);
 
     manager.uninstall();
     for (const channel of owned) expect(harness.handlers.has(channel)).toBe(false);
@@ -346,6 +396,14 @@ describe('the ipc surface', () => {
     await expect(Promise.resolve(handler?.({}, 'bluetooth'))).rejects.toThrow(
       /unknown permission/i,
     );
+  });
+
+  it('reopens setup on request, so a refusal is not a dead end', () => {
+    // A user who pressed Continue with Screen Recording refused has a recorder that
+    // cannot record. The library's route back is this channel.
+    makeManager().install();
+    harness.listeners.get(CHANNEL.setupOpen)?.[0]?.({});
+    expect(setupOpens).toBe(1);
   });
 
   it('persists setup completion before handing over to the library', async () => {

@@ -57,7 +57,19 @@
           <span data-ic="restart" data-sz="15"></span>
           Refresh
         </button>
+        <button class="btn btn-sm btn-ghost" id="permissions" type="button">
+          <span data-ic="lock" data-sz="15"></span>
+          Permissions
+        </button>
       </div>
+
+      <!--
+        Shown only when a required grant is missing. `recorder.preflight` is what
+        decides that, so this window and the recorder agree about whether a recording
+        could start — and a user whose Continue left Screen Recording refused is told
+        why here rather than by a Start button that does nothing.
+      -->
+      <div class="perm-banner" id="perm-banner" role="status" hidden></div>
 
       <ul class="rows" id="rows" aria-live="polite"></ul>
     </main>

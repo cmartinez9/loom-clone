@@ -94,6 +94,24 @@ describe('settings', () => {
       await rm(base, { recursive: true, force: true });
     }
   });
+
+  it('merges two setup patches started at once instead of losing one', async () => {
+    // "Open System Settings" is send-only and returns immediately; "Continue" is the
+    // adjacent button. Without a queue both patches read the same snapshot, and
+    // whichever lands second writes a document with the other's field still `null` —
+    // either an Accessibility ask the app has forgotten, or a first run it shows again.
+    await withStore(async ({ store }) => {
+      await store.loadSettings();
+      await Promise.all([
+        store.updateSetup({ accessibilityOpenedAt: '2026-08-05T00:00:00.000Z' }),
+        store.updateSetup({ completedAt: '2026-08-05T00:00:01.000Z' }),
+      ]);
+      expect(store.setup).toEqual({
+        completedAt: '2026-08-05T00:00:01.000Z',
+        accessibilityOpenedAt: '2026-08-05T00:00:00.000Z',
+      });
+    });
+  });
 });
 
 describe('library', () => {

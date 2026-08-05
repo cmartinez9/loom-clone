@@ -97,29 +97,46 @@ const recorder = new RecorderSession({
   osVersion: process.getSystemVersion(),
 });
 
-const permissions = new PermissionManager({
-  store,
-  // Phase 5's `probeInput`, which is the whole of the wiring. It runs the native
-  // helper once, with no side effects and no prompt, and reports whether a real
-  // `CGEventTap` can be built — the half of the Accessibility answer that
-  // `AXIsProcessTrusted()` cannot give, because the tap API succeeds without the
-  // permission and then delivers nothing.
-  //
-  // The helper path is passed rather than left to the package's default: only
-  // `dist/` knows its own layout, and inside a packaged app the binary lives in
-  // `app.asar.unpacked/` (`input-sampler.ts`).
-  clickTapProbe: () => probeInput({ helperPath: helperPathFor(distRoot) }),
-  relaunchApp: relaunchGracefully,
-  broadcast: (report: PermissionReport) => {
-    for (const window of windows.all()) {
-      window.webContents.send(CHANNEL.permissionsChanged, report);
-    }
-  },
-  onSetupComplete: () => {
-    windows.show('library');
-    windows.get('setup')?.close();
-  },
-});
+/**
+ * The permission manager — built inside {@link main}, after `settings.json` has been
+ * read, and never at module scope.
+ *
+ * That is ordering, not style. The manager answers "have we already sent this user to
+ * the Accessibility pane" from `store.setup`, and a store that has not loaded yet
+ * answers with the fresh-install default. A manager built before the load would come
+ * back from the relaunch it just asked for having forgotten that it asked.
+ */
+function createPermissionManager(): PermissionManager {
+  return new PermissionManager({
+    store,
+    // Phase 5's `probeInput`, which is the whole of the wiring. It runs the native
+    // helper once, with no side effects and no prompt, and reports whether a real
+    // `CGEventTap` can be built — the half of the Accessibility answer that
+    // `AXIsProcessTrusted()` cannot give, because the tap API succeeds without the
+    // permission and then delivers nothing.
+    //
+    // The helper path is passed rather than left to the package's default: only
+    // `dist/` knows its own layout, and inside a packaged app the binary lives in
+    // `app.asar.unpacked/` (`input-sampler.ts`).
+    clickTapProbe: () => probeInput({ helperPath: helperPathFor(distRoot) }),
+    relaunchApp: relaunchGracefully,
+    broadcast: (report: PermissionReport) => {
+      for (const window of windows.all()) {
+        window.webContents.send(CHANNEL.permissionsChanged, report);
+      }
+    },
+    onSetupComplete: () => {
+      windows.show('library');
+      windows.get('setup')?.close();
+    },
+    // The route back. Setup is not only a first run: a user who continued with
+    // Screen Recording refused has a recorder that cannot record, and the library
+    // is where they find that out.
+    onOpenSetup: () => {
+      windows.show('setup');
+    },
+  });
+}
 
 /**
  * Quit and come back, through the same shutdown the user quitting gets.
@@ -135,21 +152,34 @@ function relaunchGracefully(): void {
   app.quit();
 }
 
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-} else {
-  app.on('second-instance', () => {
-    windows.show('library');
-  });
+// A verification run does not take the lock, and does not need it: it has its own
+// scratch recordings root and settings file, so it shares nothing with a copy of the
+// app the captain happens to have open. Quitting here instead would print no report
+// at all, and `scripts/verify-permissions.mjs` would diagnose that as "the app
+// produced no machine-readable report" — a sentence about the wrong problem, from the
+// one tool whose whole value is saying precisely what is blocking it.
+if (verifying || app.requestSingleInstanceLock()) {
+  if (!verifying) {
+    app.on('second-instance', () => {
+      // The same gate the launch path and `activate` use. A second launch during
+      // first run must not open the library beside the setup window, which is the
+      // "one deliberate onboarding step" the captain's decision asks for.
+      windows.show(store.setup.completedAt === null ? 'setup' : 'library');
+    });
+  }
 
   app.whenReady().then(main, (error: unknown) => {
     console.error('[main] failed to start:', error);
     app.exit(1);
   });
+} else {
+  app.quit();
 }
 
 async function main(): Promise<void> {
   await store.loadSettings();
+
+  const permissions = createPermissionManager();
 
   installLoomProtocol({ store, rendererRoot });
   registerIpc({ store, appVersion: app.getVersion() });
@@ -165,7 +195,7 @@ async function main(): Promise<void> {
   });
 
   if (verifying) {
-    await runVerifyMode();
+    await runVerifyMode(permissions);
     return;
   }
 
@@ -191,23 +221,6 @@ async function main(): Promise<void> {
 }
 
 /**
- * Run the phase 2 gate and quit.
- *
- * Crash recovery is skipped and no window is shown by the normal path: the harness
- * opens exactly the windows it needs.
- *
- * The report is **printed, not written**. `apps/main` has no filesystem — `node:fs`
- * is import-restricted to `ProjectStore` (§0, rule 1) — and a verification harness is
- * not a good enough reason to punch the first hole in that. So the JSON goes to
- * stdout between markers and `scripts/verify-permissions.mjs` saves it, which also
- * makes the report readable when nobody asked for a file.
- *
- * The exit code is the verdict, so a shell or CI can act on it without parsing
- * anything: `1` for a real failure, `2` for a run that could not establish what it
- * set out to (a missing grant, a dev binary), `0` only for a genuine, trustworthy
- * pass.
- */
-/**
  * Run a real sampler for a while and report every click it saw, with the instant this
  * process received it.
  *
@@ -220,10 +233,12 @@ async function main(): Promise<void> {
  * events. Everything above the sink — the helper, the tap, the batching — is the
  * shipped path, so what is measured is what a recording would get.
  *
- * `receivedMs` is stamped in `append`, which is the earliest this process can see a
- * click, and the sampler batches on §2.5's 100 ms cadence — so inter-arrival timing is
- * quantised to that and the report says "inter-arrival", never "input latency". A
- * true end-to-end latency needs the helper's own clock compared against a synthesised
+ * Two clocks come back because they answer different questions. `tSec` is the
+ * sampler's own timestamp for the event, and it is the one inter-arrival is measured
+ * from. `receivedMs` is when *this process* saw the line, which §2.5's 100 ms flush
+ * cadence quantises — one batch, one stamp, however many clicks are in it — so it is
+ * evidence about batching and must never be read as timing. Neither is an
+ * input-to-app latency: that needs the helper's clock compared against a synthesised
  * event, which is `packages/sampler/test/rate-control.ts`'s territory, not this
  * harness's.
  */
@@ -253,8 +268,9 @@ async function observeClicks(durationMs: number): Promise<{ tSec: number; receiv
       writeCursorIndex: () => Promise.resolve(),
     },
     // No recording, so no `recording.json` clock to share an origin with. `t` is
-    // therefore seconds since the sampler started, which is all this needs — the
-    // rate comes from `receivedMs`.
+    // therefore seconds since the sampler started, which is all this needs — the rate
+    // comes from the length of the observation window, and inter-arrival from these
+    // timestamps.
     t0Us: 0,
     clicks: true,
     helperPath: helperPathFor(distRoot),
@@ -272,7 +288,24 @@ async function observeClicks(durationMs: number): Promise<{ tSec: number; receiv
   return clicks;
 }
 
-async function runVerifyMode(): Promise<void> {
+/**
+ * Run the phase 2 gate and quit.
+ *
+ * Crash recovery is skipped and no window is shown by the normal path: the harness
+ * opens exactly the windows it needs.
+ *
+ * The report is **printed, not written**. `apps/main` has no filesystem — `node:fs`
+ * is import-restricted to `ProjectStore` (§0, rule 1) — and a verification harness is
+ * not a good enough reason to punch the first hole in that. So the JSON goes to
+ * stdout between markers and `scripts/verify-permissions.mjs` saves it, which also
+ * makes the report readable when nobody asked for a file.
+ *
+ * The exit code is the verdict, so a shell or CI can act on it without parsing
+ * anything: `1` for a real failure, `2` for a run that could not establish what it
+ * set out to (a missing grant, a dev binary), `0` only for a genuine, trustworthy
+ * pass.
+ */
+async function runVerifyMode(permissions: PermissionManager): Promise<void> {
   const { runVerification, formatReport } = await import('./verify/permissions-harness.ts');
   let code = 1;
   try {

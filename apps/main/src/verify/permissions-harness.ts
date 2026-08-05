@@ -64,10 +64,11 @@ export interface ObservedClick {
  * `index.ts` owns which sampler and which helper path produce it. `observeClicks` in
  * `index.ts` is the implementation, over the shipped `InputSampler`.
  *
- * `receivedMs` is when *this process* saw the click, not when the pointer went down.
- * The sampler batches on §2.5's 100 ms cadence, so what can be derived from these is
- * an arrival rate and an inter-arrival distribution — which is what the captain's
- * open item asks for — and not a true input-to-app latency.
+ * `receivedMs` is when *this process* saw the click, not when the pointer went down,
+ * and the sampler batches on §2.5's 100 ms cadence — every click in one flush carries
+ * the same stamp. So it is evidence about batching, and the arrival rate and the
+ * inter-arrival distribution the captain's open item asks for are derived from the
+ * observation window and from `tSec` instead. Neither is a true input-to-app latency.
  */
 export type ClickStreamProbe = (durationMs: number) => Promise<ObservedClick[]>;
 
@@ -644,13 +645,19 @@ async function checkAccessibilityClicks(
     };
   }
 
-  const latencies = clicks
-    .map((c, i) => (i === 0 ? 0 : c.receivedMs - (clicks[i - 1]?.receivedMs ?? c.receivedMs)))
-    .slice(1);
-  const spanSec = Math.max(
-    0.001,
-    ((clicks.at(-1)?.receivedMs ?? 0) - (clicks[0]?.receivedMs ?? 0)) / 1000,
-  );
+  // Two measurements, each from the clock that can answer it.
+  //
+  // The rate is over the window this harness asked for, not over the span between the
+  // first and last arrival: `receivedMs` is stamped once per 100 ms flush, so a handful
+  // of clicks landing in one batch share a timestamp and that span collapses to zero —
+  // which reported "3 clicks in 0.0s (3000.0/s)" in the one artifact this file exists
+  // to produce honestly. Inter-arrival comes from the sampler's own event timestamps,
+  // which are unquantised, rather than from the batch they arrived in — the same
+  // batching that makes a `receivedMs` delta 0 ms.
+  const windowSec = windowMs / 1000;
+  const interArrivalMs = clicks
+    .slice(1)
+    .map((click, i) => (click.tSec - (clicks[i]?.tSec ?? click.tSec)) * 1000);
 
   return {
     id,
@@ -658,11 +665,17 @@ async function checkAccessibilityClicks(
     obligation,
     status: 'pass',
     detail:
-      `${String(clicks.length)} clicks in ${spanSec.toFixed(1)}s ` +
-      `(${(clicks.length / spanSec).toFixed(1)}/s), median inter-arrival ` +
-      `${median(latencies).toFixed(1)} ms. Inter-arrival is quantised by the sampler's ` +
-      '100 ms flush cadence and is not an input-to-app latency.',
-    data: { ...base, clicks: clicks.length, spanSec, windowMs, latencies },
+      `${String(clicks.length)} clicks in a ${windowSec.toFixed(1)}s observation window ` +
+      `(${(clicks.length / windowSec).toFixed(2)}/s), median inter-arrival ` +
+      `${median(interArrivalMs).toFixed(1)} ms. Inter-arrival is the sampler's own event ` +
+      'timestamps, not batch arrival, and is not an input-to-app latency.',
+    data: {
+      ...base,
+      clicks: clicks.length,
+      windowMs,
+      ratePerSec: clicks.length / windowSec,
+      interArrivalMs,
+    },
   };
 }
 

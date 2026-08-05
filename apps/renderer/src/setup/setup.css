@@ -107,14 +107,21 @@ body {
   color: var(--bg-raised);
 }
 
-.perm[data-state='denied'] .glyph {
+/*
+ * Red means the user answered no. Only the three media grants can say that: macOS
+ * distinguishes "denied" from "not-determined" for them, so `denied` here is a
+ * refusal. The Accessibility row carries `data-ax` and is styled below instead.
+ */
+.perm[data-state='denied']:not([data-ax]) .glyph {
   border-color: var(--danger);
   color: var(--danger);
   background: var(--danger-wash);
 }
 
 /* Dashed: onboarding can be finished without it, and the border says so. */
-.perm[data-optional='true'][data-state='not-determined'] .glyph {
+.perm[data-optional='true'][data-state='not-determined'] .glyph,
+.perm[data-ax='not-granted'] .glyph,
+.perm[data-ax='relaunch-to-find-out'] .glyph {
   border-style: dashed;
   border-color: var(--fg-faint);
   color: var(--fg-subtle);
@@ -305,6 +312,15 @@ body {
   color: var(--ochre-600);
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* An author `display` outranks the UA's `[hidden] { display: none }` — the trap
+   `recorder.css` documents. Without this the Relaunch button offers a restart to a
+   Camera denial it cannot help, and a signed build still shows the empty
+   dev-build box. */
+.btn[hidden],
+.untrusted[hidden] {
+  display: none;
 }
 
 /* ------------------------------------------------------------------ footer */

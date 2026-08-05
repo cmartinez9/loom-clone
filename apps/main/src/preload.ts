@@ -111,6 +111,9 @@ const api: LoomApi = {
 
   setup: {
     state: (): Promise<SetupState> => ipcRenderer.invoke(CHANNEL.setupState) as Promise<SetupState>,
+    open: (): void => {
+      ipcRenderer.send(CHANNEL.setupOpen);
+    },
     complete: (): Promise<void> => ipcRenderer.invoke(CHANNEL.setupComplete) as Promise<void>,
   },
 

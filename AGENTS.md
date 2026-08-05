@@ -596,9 +596,21 @@ grant a TCC permission and nothing in this repo pretends otherwise.
   ("Video was requested, but no video stream was provided") from Electron's own
   internals, on every refusal. It is the normal, correct path for an unauthorised
   window — not a bug in `provideSource`.
-- **Every settings write from `PermissionManager` is chained**, and `relaunch()` waits
-  for it. "Open System Settings" and "Relaunch" are adjacent buttons; a quit that beat
-  the `accessibilityOpenedAt` write would come back having forgotten it ever asked.
+- **Settings writes are serialized in `ProjectStore`, not by their callers.**
+  `updateSetup` merges a patch into the document it last read and the read is separated
+  from the write by an `fsync`ing rename, so two unqueued patches both read the
+  pre-first snapshot and the second drops the first's field. `PermissionManager` keeps
+  its own chain on top for a different question — `relaunch()` waits on it, because
+  "Open System Settings" and "Relaunch" are adjacent buttons and a quit that beat the
+  `accessibilityOpenedAt` write would come back having forgotten it ever asked.
+- **`PermissionManager` is built after `store.loadSettings()` resolves**, and reads
+  `store.setup` on every probe rather than latching it. Both, because either alone
+  turns a persisted Accessibility ask into a fresh-install default on the very launch
+  it exists to survive.
+- **The click-tap leg of a probe costs a process.** The other three are
+  `systemPreferences` reads; this one runs the native sampler, and `refresh()` fires on
+  every window focus. It is coalesced and cached for a few seconds, invalidated by
+  `axTrusted` changing.
 - **`apps/main` still has no filesystem.** The harness prints its JSON report between
   markers on stdout and the runner script saves it, rather than punching the first hole
   in the `node:fs` restriction for a test.

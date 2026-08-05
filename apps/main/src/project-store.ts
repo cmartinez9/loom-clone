@@ -245,6 +245,17 @@ export class ProjectStore {
    */
   private readonly openMedia = new Map<string, MediaPartWriter | AudioPartWriter>();
   private settings: SettingsDoc | null = null;
+  /**
+   * Settings writes, serialized — the same reason the per-project queue exists.
+   *
+   * `updateSetup` merges a patch into the document it last read, and the read is
+   * separated from the write by a `mkdir` and an atomic rename. Two unqueued patches
+   * therefore both read the pre-first snapshot and the second silently drops the
+   * first's field: "Open System Settings" followed quickly by "Continue" loses the
+   * Accessibility timestamp, which is precisely the loss merging is supposed to
+   * prevent.
+   */
+  private settingsWrites: Promise<unknown> = Promise.resolve();
 
   constructor(options: ProjectStoreOptions) {
     this.options = {
@@ -310,12 +321,18 @@ export class ProjectStore {
    * Accessibility timestamp that survives the relaunch it is about.
    */
   async updateSetup(patch: Partial<SetupState>): Promise<SetupState> {
-    const current = this.settings ?? newSettingsDoc(this.options.recordingsRoot);
-    const next: SettingsDoc = { ...current, setup: { ...current.setup, ...patch } };
-    await mkdir(dirname(this.options.settingsPath), { recursive: true });
-    await writeJsonAtomic(this.options.settingsPath, next);
-    this.settings = next;
-    return next.setup;
+    const write = this.settingsWrites.then(async () => {
+      const current = this.settings ?? newSettingsDoc(this.options.recordingsRoot);
+      const next: SettingsDoc = { ...current, setup: { ...current.setup, ...patch } };
+      await mkdir(dirname(this.options.settingsPath), { recursive: true });
+      await writeJsonAtomic(this.options.settingsPath, next);
+      this.settings = next;
+      return next.setup;
+    });
+    // The queue survives a failed write: one patch that could not be persisted must
+    // not take every later patch down with it.
+    this.settingsWrites = write.catch(() => undefined);
+    return write;
   }
 
   // ------------------------------------------------------------------- library
