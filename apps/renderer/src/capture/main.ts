@@ -168,7 +168,7 @@ async function begin(options: CaptureOptions): Promise<void> {
       },
     });
 
-    session = {
+    const current: Session = {
       stream,
       track,
       reader: new MediaStreamTrackProcessor({ track }).readable.getReader(),
@@ -184,6 +184,7 @@ async function begin(options: CaptureOptions): Promise<void> {
       endMessage: null,
       audio: [],
     };
+    session = current;
 
     // The screen source ending on its own is not a normal stop — a revoked Screen
     // Recording permission and the macOS "Stop sharing" control both arrive this
@@ -195,15 +196,27 @@ async function begin(options: CaptureOptions): Promise<void> {
     // Audio is started before the video pump, so both tracks begin as close
     // together as the platform allows; whatever offset remains is measured and
     // recorded as `startTimeSec` rather than assumed away (§5.4 mechanism 2).
-    session.audio = await startAudio(stream, options);
-
+    const captures = await startAudio(stream, options);
+    current.audio = captures;
     starting = false;
-    await pump(session, options);
+
+    // A stop, a screen track that ended and an encoder error are all reachable
+    // across that await, and `getUserMedia` holds it open for as long as macOS
+    // takes to answer the microphone prompt. A device opened after the session is
+    // over is stopped here: a microphone left running would keep its indicator lit
+    // and keep posting chunks under the same track and part key, which the *next*
+    // recording would accept as its own.
+    if (session !== current || current.ending !== null) {
+      await Promise.all(captures.map((capture) => stopAudioCapture(capture)));
+      return;
+    }
+
+    await pump(current, options);
   } catch (error) {
     starting = false;
-    const current = session;
+    const started = session;
     session = null;
-    if (current !== null) await release(current);
+    if (started !== null) await release(started);
     window.loom.capture.failed(describe(error));
   }
 }
@@ -225,15 +238,19 @@ async function startAudio(display: MediaStream, options: CaptureOptions): Promis
     if (loopback === undefined) {
       audioSink.unavailable('system', 'macOS handed back no system-audio track');
     } else {
-      const capture = await startAudioCapture(
-        'system',
-        loopback,
-        loopbackFacts(loopback),
-        null,
-        options,
-        audioSink,
-      );
-      if (capture !== null) captures.push(capture);
+      try {
+        const capture = await startAudioCapture(
+          'system',
+          loopback,
+          loopbackFacts(loopback),
+          null,
+          options,
+          audioSink,
+        );
+        if (capture !== null) captures.push(capture);
+      } catch (error) {
+        audioSink.unavailable('system', `system audio could not be captured: ${describe(error)}`);
+      }
     }
   }
 

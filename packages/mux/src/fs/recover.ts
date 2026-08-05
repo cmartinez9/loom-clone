@@ -73,7 +73,16 @@ export interface RecoveredAudioPart {
   frameCount: number;
   /** Samples per channel in the file, encoder priming included. */
   sampleCount: number;
-  /** Duration of the media in the file, at the nominal rate. */
+  /**
+   * Priming samples the part's edit list tells a reader to skip.
+   *
+   * The difference between the samples in the file and the samples anyone will
+   * hear — 2112 of them, 44 ms, twice this project's sync budget. A caller
+   * turning {@link sampleCount} into an `AudioPart.durationSec` has to subtract
+   * it, because `startTimeSec` is defined on the *decoded* stream.
+   */
+  encoderDelaySamples: number;
+  /** Duration of the media in the file, at the nominal rate, priming included. */
   mediaDurationSec: number;
   sampleRate: number;
   channels: number;
@@ -169,6 +178,7 @@ export async function recoverAudioPart(mediaPath: string): Promise<RecoveredAudi
     return {
       frameCount: scan.samples.length,
       sampleCount,
+      encoderDelaySamples: facts.encoderDelaySamples,
       mediaDurationSec: facts.timescale > 0 ? sampleCount / facts.timescale : 0,
       sampleRate: facts.sampleRate,
       channels: facts.channels,

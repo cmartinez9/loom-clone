@@ -86,6 +86,10 @@ import {
   type RecoveredPart,
 } from '@loom/mux/fs';
 
+// `@loom/mux/fs` has exactly one caller, so what a finalized part reports is
+// re-exported from here rather than imported a second time by the recorder.
+export type { FinalizedAudioPart, FinalizedPart };
+
 export interface ProjectStoreOptions {
   /** Absolute path to the recordings root. */
   recordingsRoot: string;
@@ -1157,6 +1161,12 @@ interface RepairedAudioTrack {
  * its media plus the time in which no samples existed (see `AudioPart`). The gaps
  * themselves are kept as they were — a scanner cannot see a hole that was never
  * written — and everything else the provisional document said is left alone.
+ *
+ * The encoder's priming comes off the sample count first. It is in the file and
+ * the part's edit list says to skip it, while `startTimeSec` is defined on the
+ * decoded stream — so leaving it in would make a recovered part 44 ms longer than
+ * the same part after a clean stop, and that number goes on to set
+ * `integrity.truncatedToSec` and the seconds the user is told were recovered.
  */
 async function repairAudioTrack(
   dir: string,
@@ -1177,7 +1187,8 @@ async function repairAudioTrack(
     if (recovered.frameCount === 0) continue;
     truncatedBytes += recovered.truncatedBytes;
     const rate = part.measuredSampleRate > 0 ? part.measuredSampleRate : recovered.sampleRate;
-    const durationSec = recovered.sampleCount / rate + totalGapSec(part.gaps);
+    const decodedSamples = Math.max(0, recovered.sampleCount - recovered.encoderDelaySamples);
+    const durationSec = decodedSamples / rate + totalGapSec(part.gaps);
     parts.push({
       ...part,
       codec: recovered.codec,

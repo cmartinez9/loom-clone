@@ -215,6 +215,11 @@ describe('an audio capture part', () => {
       expect(recovered.codec).toBe('mp4a.40.2');
       expect(recovered.truncatedBytes).toBe(0);
       expect(recovered.mediaDurationSec).toBeCloseTo((written * AAC_FRAME_SAMPLES) / RATE, 6);
+      // What is in the file and what anyone will hear are 2112 samples apart, and
+      // the difference is reported rather than left for a caller to assume: an
+      // `AudioPart.durationSec` rebuilt from `sampleCount` without it is 44 ms
+      // longer than the same part after a clean stop.
+      expect(recovered.encoderDelaySamples).toBe(AAC_ENCODER_DELAY_SAMPLES);
     });
   });
 

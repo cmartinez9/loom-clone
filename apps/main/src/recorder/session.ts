@@ -71,7 +71,8 @@ import {
   type RecordingDoc,
   type RecordingId,
 } from '@loom/format';
-import type { ProjectStore } from '../project-store.ts';
+import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
+import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
 import {
   finalizedRecordingDoc,
@@ -120,6 +121,15 @@ const MAX_PLAUSIBLE_TRACK_OFFSET_SEC = 1;
  * renderer's say-so, and a `recording.json` nothing can read.
  */
 const MAX_REPORTED_GAPS = 1024;
+
+/**
+ * Longest microphone device id a renderer may name.
+ *
+ * A `deviceId` from `enumerateDevices` is a 64-character hash. The bound is here
+ * because the value is handed straight back to the capture page as a constraint,
+ * and an unbounded string from a renderer is a payload rather than a device.
+ */
+const MAX_DEVICE_ID_LENGTH = 200;
 
 /**
  * Windows that may drive a recording.
@@ -540,8 +550,11 @@ export class RecorderSession {
       try {
         await this.onAudioMeta(active, meta, meta.track);
       } catch (error) {
+        // Scoped cleanup belongs to `onAudioMeta`, which is the only thing that
+        // knows whether the state under this key is the one it created. A
+        // duplicate announcement for a track that already has a healthy open part
+        // fails here, and deleting that state would discard a live track.
         console.error(`[recorder] the ${meta.track} track could not be opened:`, error);
-        active.audio.delete(meta.track);
       }
       return;
     }
@@ -620,25 +633,41 @@ export class RecorderSession {
     active.audio.set(track, state);
 
     const { store } = this.options;
-    const provisional = withAudioTrack(this.requireProvisional(active), {
-      track,
-      file: store.mediaRelativePath(track, meta.part),
-      codec: meta.decoderConfig.codec,
-      sampleRate,
-      channels,
-      facts,
-    });
-    await store.writeRecordingDoc(active.id, provisional);
-    active.provisional = provisional;
+    try {
+      const provisional = withAudioTrack(this.requireProvisional(active), {
+        track,
+        file: store.mediaRelativePath(track, meta.part),
+        codec: meta.decoderConfig.codec,
+        sampleRate,
+        channels,
+        facts,
+      });
+      await store.writeRecordingDoc(active.id, provisional);
+      active.provisional = provisional;
 
-    await store.beginAudioPart(active.id, {
-      track,
-      part: meta.part,
-      sampleRate,
-      channels,
-      audioSpecificConfig: description,
-      bitrate: active.options.audioBitrate,
-    });
+      await store.beginAudioPart(active.id, {
+        track,
+        part: meta.part,
+        sampleRate,
+        channels,
+        audioSpecificConfig: description,
+        bitrate: active.options.audioBitrate,
+      });
+    } catch (error) {
+      if (active.audio.get(track) === state) active.audio.delete(track);
+      throw error;
+    }
+
+    // The track can be given up on while the part is being created — the writer
+    // is two awaits away and {@link onAudioChunk} drops the track if it overruns
+    // its held-chunk budget in that window. A part nobody is going to write to is
+    // closed rather than left holding a file descriptor into the bundle.
+    if (active.audio.get(track) !== state) {
+      await store.abortMediaPart(active.id, track).catch((error: unknown) => {
+        console.error(`[recorder] closing the abandoned ${track} part failed:`, error);
+      });
+      return;
+    }
     state.open = true;
     this.appendHeldAudio(active, track, state);
 
@@ -721,8 +750,18 @@ export class RecorderSession {
 
     if (!state.open) {
       if (state.held.length >= MAX_HELD_CHUNKS) {
-        console.error(`[recorder] ${track} produced frames faster than its part could be opened`);
+        // The track is given up on rather than continued from here. The frames
+        // that were held are counted by the meter in the capture renderer, which
+        // is what produces `startTimeSec`, `durationSec` and `measuredSampleRate`
+        // — so writing the rest would describe samples the `.m4a` does not
+        // contain and shift everything in it earlier, with no gap to explain it.
+        // §7.3: that costs this track and nothing else.
+        console.error(
+          `[recorder] ${track} produced ${MAX_HELD_CHUNKS} frames faster than its part could ` +
+            'be opened; the track is dropped rather than written out of sync',
+        );
         state.held = [];
+        active.audio.delete(track);
         return;
       }
       state.held.push(chunk);
@@ -766,22 +805,30 @@ export class RecorderSession {
   ): Promise<Partial<Record<AudioTrackKey, FinalizedAudioFacts>>> {
     const out: Partial<Record<AudioTrackKey, FinalizedAudioFacts>> = {};
     for (const track of AUDIO_TRACK_KEYS) {
-      if (active.audio.get(track)?.open !== true) continue;
+      const state = active.audio.get(track);
+      if (state?.open !== true) continue;
+      let written: FinalizedAudioPart | null = null;
       try {
-        await this.options.store.finalizeAudioPart(active.id, track);
+        written = await this.options.store.finalizeAudioPart(active.id, track);
       } catch (error) {
         console.error(`[recorder] finalizing the ${track} part failed:`, error);
       }
 
       const measured = report?.audio?.find((entry) => entry.track === track);
-      if (measured === undefined) {
-        // The capture page never reported this track — it died, or the stop timed
-        // out. The bytes are on disk and crash recovery will describe them; what is
-        // not available is the measurement, and it is not invented here.
-        console.warn(`[recorder] ${track} produced media but no measurements`);
+      if (measured !== undefined) {
+        out[track] = this.alignedAudio(active, measured, report?.epochOffsetUs ?? 0);
         continue;
       }
-      out[track] = this.alignedAudio(active, measured, report?.epochOffsetUs ?? 0);
+      const fromBytes = writtenAudio(state, written);
+      if (fromBytes === null) {
+        console.warn(`[recorder] ${track} produced no media and no measurements`);
+        continue;
+      }
+      console.warn(
+        `[recorder] ${track} produced media but no measurements; it is described from the ` +
+          'bytes that were written, at the nominal rate and starting with the screen',
+      );
+      out[track] = fromBytes;
     }
     return out;
   }
@@ -1141,14 +1188,37 @@ function captureOptions(raw: unknown): Partial<CaptureOptions> {
   if (typeof bitrate === 'number' && bitrate >= 100_000 && bitrate <= 200_000_000) {
     out.bitrate = Math.round(bitrate);
   }
+  // Strict booleans, not truthiness: a renderer that sends `0` or `''` for
+  // `systemAudio` is malformed, and reading it as "off" would answer a question it
+  // did not ask. An absent or out-of-range field falls through to
+  // `DEFAULT_CAPTURE_OPTIONS`, which is what decides whether a microphone opens.
+  if (typeof input['systemAudio'] === 'boolean') out.systemAudio = input['systemAudio'];
+  if (typeof input['micVoiceProcessing'] === 'boolean') {
+    out.micVoiceProcessing = input['micVoiceProcessing'];
+  }
+  const mic = input['micDeviceId'];
+  if (mic === null) out.micDeviceId = null;
+  else if (typeof mic === 'string' && mic.length > 0 && mic.length <= MAX_DEVICE_ID_LENGTH) {
+    out.micDeviceId = mic;
+  }
+  const audioBitrate = input['audioBitrate'];
+  if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
+    out.audioBitrate = Math.round(audioBitrate);
+  }
   return out;
 }
 
+/** A part index, or `null` when the value is not one. */
+function partIndex(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 999
+    ? value
+    : null;
+}
+
 function requirePart(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 999) {
-    throw new Error('part must be an integer between 0 and 999');
-  }
-  return value;
+  const part = partIndex(value);
+  if (part === null) throw new Error('part must be an integer between 0 and 999');
+  return part;
 }
 
 function requireTrack(value: unknown): ChunkMsg['track'] {
@@ -1250,11 +1320,12 @@ function audioReports(raw: unknown): AudioTrackReport[] {
     if (track !== 'mic' && track !== 'system') continue;
     const facts = audioFacts(input['facts']);
     const summary = audioSummary(input['summary']);
-    if (facts === null || summary === null) continue;
+    const part = partIndex(input['part']);
+    if (facts === null || summary === null || part === null) continue;
     const endReason = input['endReason'];
     reports.push({
       track,
-      part: requirePart(input['part']),
+      part,
       facts,
       summary,
       epochOffsetUs:
@@ -1355,6 +1426,45 @@ function endReport(raw: unknown): CaptureEndReport {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * One audio track described from the bytes on disk, when no measurement arrived.
+ *
+ * The capture page owns `measuredSampleRate` and `gaps` — they can only be read
+ * from the raw buffer stream (§5.5) — so a renderer that died, or a stop that
+ * timed out, leaves main with a finished `.m4a` and nothing to describe it with.
+ * Leaving it out of `recording.json` loses the audio outright: the bundle
+ * finalizes to `editable`, which no crash-recovery pass ever looks at again.
+ *
+ * So the part is written from what the writer counted, and every number in it is
+ * the honest one: the nominal rate rather than a measured one, no gaps rather
+ * than invented ones, and `startTimeSec: 0` — the value the snap in §5.4
+ * mechanism 3 produces for an ordinary recording anyway. The track is marked
+ * `endedEarly` with `endReason: 'crash'`, because whatever happened, the capture
+ * did not end the way it was asked to.
+ *
+ * `sampleCount` counts the encoder's priming, which the part's edit list tells a
+ * reader to skip; `durationSec` is the extent of the *decoded* media, so the
+ * priming comes back off (see `AudioPart.startTimeSec`).
+ */
+function writtenAudio(
+  state: ActiveAudio,
+  written: FinalizedAudioPart | null,
+): FinalizedAudioFacts | null {
+  if (written === null || written.frameCount === 0 || state.sampleRate <= 0) return null;
+  const decodedSamples = Math.max(0, written.sampleCount - AAC_ENCODER_DELAY_SAMPLES);
+  if (decodedSamples === 0) return null;
+  return {
+    timing: {
+      startTimeSec: 0,
+      durationSec: decodedSamples / state.sampleRate,
+      measuredSampleRate: state.sampleRate,
+      gaps: [],
+    },
+    endedEarly: true,
+    endReason: 'crash',
+  };
 }
 
 /**

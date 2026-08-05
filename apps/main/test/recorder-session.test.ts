@@ -13,10 +13,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHANNEL } from '@loom/ipc';
+import { CHANNEL, DEFAULT_CAPTURE_OPTIONS } from '@loom/ipc';
 import {
   validateFrameIndexDoc,
   validateRecordingDoc,
@@ -34,6 +34,8 @@ import {
 
 interface FakeContents {
   id: number;
+  /** Everything main pushed to this window, so a command's payload is inspectable. */
+  sent: { channel: string; payload?: unknown }[];
   isLoadingMainFrame(): boolean;
   send(channel: string, payload?: unknown): void;
 }
@@ -102,8 +104,14 @@ const windows = {
     const existing = harness.windows.get(role);
     if (existing !== undefined) return existing;
     nextContentsId += 1;
+    const sent: { channel: string; payload?: unknown }[] = [];
     const window: FakeWindow = {
-      webContents: { id: nextContentsId, isLoadingMainFrame: () => false, send: () => undefined },
+      webContents: {
+        id: nextContentsId,
+        sent,
+        isLoadingMainFrame: () => false,
+        send: (channel: string, payload?: unknown) => sent.push({ channel, payload }),
+      },
       isDestroyed: () => false,
     };
     harness.windows.set(role, window);
@@ -129,6 +137,16 @@ function invoke(channel: string, sender: FakeContents, payload?: unknown): Promi
   const handler = harness.handlers.get(channel);
   if (handler === undefined) throw new Error(`nothing handles ${channel}`);
   return Promise.resolve(handler({ sender }, payload));
+}
+
+/**
+ * One turn of the event loop, which is enough for the announcement queue to drain.
+ *
+ * Track announcements are serialized on `metaChain`, so an announcement emitted
+ * while the queue is idle has been through `onMeta` by the time a timer fires.
+ */
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Poll rather than sleep: these writes are local and finish in single-digit ms. */
@@ -169,6 +187,128 @@ function chunkMessage(frame: FixtureFrame): unknown {
     timestampUs: frame.timestampUs,
     durationUs: null,
     data: frame.data,
+  };
+}
+
+/** An AAC-LC 48 kHz stereo AudioSpecificConfig, which is all the writer needs. */
+const AUDIO_ASC = new Uint8Array([0x11, 0x90]);
+const AUDIO_RATE = 48000;
+const AAC_FRAME_SAMPLES = 1024;
+const AAC_FRAME_US = Math.round((AAC_FRAME_SAMPLES * 1_000_000) / AUDIO_RATE);
+
+function audioSettings(): unknown {
+  return {
+    sampleRate: AUDIO_RATE,
+    channelCount: 2,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  };
+}
+
+function audioMetaMessage(track: 'mic' | 'system'): unknown {
+  return {
+    track,
+    part: 0,
+    decoderConfig: {
+      codec: 'mp4a.40.2',
+      sampleRate: AUDIO_RATE,
+      numberOfChannels: 2,
+      description: AUDIO_ASC,
+    },
+    audio: {
+      deviceId: 'device-1',
+      deviceName: 'MacBook Pro Microphone',
+      source: 'getusermedia',
+      settings: audioSettings(),
+      violations: [],
+    },
+  };
+}
+
+function audioChunkMessage(track: 'mic' | 'system', index: number): unknown {
+  return {
+    track,
+    part: 0,
+    kind: 'key',
+    timestampUs: index * AAC_FRAME_US,
+    durationUs: AAC_FRAME_US,
+    data: new Uint8Array(64).fill((index % 251) + 1),
+  };
+}
+
+/**
+ * Wait for an audio part file to exist.
+ *
+ * The announcements are queued behind each other, so "the mic has announced
+ * itself" is not observable a fixed number of turns after the message is sent —
+ * but the part file is created by `beginAudioPart`, and by then the track has its
+ * entry in `RecorderSession`, which is what decides whether a chunk is held or
+ * dropped.
+ */
+async function untilAudioPartOpen(id: RecordingId, track: 'mic' | 'system'): Promise<void> {
+  const dir = await store.directoryFor(id);
+  for (let attempt = 0; attempt < 400; attempt++) {
+    try {
+      await stat(join(dir, `media/${track}.000.m4a`));
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  throw new Error(`timed out waiting for the ${track} part to be created`);
+}
+
+async function readRecordingDoc(id: RecordingId): Promise<RecordingDoc> {
+  const dir = await store.directoryFor(id);
+  return JSON.parse(await readFile(join(dir, 'recording.json'), 'utf8')) as RecordingDoc;
+}
+
+function startedOptions(contents: FakeContents): Record<string, unknown> {
+  const command = contents.sent.find((message) => message.channel === CHANNEL.captureCommand);
+  const payload = command?.payload as { options?: Record<string, unknown> } | undefined;
+  if (payload?.options === undefined) throw new Error('the capture page was never told to start');
+  return payload.options;
+}
+
+function endedMessage(frames: FixtureFrame[], audio?: unknown[]): unknown {
+  const last = frames[frames.length - 1]!;
+  return {
+    reason: 'stopped',
+    endedAtUs: last.timestampUs + Math.round(1_000_000 / fixture.fps),
+    framesEncoded: frames.length,
+    framesDropped: 0,
+    epochOffsetUs: 0,
+    ...(audio === undefined ? {} : { audio }),
+  };
+}
+
+/** What the capture page's meter would report for `frames` untroubled AAC frames. */
+function audioReport(track: 'mic' | 'system', frames: number): Record<string, unknown> {
+  return {
+    track,
+    part: 0,
+    facts: {
+      deviceId: 'device-1',
+      deviceName: 'MacBook Pro Microphone',
+      source: 'getusermedia',
+      settings: audioSettings(),
+      violations: [],
+    },
+    summary: {
+      bufferCount: frames,
+      sampleCount: frames * AAC_FRAME_SAMPLES,
+      firstTimestampUs: 0,
+      lastTimestampUs: (frames - 1) * AAC_FRAME_US,
+      lastFrameCount: AAC_FRAME_SAMPLES,
+      gaps: [],
+      gapUs: 0,
+      nominalSampleRate: AUDIO_RATE,
+      measuredSampleRate: AUDIO_RATE,
+      rateIsNominal: true,
+    },
+    epochOffsetUs: 0,
+    endedEarly: false,
   };
 }
 
@@ -266,6 +406,151 @@ describe('the capture page talking to main', () => {
     await untilState(id, 'failed');
     const summary = (await store.list()).find((s) => s.id === id);
     expect(summary?.state).toBe('failed');
+  });
+});
+
+/**
+ * The audio half of the same conversation.
+ *
+ * Every case here is one of the ways an audio track can be lost *silently* —
+ * discarded state, a measurement that never arrives, one malformed field — which
+ * §7.3 allows only to cost that track, and only when the track really produced
+ * nothing. A `.m4a` full of audio that `recording.json` does not mention is worse
+ * than a failed recording: the bundle finalizes to `editable`, and no crash
+ * recovery pass ever looks at an editable bundle again.
+ */
+describe('the audio tracks', () => {
+  /** Record `frames` screen frames and `micFrames` AAC frames, and return the video. */
+  async function recordSomeAudio(id: RecordingId, micFrames: number): Promise<FixtureFrame[]> {
+    const contents = captureContents();
+    const frames = fixture.frames.slice(0, 8);
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of frames) emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    emit(CHANNEL.captureMeta, contents, audioMetaMessage('mic'));
+    await untilAudioPartOpen(id, 'mic');
+    for (let i = 0; i < micFrames; i++) {
+      emit(CHANNEL.captureChunk, contents, audioChunkMessage('mic', i));
+    }
+    await until(() => store.mediaFrameCount(id, 'mic') >= micFrames, 'the mic frames');
+    return frames;
+  }
+
+  it('keeps a live track when a second announcement arrives for it', async () => {
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    const frames = await recordSomeAudio(id, 4);
+
+    // A duplicate announcement is refused — the capture page's own guard means it
+    // should never arrive — but refusing it must not discard the part that is
+    // already recording underneath it.
+    emit(CHANNEL.captureMeta, contents, audioMetaMessage('mic'));
+    await tick();
+
+    for (let i = 4; i < 8; i++) emit(CHANNEL.captureChunk, contents, audioChunkMessage('mic', i));
+    await until(() => store.mediaFrameCount(id, 'mic') >= 8, 'the mic track to still be recording');
+
+    const stopping = recorder.stop();
+    emit(CHANNEL.captureEnded, contents, endedMessage(frames, [audioReport('mic', 8)]));
+    await stopping;
+
+    const recording = await readRecordingDoc(id);
+    expect(validateRecordingDoc(recording).ok).toBe(true);
+    expect(recording.tracks.mic?.parts[0]?.durationSec).toBeGreaterThan(0);
+  });
+
+  it('describes a track from its bytes when no measurement arrives for it', async () => {
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    const frames = await recordSomeAudio(id, 8);
+
+    // The capture page answered, with nothing to say about its audio: the shape a
+    // renderer that died during its stop, or a stop that timed out, leaves behind.
+    const stopping = recorder.stop();
+    emit(CHANNEL.captureEnded, contents, endedMessage(frames, []));
+    await stopping;
+
+    const recording = await readRecordingDoc(id);
+    expect(validateRecordingDoc(recording).ok).toBe(true);
+    const part = recording.tracks.mic?.parts[0];
+    expect(part, 'the .m4a on disk was left referenced by nothing').toBeDefined();
+    // The samples that were written, less the encoder priming the part's edit list
+    // tells a reader to skip.
+    expect(part?.durationSec).toBeCloseTo((8 * AAC_FRAME_SAMPLES - 2112) / AUDIO_RATE, 6);
+    expect(part?.measuredSampleRate).toBe(AUDIO_RATE);
+    expect(part?.endedEarly).toBe(true);
+    expect(part?.endReason).toBe('crash');
+  });
+
+  it('finalizes despite a malformed audio entry in the end report', async () => {
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    const frames = fixture.frames.slice(0, 8);
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of frames) emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    await until(() => store.mediaFrameCount(id, 'screen') >= frames.length - 1, 'the frames');
+
+    const stopping = recorder.stop();
+    const malformed = audioReport('mic', 8);
+    malformed['part'] = 'not-a-part';
+    expect(() => {
+      emit(CHANNEL.captureEnded, contents, endedMessage(frames, [malformed]));
+    }, 'one bad field must not abort the listener the whole stop waits on').not.toThrow();
+    await stopping;
+
+    expect((await store.list()).find((s) => s.id === id)?.state).toBe('editable');
+    expect((await readRecordingDoc(id)).tracks.screen?.parts[0]?.frameCount).toBe(frames.length);
+  });
+});
+
+describe('the options a renderer may ask for', () => {
+  /** Start from `requested`, read what main told the capture page, then fail it out. */
+  async function optionsSentFor(requested: unknown): Promise<Record<string, unknown>> {
+    const hud = windows.show('recorder-hud') as unknown as FakeWindow;
+    const started = (await invoke(CHANNEL.recorderStart, hud.webContents, requested)) as {
+      recordingId: RecordingId;
+    };
+    const contents = captureContents();
+    const options = startedOptions(contents);
+    emit(CHANNEL.captureEnded, contents, {
+      reason: 'error',
+      endedAtUs: null,
+      framesEncoded: 0,
+      framesDropped: 0,
+    });
+    await untilState(started.recordingId, 'failed');
+    return options;
+  }
+
+  it('carries the audio knobs through to the capture page', async () => {
+    expect(
+      await optionsSentFor({
+        systemAudio: false,
+        micDeviceId: null,
+        audioBitrate: 96_000,
+        micVoiceProcessing: true,
+      }),
+    ).toMatchObject({
+      systemAudio: false,
+      micDeviceId: null,
+      audioBitrate: 96_000,
+      micVoiceProcessing: true,
+    });
+  });
+
+  it('falls back to the defaults for values it cannot trust', async () => {
+    expect(
+      await optionsSentFor({
+        systemAudio: 0,
+        micDeviceId: 42,
+        audioBitrate: 9_000_000,
+        micVoiceProcessing: 'yes',
+      }),
+    ).toMatchObject({
+      systemAudio: DEFAULT_CAPTURE_OPTIONS.systemAudio,
+      micDeviceId: DEFAULT_CAPTURE_OPTIONS.micDeviceId,
+      audioBitrate: DEFAULT_CAPTURE_OPTIONS.audioBitrate,
+      micVoiceProcessing: DEFAULT_CAPTURE_OPTIONS.micVoiceProcessing,
+    });
   });
 });
 
