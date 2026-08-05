@@ -49,27 +49,36 @@ import {
   type AudioTrackFacts,
   type AudioTrackReport,
   type AudioTrackSettings,
+  type CameraState,
   type CaptureEndReport,
   type CaptureOptions,
   type ChunkMsg,
   type MetaMsg,
+  type PartEndMsg,
   type RecorderPhase,
   type RecorderStatus,
   type RecoveryReport,
+  type VideoPartReport,
+  type VideoTrackFacts,
 } from '@loom/ipc';
 import {
   AUDIO_TRACK_KEYS,
   DEFAULT_RECORDING_NAME,
   TRACK_KEYS,
+  VIDEO_TRACK_KEYS,
   alignAudioPart,
   driftSec,
   isAudioTrack,
+  isVideoTrack,
+  videoPartStartSec,
   type AudioCaptureSummary,
   type AudioTrackKey,
   type DisplayInfo,
+  type PartEndReason,
   type PermissionState,
   type RecordingDoc,
   type RecordingId,
+  type VideoTrackKey,
 } from '@loom/format';
 import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
@@ -78,12 +87,18 @@ import {
   finalizedRecordingDoc,
   provisionalRecordingDoc,
   withAudioTrack,
-  withScreenTrack,
+  withClosedVideoPart,
+  withVideoPart,
   type FinalizedAudioFacts,
+  type FinalizedVideoPartFacts,
+  type FinalizedVideoTrackFacts,
 } from './recording-doc.ts';
 
-/** The video track phase 1 records. Phase 4 adds `webcam` beside it. */
-const TRACK = 'screen';
+/**
+ * The track the recording clock's origin comes from, and the one every other
+ * track's `startTimeSec` is an offset from (§5.4 mechanism 2).
+ */
+const REFERENCE_TRACK = 'screen';
 
 /** A chunk larger than this is not a frame; it is a bug or an attack. */
 const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
@@ -163,27 +178,98 @@ interface ActiveAudio {
   channels: number;
 }
 
+/**
+ * One video part that has been written and closed, before it has been placed.
+ *
+ * `startTimeSec` is missing on purpose: it is a difference between two tracks'
+ * clocks, and the reference track's half of that difference is not known until the
+ * capture page stops. What is kept instead are the two numbers it is made of, so
+ * every part of the recording can be placed in one pass at finalize.
+ */
+interface ClosedVideoPart extends Omit<FinalizedVideoPartFacts, 'startTimeSec'> {
+  /** This part's first frame, on its own track's clock. `null` if it wrote none. */
+  firstPtsUs: number | null;
+  /** This track's epoch offset as measured when the part closed. */
+  epochOffsetUs: number;
+}
+
+/**
+ * One video track's state while it is being recorded.
+ *
+ * A track is a *list of parts* (§2.3), so this holds both: whatever part is open
+ * right now, and everything already closed. The camera is what makes that real —
+ * §7.4's unplug closes one part and opens another mid-recording, and both end up
+ * in `recording.json` with a `startTimeSec` of their own.
+ */
+interface ActiveVideo {
+  track: VideoTrackKey;
+  /** The part index currently open, or `null` between parts and after the last. */
+  part: number | null;
+  /** Chunks that arrived before the open part was created, in arrival order. */
+  held: ChunkMsg[];
+  /** First and last chunk timestamps of the **open** part, on the track's clock. */
+  firstPtsUs: number | null;
+  lastEndUs: number;
+  /** Parts already closed, in the order they were recorded. */
+  parts: ClosedVideoPart[];
+  /**
+   * Part indices this track has ever opened.
+   *
+   * A renderer picks its own part numbers, so this is what stops a replayed or
+   * malformed announcement from reopening a part whose file is already closed —
+   * which `beginMediaPart`'s `wx` would refuse anyway, loudly, in the middle of a
+   * recording that was going fine.
+   */
+  opened: Set<number>;
+  /** The device this track is coming from, for `recording.json`. */
+  facts: VideoTrackFacts | null;
+  /**
+   * This track's epoch offset, as the open part's announcement reported it.
+   *
+   * Kept because it is the only measure of this track's epoch main holds when the
+   * capture page never gets to send an end report — a renderer that threw, or a
+   * stop that timed out. Without it the fallback in {@link
+   * RecorderSession.finalizeVideo} would subtract two clocks that do not share an
+   * origin, and a camera stamped on this machine's uptime would be written into
+   * `recording.json` as starting 2,678,930 seconds into the recording.
+   */
+  epochOffsetUs: number;
+  /** Frames the encoder could not keep up with, across every part. */
+  droppedFrames: number;
+  /** Set when the track is finished for good, so a late announcement is refused. */
+  done: boolean;
+}
+
 interface Active {
   id: RecordingId;
   options: CaptureOptions;
   /** Written before the first frame; replaced with real numbers at finalize. */
   provisional: RecordingDoc | null;
-  part: number | null;
-  /** Chunks that arrived before the part was open, in the order they arrived. */
-  held: ChunkMsg[];
-  firstPtsUs: number | null;
-  lastEndUs: number;
-  droppedFrames: number;
+  /**
+   * The screen and, when one was asked for and opened, the camera.
+   *
+   * Video parts open independently of each other and of the audio tracks — several
+   * encoders, several first chunks, no guaranteed order — so each track keeps its
+   * own held-chunk buffer rather than sharing one.
+   */
+  video: Map<VideoTrackKey, ActiveVideo>;
+  /**
+   * The recording clock's origin: the first screen frame, on the screen's own
+   * clock. `null` until that frame arrives, which is also when there is nothing
+   * for another track to be an offset from.
+   */
+  originUs: number | null;
   /**
    * The microphone and system tracks, once each has announced itself.
    *
-   * Audio parts open independently of the screen's and of each other — three
-   * encoders, three first chunks, no guaranteed order — so each keeps its own
-   * held-chunk buffer rather than sharing the screen's.
+   * Same reasoning as {@link Active.video}, and separate from it because an audio
+   * part carries a sample rate and gaps where a video part carries a frame index.
    */
   audio: Map<AudioTrackKey, ActiveAudio>;
   /** The first write that failed. A recording that cannot be written is over. */
   writeError: Error | null;
+  /** What the camera is doing, for the §7.4 banner. */
+  camera: CameraState;
   end: CaptureEndReport | null;
 }
 
@@ -255,6 +341,29 @@ export class RecorderSession {
       this.onChunk(raw);
     });
 
+    // On `metaChain` with the announcements, because it is the other half of the
+    // same conversation: closing a part and opening the next one are a
+    // read-modify-write of one `recording.json`, and a camera that reconnects
+    // quickly sends both within a millisecond of each other.
+    ipcMain.on(CHANNEL.capturePartEnded, (event, raw: unknown) => {
+      if (!this.fromCaptureWindow(event)) return;
+      this.metaChain = this.metaChain.then(
+        () =>
+          this.onPartEnded(raw).catch((error: unknown) => {
+            this.failActive(error);
+          }),
+        () => undefined,
+      );
+    });
+
+    // Not on `metaChain`: it changes no document and closes no file, and a camera
+    // that will not open is exactly the case where nothing else is coming to carry
+    // the news. §7.4's banner is no use once the recording has stopped.
+    ipcMain.on(CHANNEL.captureCameraUnavailable, (event, raw: unknown) => {
+      if (!this.fromCaptureWindow(event)) return;
+      this.onCameraUnavailable(shortString(raw, 500) ?? 'the camera could not be captured');
+    });
+
     ipcMain.on(CHANNEL.captureEnded, (event, raw: unknown) => {
       if (!this.fromCaptureWindow(event)) return;
       this.onEnded(endReport(raw));
@@ -281,6 +390,8 @@ export class RecorderSession {
       CHANNEL.recorderStop,
       CHANNEL.captureMeta,
       CHANNEL.captureChunk,
+      CHANNEL.capturePartEnded,
+      CHANNEL.captureCameraUnavailable,
       CHANNEL.captureEnded,
       CHANNEL.captureFailed,
     ]) {
@@ -335,13 +446,14 @@ export class RecorderSession {
         id,
         options,
         provisional,
-        part: null,
-        held: [],
-        firstPtsUs: null,
-        lastEndUs: 0,
-        droppedFrames: 0,
+        video: new Map(),
+        originUs: null,
         audio: new Map(),
         writeError: null,
+        // A camera that was asked for is *starting*, not missing: `getUserMedia`
+        // and the first frame take a moment, and calling that `unavailable` would
+        // open every camera recording with the §7.4 banner already on screen.
+        camera: options.webcamDeviceId === null ? 'off' : 'starting',
         end: null,
       };
 
@@ -405,22 +517,17 @@ export class RecorderSession {
     const { store } = this.options;
     try {
       await store.setState(active.id, 'finalizing');
-      const finalizedPart =
-        active.part === null
-          ? null
-          : await store.finalizeMediaPart(active.id, TRACK, report?.endedAtUs ?? undefined);
-      // Audio closes even when the screen failed: a file descriptor into the
+      // The end report closes whatever part of each video track was still open —
+      // parts that closed earlier arrived as `partEnded` and are already finalized.
+      // Every track closes even when another failed: a file descriptor into the
       // bundle outliving the recording is the thing `close` exists to prevent.
+      await this.finalizeVideo(active, report);
       const audio = await this.finalizeAudio(active, report);
+      const video = this.finalizedVideo(active);
 
       const provisional = active.provisional;
-      const screenTrack = provisional?.tracks.screen;
-      if (
-        provisional === null ||
-        screenTrack === undefined ||
-        finalizedPart === null ||
-        finalizedPart.frameCount === 0
-      ) {
+      const screenFrames = video.screen.parts.reduce((sum, part) => sum + part.frameCount, 0);
+      if (provisional?.tracks.screen === undefined || screenFrames === 0) {
         const reason =
           active.writeError !== null
             ? `the recording could not be written: ${active.writeError.message}`
@@ -431,30 +538,9 @@ export class RecorderSession {
         return;
       }
 
-      // A capture that ended by itself still produced footage, and that footage is
-      // kept. What changes is that the part says so, rather than passing itself off
-      // as a recording the user chose to end.
-      const endReason = endReasonFor(report);
       await store.writeRecordingDoc(
         active.id,
-        finalizedRecordingDoc(
-          provisional,
-          {
-            screen: {
-              durationSec: finalizedPart.durationSec,
-              frameCount: finalizedPart.frameCount,
-              observedFps: finalizedPart.observedFps,
-              endedEarly: endReason !== null,
-              ...(endReason === null ? {} : { endReason }),
-            },
-            audio,
-          },
-          // The capture page is the only thing that counts drops, so its report is
-          // the number. `active.droppedFrames` is the last one it sent, and stands
-          // in only when no end report arrived at all.
-          report?.framesDropped ?? active.droppedFrames,
-          new Date().toISOString(),
-        ),
+        finalizedRecordingDoc(provisional, { video, audio }, new Date().toISOString()),
       );
       await store.setState(active.id, 'editable');
       this.phase = 'idle';
@@ -558,8 +644,56 @@ export class RecorderSession {
       }
       return;
     }
-    if (meta.track !== TRACK) throw new Error(`phase 1 records ${TRACK} and audio only`);
-    if (active.part !== null) throw new Error('the screen track already has an open part');
+    if (meta.track === REFERENCE_TRACK) {
+      // The screen is the recording. A part of it that cannot be opened fails the
+      // capture rather than costing a track.
+      await this.onVideoMeta(active, meta, meta.track);
+      return;
+    }
+    // And the camera is not (§7.4). Same rule as the microphone's, for the same
+    // reason: whatever went wrong with the camera, the screen is still recording.
+    try {
+      await this.onVideoMeta(active, meta, meta.track);
+    } catch (error) {
+      console.error(`[recorder] the ${meta.track} part could not be opened:`, error);
+      this.giveUpOnCamera(active);
+    }
+  }
+
+  /**
+   * Stop expecting anything more from the camera, without touching what it wrote.
+   *
+   * The parts it already produced stay in `recording.json` — footage the capture
+   * succeeded at is footage the user keeps. What changes is that a later
+   * announcement under this track is refused rather than allowed to open a part
+   * beside the one that just failed.
+   */
+  private giveUpOnCamera(active: Active): void {
+    const state = active.video.get('webcam');
+    if (state !== undefined) state.done = true;
+    active.camera = 'unavailable';
+  }
+
+  /**
+   * The first message of a video part — the screen's, or one of the camera's.
+   *
+   * The camera is the reason this is not "the first message of the recording": a
+   * track may announce a part more than once, because §7.4's unplug closes
+   * `webcam.000.mp4` and the reconnect opens `webcam.001.mp4` while the screen
+   * carries on writing to its own file.
+   *
+   * A camera that cannot be opened costs its own track and nothing else, for
+   * exactly the reason §7.3 gives for the microphone: the screen is what the user
+   * pressed record for. A **screen** part that cannot be opened is the recording
+   * failing, and is allowed to throw.
+   */
+  private async onVideoMeta(active: Active, meta: MetaMsg, track: VideoTrackKey): Promise<void> {
+    const state = videoTrack(active, track);
+    if (state.done) throw new Error(`the ${track} track is finished and cannot open a part`);
+    if (state.part !== null) throw new Error(`${track} already has an open part`);
+    if (state.opened.has(meta.part)) {
+      throw new Error(`${track} part ${String(meta.part)} has already been recorded`);
+    }
 
     const description = meta.decoderConfig.description;
     if (description === undefined || description.byteLength === 0) {
@@ -570,29 +704,79 @@ export class RecorderSession {
     if (width <= 0 || height <= 0) throw new Error('the encoder reported no coded size');
 
     const { store } = this.options;
-    const file = store.mediaRelativePath(TRACK, meta.part);
-    const provisional = withScreenTrack(this.requireProvisional(active), {
+    const file = store.mediaRelativePath(track, meta.part);
+    const nominalFps = track === REFERENCE_TRACK ? active.options.fps : active.options.webcamFps;
+    if (meta.video !== undefined) {
+      // The identity and the timing are kept apart: `facts` is what
+      // `recording.json` names the device with, and the epoch offset is arithmetic
+      // this track's parts are placed with.
+      state.facts = { deviceId: meta.video.deviceId, deviceName: meta.video.deviceName };
+      state.epochOffsetUs = meta.video.epochOffsetUs;
+    }
+
+    const provisional = withVideoPart(this.requireProvisional(active), {
+      track,
       file,
       index: file.replace(/\.mp4$/, '.index.json'),
       codec: meta.decoderConfig.codec,
       size: [width, height],
-      requestedFps: active.options.fps,
+      requestedFps: nominalFps,
+      // The screen genuinely emits only when it changes; a camera delivers at its
+      // nominal rate whether or not anything moves (§2.3).
+      rateMode: track === REFERENCE_TRACK ? 'variable' : 'constant',
+      // A real value rather than a placeholder, so a crash-recovered second part
+      // does not claim to start where the first one did. The finalize below
+      // replaces it with the measured one.
+      startTimeSec: this.provisionalStartSec(active, track, meta),
+      ...(state.facts === null ? {} : { facts: state.facts }),
     });
     await store.writeRecordingDoc(active.id, provisional);
 
     const opened = await store.beginMediaPart(active.id, {
-      track: TRACK,
+      track,
       part: meta.part,
       width,
       height,
       avcC: description,
-      nominalFps: active.options.fps,
+      nominalFps,
       colour: { primaries: 1, transfer: 13, matrix: 1, fullRange: false },
     });
     active.provisional = provisional;
-    active.part = meta.part;
+    state.part = meta.part;
+    state.opened.add(meta.part);
+    state.firstPtsUs = null;
+    state.lastEndUs = 0;
+    if (track !== REFERENCE_TRACK) active.camera = 'live';
     if (opened.file !== file) throw new Error('the part path moved under the recording document');
-    this.appendHeldChunks(active);
+    this.appendHeldChunks(active, state);
+  }
+
+  /**
+   * Where a part starts, as well as it can be known before it has recorded
+   * anything.
+   *
+   * The reference track defines the origin, so its parts start at zero by
+   * construction. Everything else is placed against that origin with the same
+   * §5.4 arithmetic the finalize uses — from the renderer's own first timestamp,
+   * which the capture page sends with the announcement precisely so this number
+   * exists before the part's first byte does.
+   *
+   * Zero when there is nothing to measure against yet: the camera can announce
+   * itself before the first screen frame arrives, and a first part starting with
+   * the recording is what the snap produces anyway.
+   */
+  private provisionalStartSec(active: Active, track: VideoTrackKey, meta: MetaMsg): number {
+    if (track === REFERENCE_TRACK) return 0;
+    const origin = active.originUs;
+    if (origin === null || meta.video === undefined) return 0;
+    return videoPartStartSec({
+      firstTimestampUs: meta.video.firstTimestampUs,
+      // The screen's own epoch offset is not measured until it reports one, so the
+      // origin here is the raw first frame. Both halves are corrected at finalize.
+      originUs: origin,
+      epochOffsetUs: meta.video.epochOffsetUs,
+      referenceStartSec: 0,
+    });
   }
 
   /**
@@ -716,23 +900,289 @@ export class RecorderSession {
       this.onAudioChunk(active, chunk, chunk.track);
       return;
     }
-    if (chunk.track !== TRACK) return;
+    this.onVideoChunk(active, chunk, chunk.track);
+  }
 
-    if (active.part === null) {
-      if (active.held.length >= MAX_HELD_CHUNKS) {
-        this.failActive(
-          new Error(
-            `${String(MAX_HELD_CHUNKS)} frames arrived before the part could be opened; ` +
-              'the capture page never produced a usable decoder configuration',
-          ),
+  /**
+   * One encoded video frame, for whichever video track sent it.
+   *
+   * A chunk whose part is not open yet is held rather than discarded — see
+   * {@link MAX_HELD_CHUNKS}. The very first chunk of a part is always one of these,
+   * and it is always the keyframe the part has to begin with.
+   *
+   * Overrunning that budget ends the recording when it is the screen, and costs
+   * the camera when it is the camera — the same split §7.3 draws for audio, and
+   * the whole of what §7.4 asks for.
+   */
+  private onVideoChunk(active: Active, chunk: ChunkMsg, track: VideoTrackKey): void {
+    const state = videoTrack(active, track);
+    if (state.done) return;
+
+    if (state.part === null) {
+      if (state.held.length >= MAX_HELD_CHUNKS) {
+        const reason = new Error(
+          `${String(MAX_HELD_CHUNKS)} ${track} frames arrived before the part could be opened; ` +
+            'the capture page never produced a usable decoder configuration',
         );
+        if (track === REFERENCE_TRACK) {
+          this.failActive(reason);
+          return;
+        }
+        console.error(`[recorder] ${reason.message}; the camera is dropped`);
+        state.held = [];
+        this.giveUpOnCamera(active);
         return;
       }
-      active.held.push(chunk);
+      state.held.push(chunk);
       return;
     }
-    if (chunk.part !== active.part) return;
-    this.appendChunk(active, chunk);
+    if (chunk.part !== state.part) return;
+    this.appendChunk(active, state, chunk);
+  }
+
+  /**
+   * A video part that closed while the recording carried on — §7.4's unplug.
+   *
+   * The part is finalized here rather than at the end of the recording, so the
+   * frame index sidecar for everything already captured reaches the disk before the
+   * next part opens. Nothing about the screen or the audio tracks changes; that is
+   * the entire point.
+   *
+   * The close is written into `recording.json` in the same breath, because until it
+   * is, the document on disk still describes this part as open and running. A crash
+   * a minute later would then leave crash recovery unable to tell a camera that
+   * ended when the cable moved from a track that lost its tail to the process death
+   * — and it truncates the recording to the shortest track it cannot explain.
+   */
+  private async onPartEnded(raw: unknown): Promise<void> {
+    const active = this.active;
+    if (active === null) return;
+    const message = partEndMessage(raw);
+    const state = active.video.get(message.track);
+    if (state?.part !== message.part) return;
+
+    try {
+      await this.closeVideoPart(active, state, message);
+      await this.recordPartClose(active, message.track, state.parts.at(-1));
+    } catch (error) {
+      if (message.track === REFERENCE_TRACK) throw error;
+      console.error('[recorder] closing the camera part failed:', error);
+      this.giveUpOnCamera(active);
+      return;
+    }
+    if (message.track !== REFERENCE_TRACK) {
+      active.camera = message.endReason === 'device-lost' ? 'lost' : 'unavailable';
+      console.log(
+        `[recorder] the camera stopped after ${String(state.parts.length)} part(s): ` +
+          `${message.endReason ?? 'unknown'}. The screen and audio are still recording.`,
+      );
+    }
+    this.publish();
+  }
+
+  /**
+   * Write a part's close into the provisional document, mid-recording.
+   *
+   * Only the facts the writer measured and the reason the part ended — never
+   * `startTimeSec`, which is still a difference between two clocks whose second
+   * half is not known until the capture page stops (see {@link closeVideoPart}).
+   * What this buys is that the document on disk stops describing a finished part as
+   * open: `endedEarly` and `endReason: 'device-lost'` are how crash recovery later
+   * tells a camera that ended on purpose from a track the crash cut short, and they
+   * are facts only the live session has.
+   */
+  private async recordPartClose(
+    active: Active,
+    track: VideoTrackKey,
+    closed: ClosedVideoPart | undefined,
+  ): Promise<void> {
+    if (closed === undefined) return;
+    const provisional = withClosedVideoPart(this.requireProvisional(active), {
+      track,
+      part: closed.part,
+      durationSec: closed.durationSec,
+      frameCount: closed.frameCount,
+      observedFps: closed.observedFps,
+      endedEarly: closed.endedEarly,
+      ...(closed.endReason === undefined ? {} : { endReason: closed.endReason }),
+    });
+    await this.options.store.writeRecordingDoc(active.id, provisional);
+    active.provisional = provisional;
+  }
+
+  /**
+   * The capture page could not capture the camera at all (§7.4).
+   *
+   * The one camera state main cannot derive from its own parts: a `getUserMedia`
+   * that was refused, an encoder the machine does not have, a cable that flapped
+   * past the capture page's part budget. None of them produce a part, so without
+   * this the HUD would sit on `starting` for the rest of the recording and the
+   * banner §7.4 step 3 exists for would never appear.
+   *
+   * The track is *not* marked done here: what a renderer says about a device is
+   * news, not authority, and a part that does turn up afterwards is still footage
+   * the user keeps.
+   */
+  private onCameraUnavailable(reason: string): void {
+    const active = this.active;
+    if (active === null || active.camera === 'off') return;
+    console.error(`[recorder] ${reason}. The screen and audio are still recording.`);
+    active.camera = 'unavailable';
+    this.publish();
+  }
+
+  /**
+   * Close one open video part, keeping the numbers its `startTimeSec` is made of.
+   *
+   * The start time itself is **not** computed here, and that is deliberate. It is a
+   * difference between two clocks, and one of the two — the reference track's own
+   * epoch offset — is not known until the capture page stops and reports it. A part
+   * closed in the middle of a recording, which is exactly what §7.4's unplug
+   * produces, would therefore be placed against half an origin. So the raw inputs
+   * are kept and every part of the recording is placed at once, in
+   * {@link finalizedVideo}, when both halves are in hand.
+   *
+   * Everything else comes from the writer, which counted the frames it actually
+   * wrote and knows how long the last frame of a variable-rate track had to stand
+   * for.
+   */
+  private async closeVideoPart(
+    active: Active,
+    state: ActiveVideo,
+    report: VideoPartReport | null,
+  ): Promise<void> {
+    const part = state.part;
+    if (part === null) return;
+    state.part = null;
+
+    const written = await this.options.store.finalizeMediaPart(
+      active.id,
+      state.track,
+      report?.endedAtUs ?? undefined,
+    );
+    state.droppedFrames += report?.framesDropped ?? 0;
+    if (report?.facts !== undefined) state.facts = report.facts;
+
+    const endReason = report?.endReason;
+    state.parts.push({
+      part,
+      // The renderer's own first timestamp when it sent one; otherwise the first
+      // chunk main saw, which is the same frame observed one hop later.
+      firstPtsUs: report?.firstTimestampUs ?? state.firstPtsUs,
+      epochOffsetUs: report?.epochOffsetUs ?? 0,
+      durationSec: written.durationSec,
+      frameCount: written.frameCount,
+      observedFps: written.observedFps,
+      endedEarly: report?.endedEarly ?? true,
+      ...(endReason === undefined ? {} : { endReason }),
+    });
+    state.firstPtsUs = null;
+    state.lastEndUs = 0;
+  }
+
+  /**
+   * Close whatever video part each track still has open when capture stops.
+   *
+   * The screen's end reason comes from how the capture ended — a source that ended
+   * on its own is not a normal stop (§7.3). The camera's comes from its own entry
+   * in the report, because a camera can have been unplugged while the screen went
+   * on recording perfectly well, which is the whole of §7.4.
+   *
+   * A failure to close one track never stops the others from closing: an open file
+   * descriptor into the bundle is worse than a part described from what the writer
+   * managed to flush.
+   */
+  private async finalizeVideo(active: Active, report: CaptureEndReport | null): Promise<void> {
+    const screenEnd = endReasonFor(report);
+    for (const track of VIDEO_TRACK_KEYS) {
+      const state = active.video.get(track);
+      if (state?.part == null) continue;
+      const reported = report?.video?.find(
+        (entry) => entry.track === track && entry.part === state.part,
+      );
+      const fallback: VideoPartReport = {
+        track,
+        part: state.part,
+        firstTimestampUs: state.firstPtsUs,
+        lastTimestampUs: state.lastEndUs > 0 ? state.lastEndUs : null,
+        endedAtUs: track === REFERENCE_TRACK ? (report?.endedAtUs ?? null) : null,
+        // The offset this track announced itself with, never zero: `firstPtsUs` is
+        // on the track's own epoch, and a camera's is this machine's uptime.
+        epochOffsetUs: state.epochOffsetUs,
+        framesEncoded: 0,
+        framesDropped: track === REFERENCE_TRACK ? (report?.framesDropped ?? 0) : 0,
+        endedEarly: screenEnd !== null,
+        ...(screenEnd === null ? {} : { endReason: screenEnd }),
+      };
+      // The reported entry carries the renderer's own timestamps and drop count;
+      // the fallback is what a capture page that died before answering leaves us.
+      const closing: VideoPartReport =
+        reported === undefined
+          ? fallback
+          : {
+              ...reported,
+              // A camera that was still open when the user pressed stop ended for
+              // the same reason the recording did, not for one of its own.
+              endedEarly: reported.endedEarly || screenEnd !== null,
+              ...(reported.endReason !== undefined
+                ? { endReason: reported.endReason }
+                : screenEnd === null
+                  ? {}
+                  : { endReason: screenEnd }),
+            };
+      try {
+        await this.closeVideoPart(active, state, closing);
+      } catch (error) {
+        console.error(`[recorder] finalizing the ${track} part failed:`, error);
+        state.part = null;
+      }
+    }
+  }
+
+  /**
+   * Every video track's parts, placed on the recording clock (§5.4, §2.3).
+   *
+   * One moment, with everything known: the reference track's first frame and its
+   * epoch offset make the origin, and each part's own first frame and offset make
+   * its `startTimeSec`. The reference track's parts start at zero by construction —
+   * the origin *is* its first frame.
+   *
+   * A camera part that starts within one audio buffer of the origin is snapped onto
+   * it and one that starts two minutes later is not, which is what makes the gap a
+   * camera unplug leaves survive into `recording.json` instead of being closed up.
+   */
+  private finalizedVideo(active: Active): {
+    screen: FinalizedVideoTrackFacts;
+    webcam?: FinalizedVideoTrackFacts;
+  } {
+    const originUs = (active.originUs ?? 0) + (active.end?.epochOffsetUs ?? 0);
+    const out: Partial<Record<VideoTrackKey, FinalizedVideoTrackFacts>> = {};
+    for (const track of VIDEO_TRACK_KEYS) {
+      const state = active.video.get(track);
+      if (state === undefined) continue;
+      out[track] = {
+        droppedFrames: state.droppedFrames,
+        parts: state.parts.map((closed): FinalizedVideoPartFacts => {
+          const { firstPtsUs, epochOffsetUs, ...rest } = closed;
+          return {
+            ...rest,
+            startTimeSec:
+              track === REFERENCE_TRACK || firstPtsUs === null || active.originUs === null
+                ? 0
+                : videoPartStartSec({
+                    firstTimestampUs: firstPtsUs,
+                    originUs,
+                    epochOffsetUs,
+                    referenceStartSec: 0,
+                  }),
+          };
+        }),
+      };
+    }
+    return {
+      screen: out.screen ?? { parts: [], droppedFrames: 0 },
+      ...(out.webcam === undefined ? {} : { webcam: out.webcam }),
+    };
   }
 
   /**
@@ -852,9 +1302,9 @@ export class RecorderSession {
       // offset from it. With no screen frame there is nothing to be offset from,
       // and the track starts the recording.
       originUs:
-        active.firstPtsUs === null
+        active.originUs === null
           ? (measured.summary.firstTimestampUs ?? 0) + measured.epochOffsetUs
-          : active.firstPtsUs + videoEpochOffsetUs,
+          : active.originUs + videoEpochOffsetUs,
       epochOffsetUs: measured.epochOffsetUs,
       referenceStartSec: 0,
     });
@@ -906,36 +1356,52 @@ export class RecorderSession {
   }
 
   /** Write, in arrival order, whatever came in while `beginMediaPart` was resolving. */
-  private appendHeldChunks(active: Active): void {
-    const held = active.held;
-    active.held = [];
+  private appendHeldChunks(active: Active, state: ActiveVideo): void {
+    const held = state.held;
+    state.held = [];
     for (const chunk of held) {
-      if (chunk.part === active.part) this.appendChunk(active, chunk);
+      if (chunk.part === state.part) this.appendChunk(active, state, chunk);
     }
   }
 
-  private appendChunk(active: Active, chunk: ChunkMsg): void {
-    active.firstPtsUs ??= chunk.timestampUs;
-    active.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
+  /**
+   * Write one encoded frame to the part its track has open.
+   *
+   * A failed write ends the recording when it is the screen's, and costs the camera
+   * when it is the camera's (§7.4). Neither is awaited: the writer serializes its
+   * own appends, and blocking the IPC handler would build a queue in this process,
+   * which is precisely the memory a `SIGKILL` takes.
+   */
+  private appendChunk(active: Active, state: ActiveVideo, chunk: ChunkMsg): void {
+    state.firstPtsUs ??= chunk.timestampUs;
+    state.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
+    // The recording clock's origin is the reference track's first frame, and this
+    // is where it is learned (§5.4 mechanism 2).
+    if (state.track === REFERENCE_TRACK) active.originUs ??= chunk.timestampUs;
 
     void this.options.store
-      .appendMediaChunk(active.id, TRACK, {
+      .appendMediaChunk(active.id, state.track, {
         data: chunk.data,
         isKey: chunk.kind === 'key',
         timestampUs: chunk.timestampUs,
         durationUs: chunk.durationUs,
       })
       .catch((error: unknown) => {
-        this.failActive(error);
+        if (state.track === REFERENCE_TRACK) {
+          this.failActive(error);
+          return;
+        }
+        console.error('[recorder] writing the camera track failed:', error);
+        this.giveUpOnCamera(active);
       });
   }
 
   private onEnded(report: CaptureEndReport): void {
     const active = this.active;
-    if (active !== null) {
-      active.end = report;
-      active.droppedFrames = report.framesDropped;
-    }
+    // The drop counts are not applied here: `closeVideoPart` takes each track's
+    // from the report entry that closes its part, and adding them in both places
+    // would count every dropped frame twice.
+    if (active !== null) active.end = report;
     const waiters = this.endWaiters;
     this.endWaiters = [];
     for (const waiter of waiters) waiter(report);
@@ -1002,25 +1468,39 @@ export class RecorderSession {
   // -------------------------------------------------------------------- status
 
   private publish(): void {
+    const active = this.active;
+    const webcam = active?.video.get('webcam');
     const status: RecorderStatus = {
       phase: this.phase,
-      recordingId: this.active?.id ?? null,
+      recordingId: active?.id ?? null,
       elapsedSec: this.elapsedSec(),
       frameCount:
-        this.active === null ? 0 : this.options.store.mediaFrameCount(this.active.id, TRACK),
-      droppedFrames: this.active?.droppedFrames ?? 0,
+        active === null ? 0 : this.options.store.mediaFrameCount(active.id, REFERENCE_TRACK),
+      droppedFrames: [...(active?.video.values() ?? [])].reduce(
+        (sum, state) => sum + state.droppedFrames,
+        0,
+      ),
       error: this.lastError,
+      camera: active?.camera ?? 'off',
+      // Parts closed, plus the one open. The HUD shows this so a recording that
+      // survived an unplug says so while it is still going.
+      cameraParts: webcam === undefined ? 0 : webcam.parts.length + (webcam.part === null ? 0 : 1),
     };
     for (const window of this.options.windows.all()) {
       if (!window.isDestroyed()) window.webContents.send(CHANNEL.recorderStatus, status);
     }
   }
 
-  /** Media time, not wall clock — a stalled capture shows a stalled timer. */
+  /**
+   * Media time, not wall clock — a stalled capture shows a stalled timer.
+   *
+   * Measured on the reference track, whose first frame is the recording clock's
+   * origin. A camera that comes and goes does not move the elapsed time.
+   */
   private elapsedSec(): number {
-    const active = this.active;
-    if (active?.firstPtsUs == null) return 0;
-    return Math.max(0, (active.lastEndUs - active.firstPtsUs) / 1_000_000);
+    const state = this.active?.video.get(REFERENCE_TRACK);
+    if (state?.firstPtsUs == null) return 0;
+    return Math.max(0, (state.lastEndUs - state.firstPtsUs) / 1_000_000);
   }
 
   private startStatusTimer(): void {
@@ -1115,11 +1595,12 @@ export class RecorderSession {
     if (active?.writeError !== null) return;
     active.writeError = error instanceof Error ? error : new Error(message(error));
     console.error('[recorder] the capture path failed:', error);
+    const screen = active.video.get(REFERENCE_TRACK);
     this.onEnded({
       reason: 'error',
-      endedAtUs: active.lastEndUs > 0 ? active.lastEndUs : null,
+      endedAtUs: screen !== undefined && screen.lastEndUs > 0 ? screen.lastEndUs : null,
       framesEncoded: 0,
-      framesDropped: active.droppedFrames,
+      framesDropped: screen?.droppedFrames ?? 0,
       message: active.writeError.message,
     });
   }
@@ -1161,6 +1642,38 @@ export class RecorderSession {
       accessibility: systemPreferences.isTrustedAccessibilityClient(false),
     };
   }
+}
+
+/**
+ * This track's state, created on first mention and **registered immediately**.
+ *
+ * Registered before any caller can await, and that is the whole point of the
+ * function. Opening a part is two awaits long, and frames keep arriving across
+ * them — that is precisely why {@link MAX_HELD_CHUNKS} exists. If the announcement
+ * and the chunk path could each create their own state, the announcement would
+ * finish by publishing a state whose held-chunk buffer is empty, silently
+ * discarding every frame that arrived while the file was being created. That is a
+ * second of footage per part, gone with no error anywhere: the recording just
+ * begins late.
+ */
+function videoTrack(active: Active, track: VideoTrackKey): ActiveVideo {
+  const existing = active.video.get(track);
+  if (existing !== undefined) return existing;
+  const state: ActiveVideo = {
+    track,
+    part: null,
+    held: [],
+    firstPtsUs: null,
+    lastEndUs: 0,
+    parts: [],
+    opened: new Set(),
+    facts: null,
+    epochOffsetUs: 0,
+    droppedFrames: 0,
+    done: false,
+  };
+  active.video.set(track, state);
+  return state;
 }
 
 // ------------------------------------------------------- untrusted-input checks
@@ -1205,7 +1718,108 @@ function captureOptions(raw: unknown): Partial<CaptureOptions> {
   if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
     out.audioBitrate = Math.round(audioBitrate);
   }
+  const webcam = input['webcamDeviceId'];
+  if (webcam === null) out.webcamDeviceId = null;
+  else if (
+    typeof webcam === 'string' &&
+    webcam.length > 0 &&
+    webcam.length <= MAX_DEVICE_ID_LENGTH
+  ) {
+    out.webcamDeviceId = webcam;
+  }
+  const webcamFps = input['webcamFps'];
+  if (typeof webcamFps === 'number' && webcamFps > 0 && webcamFps <= 120) {
+    out.webcamFps = Math.round(webcamFps);
+  }
+  const webcamMax = input['webcamMaxDimension'];
+  if (typeof webcamMax === 'number' && webcamMax >= 160 && webcamMax <= 7680) {
+    out.webcamMaxDimension = Math.round(webcamMax);
+  }
+  const webcamBitrate = input['webcamBitrate'];
+  if (
+    typeof webcamBitrate === 'number' &&
+    webcamBitrate >= 100_000 &&
+    webcamBitrate <= 200_000_000
+  ) {
+    out.webcamBitrate = Math.round(webcamBitrate);
+  }
   return out;
+}
+
+/** A `PartEndReason`, or `undefined` when the value is not one. */
+function partEndReason(value: unknown): PartEndReason | undefined {
+  return value === 'device-lost' ||
+    value === 'permission-revoked' ||
+    value === 'disk-full' ||
+    value === 'crash'
+    ? value
+    : undefined;
+}
+
+function videoTrackKey(value: unknown): VideoTrackKey {
+  if (typeof value !== 'string' || !isVideoTrack(value as never)) {
+    throw new Error(`track must be one of ${VIDEO_TRACK_KEYS.join(' | ')}`);
+  }
+  return value as VideoTrackKey;
+}
+
+function videoFacts(raw: unknown): VideoTrackFacts | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const input = raw as Record<string, unknown>;
+  return {
+    deviceId: shortString(input['deviceId'], MAX_DEVICE_ID_LENGTH),
+    deviceName: shortString(input['deviceName']),
+  };
+}
+
+/**
+ * One video part's timing, shape-checked like every other renderer message.
+ *
+ * These numbers decide where a part sits on the recording clock, so a malformed
+ * one is refused rather than written: a `startTimeSec` derived from `NaN` is a
+ * camera track no later phase can place against the screen.
+ */
+function partEndMessage(raw: unknown): PartEndMsg {
+  if (raw === null || typeof raw !== 'object') throw new Error('partEnded must be an object');
+  const input = raw as Record<string, unknown>;
+  const facts = videoFacts(input['facts']);
+  const reason = partEndReason(input['endReason']);
+  return {
+    track: videoTrackKey(input['track']),
+    part: requirePart(input['part']),
+    ...(facts === undefined ? {} : { facts }),
+    firstTimestampUs: stamp(input['firstTimestampUs']),
+    lastTimestampUs: stamp(input['lastTimestampUs']),
+    endedAtUs: stamp(input['endedAtUs']),
+    epochOffsetUs: finite(input['epochOffsetUs']),
+    framesEncoded: Math.max(0, finite(input['framesEncoded'])),
+    framesDropped: Math.max(0, finite(input['framesDropped'])),
+    endedEarly: input['endedEarly'] === true,
+    ...(reason === undefined ? {} : { endReason: reason }),
+  };
+}
+
+/** Every video part still open when capture stopped, shape-checked. */
+function videoReports(raw: unknown): VideoPartReport[] {
+  if (!Array.isArray(raw)) return [];
+  const reports: VideoPartReport[] = [];
+  for (const entry of raw.slice(0, VIDEO_TRACK_KEYS.length)) {
+    try {
+      reports.push(partEndMessage(entry));
+    } catch {
+      // One malformed entry costs that entry. The part it would have closed is
+      // closed from what main itself saw instead — see `finalizeVideo`'s fallback.
+    }
+  }
+  return reports;
+}
+
+function finite(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function stamp(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /** A part index, or `null` when the value is not one. */
@@ -1241,6 +1855,7 @@ function metaMessage(raw: unknown): MetaMsg {
   }
   const description = decoder['description'];
   const audio = audioFacts(input['audio']);
+  const video = videoMeta(input['video']);
   return {
     track: requireTrack(input['track']),
     part: requirePart(input['part']),
@@ -1257,6 +1872,28 @@ function metaMessage(raw: unknown): MetaMsg {
       ...(description instanceof Uint8Array ? { description } : {}),
     },
     ...(audio === null ? {} : { audio }),
+    ...(video === null ? {} : { video }),
+  };
+}
+
+/**
+ * A video track's identity and where its part begins.
+ *
+ * `null` unless both timestamps are real numbers: a part announced with a `NaN`
+ * first frame would be written into `recording.json` as a `startTimeSec` nothing
+ * downstream can place, and a camera with no timing is better described by the
+ * measurement that arrives when the part closes.
+ */
+function videoMeta(raw: unknown): NonNullable<MetaMsg['video']> | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const input = raw as Record<string, unknown>;
+  const first = stamp(input['firstTimestampUs']);
+  if (first === null) return null;
+  return {
+    deviceId: shortString(input['deviceId'], MAX_DEVICE_ID_LENGTH),
+    deviceName: shortString(input['deviceName']),
+    firstTimestampUs: first,
+    epochOffsetUs: finite(input['epochOffsetUs']),
   };
 }
 
@@ -1322,23 +1959,15 @@ function audioReports(raw: unknown): AudioTrackReport[] {
     const summary = audioSummary(input['summary']);
     const part = partIndex(input['part']);
     if (facts === null || summary === null || part === null) continue;
-    const endReason = input['endReason'];
+    const endReason = partEndReason(input['endReason']);
     reports.push({
       track,
       part,
       facts,
       summary,
-      epochOffsetUs:
-        typeof input['epochOffsetUs'] === 'number' && Number.isFinite(input['epochOffsetUs'])
-          ? input['epochOffsetUs']
-          : 0,
+      epochOffsetUs: finite(input['epochOffsetUs']),
       endedEarly: input['endedEarly'] === true,
-      ...(endReason === 'device-lost' ||
-      endReason === 'permission-revoked' ||
-      endReason === 'disk-full' ||
-      endReason === 'crash'
-        ? { endReason }
-        : {}),
+      ...(endReason === undefined ? {} : { endReason }),
     });
   }
   return reports;
@@ -1348,10 +1977,6 @@ function audioSummary(raw: unknown): AudioCaptureSummary | null {
   if (raw === null || typeof raw !== 'object') return null;
   const input = raw as Record<string, unknown>;
   if (!isRate(input['nominalSampleRate']) || !isRate(input['measuredSampleRate'])) return null;
-  const finite = (value: unknown): number =>
-    typeof value === 'number' && Number.isFinite(value) ? value : 0;
-  const stamp = (value: unknown): number | null =>
-    typeof value === 'number' && Number.isFinite(value) ? value : null;
   const gaps = Array.isArray(input['gaps']) ? input['gaps'] : [];
   return {
     bufferCount: finite(input['bufferCount']),
@@ -1418,6 +2043,7 @@ function endReport(raw: unknown): CaptureEndReport {
     framesDropped: typeof input['framesDropped'] === 'number' ? input['framesDropped'] : 0,
     ...(typeof input['message'] === 'string' ? { message: input['message'].slice(0, 500) } : {}),
     ...(input['audio'] === undefined ? {} : { audio: audioReports(input['audio']) }),
+    ...(input['video'] === undefined ? {} : { video: videoReports(input['video']) }),
     ...(typeof input['epochOffsetUs'] === 'number' && Number.isFinite(input['epochOffsetUs'])
       ? { epochOffsetUs: input['epochOffsetUs'] }
       : {}),

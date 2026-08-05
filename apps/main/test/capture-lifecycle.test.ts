@@ -27,15 +27,37 @@ import {
   type RecordingDoc,
   type RecordingId,
 } from '@loom/format';
+import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
 import { ProjectStore } from '../src/project-store.ts';
 import {
   finalizedRecordingDoc,
   provisionalRecordingDoc,
-  withScreenTrack,
+  withAudioTrack,
+  withClosedVideoPart,
+  withVideoPart,
 } from '../src/recorder/recording-doc.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
 const fixture = loadEncodedFixture();
+
+/** An AAC-LC 48 kHz stereo AudioSpecificConfig, which is all the writer needs. */
+const AUDIO_ASC = new Uint8Array([0x11, 0x90]);
+const AUDIO_RATE = 48000;
+const AAC_FRAME_SAMPLES = 1024;
+
+const MIC_FACTS = {
+  deviceId: 'device-1',
+  deviceName: 'MacBook Pro Microphone',
+  source: 'getusermedia',
+  settings: {
+    sampleRate: AUDIO_RATE,
+    channelCount: 2,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  },
+  violations: [],
+};
 
 let scratch: string;
 let store: ProjectStore;
@@ -58,7 +80,7 @@ afterEach(async () => {
 
 function provisional(store: ProjectStore): RecordingDoc {
   const file = store.mediaRelativePath('screen', 0);
-  return withScreenTrack(
+  return withVideoPart(
     provisionalRecordingDoc({
       display: {
         id: 1,
@@ -82,11 +104,14 @@ function provisional(store: ProjectStore): RecordingDoc {
       },
     }),
     {
+      track: 'screen',
       file,
       index: file.replace(/\.mp4$/, '.index.json'),
       codec: 'avc1.64000d',
       size: [fixture.width, fixture.height],
       requestedFps: fixture.fps,
+      rateMode: 'variable',
+      startTimeSec: 0,
     },
   );
 }
@@ -168,8 +193,23 @@ describe('the documents capture writes', () => {
   it('fills in the real numbers at finalize without touching the rest', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
-      { screen: { durationSec: 10, frameCount: 300, observedFps: 30, endedEarly: false } },
-      2,
+      {
+        video: {
+          screen: {
+            droppedFrames: 2,
+            parts: [
+              {
+                part: 0,
+                startTimeSec: 0,
+                durationSec: 10,
+                frameCount: 300,
+                observedFps: 30,
+                endedEarly: false,
+              },
+            ],
+          },
+        },
+      },
       '2026-08-05T00:00:00.000Z',
     );
     const result = validateRecordingDoc(doc);
@@ -189,15 +229,23 @@ describe('the documents capture writes', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
       {
-        screen: {
-          durationSec: 4,
-          frameCount: 120,
-          observedFps: 30,
-          endedEarly: true,
-          endReason: 'permission-revoked',
+        video: {
+          screen: {
+            droppedFrames: 0,
+            parts: [
+              {
+                part: 0,
+                startTimeSec: 0,
+                durationSec: 4,
+                frameCount: 120,
+                observedFps: 30,
+                endedEarly: true,
+                endReason: 'permission-revoked',
+              },
+            ],
+          },
         },
       },
-      0,
       '2026-08-05T00:00:00.000Z',
     );
     expect(doc.tracks.screen?.parts[0]?.endReason).toBe('permission-revoked');
@@ -224,14 +272,22 @@ describe('a recording that stops cleanly', () => {
       finalizedRecordingDoc(
         provisional(store),
         {
-          screen: {
-            durationSec: part.durationSec,
-            frameCount: part.frameCount,
-            observedFps: part.observedFps,
-            endedEarly: false,
+          video: {
+            screen: {
+              droppedFrames: 0,
+              parts: [
+                {
+                  part: 0,
+                  startTimeSec: 0,
+                  durationSec: part.durationSec,
+                  frameCount: part.frameCount,
+                  observedFps: part.observedFps,
+                  endedEarly: false,
+                },
+              ],
+            },
           },
         },
-        0,
         new Date().toISOString(),
       ),
     );
@@ -369,6 +425,204 @@ describe('a recording that crashed', () => {
     expect(report.recovered).toBe(false);
     expect(report.error).toMatch(/no complete frame/);
     expect((await store.list()).find((s) => s.id === id)?.state).toBe('failed');
+  });
+
+  /**
+   * Six seconds of screen and microphone, with a camera unplugged at two.
+   *
+   * The camera's part is finalized mid-recording and its close written into
+   * `recording.json`, exactly as `RecorderSession.onPartEnded` does it. What the
+   * caller does next is where the crash lands.
+   */
+  async function recordAnUnpluggedCamera(): Promise<{ id: RecordingId; doc: RecordingDoc }> {
+    const id = await startRecording(0);
+    const screenFrames = fixture.frames.slice(0, 180);
+    const webcamFrames = fixture.frames.slice(0, 60);
+    const webcamFile = store.mediaRelativePath('webcam', 0);
+    const micFile = store.mediaRelativePath('mic', 0);
+
+    let doc = withAudioTrack(
+      withVideoPart(provisional(store), {
+        track: 'webcam',
+        file: webcamFile,
+        index: webcamFile.replace(/\.mp4$/, '.index.json'),
+        codec: 'avc1.64000d',
+        size: [fixture.width, fixture.height],
+        requestedFps: fixture.fps,
+        rateMode: 'constant',
+        startTimeSec: 0,
+        facts: { deviceId: 'camera-1', deviceName: 'FaceTime HD Camera' },
+      }),
+      {
+        track: 'mic',
+        file: micFile,
+        codec: 'mp4a.40.2',
+        sampleRate: AUDIO_RATE,
+        channels: 2,
+        facts: MIC_FACTS,
+      },
+    );
+    await store.writeRecordingDoc(id, doc);
+    await store.beginMediaPart(id, {
+      track: 'webcam',
+      part: 0,
+      width: fixture.width,
+      height: fixture.height,
+      avcC: fixture.avcC,
+      nominalFps: fixture.fps,
+    });
+    await store.beginAudioPart(id, {
+      track: 'mic',
+      part: 0,
+      sampleRate: AUDIO_RATE,
+      channels: 2,
+      audioSpecificConfig: AUDIO_ASC,
+    });
+
+    for (const frame of webcamFrames) {
+      await store.appendMediaChunk(id, 'webcam', {
+        data: frame.data,
+        isKey: frame.isKey,
+        timestampUs: frame.timestampUs,
+        durationUs: null,
+      });
+    }
+    const webcamPart = await store.finalizeMediaPart(
+      id,
+      'webcam',
+      Math.round((webcamFrames.length / fixture.fps) * 1_000_000),
+    );
+    doc = withClosedVideoPart(doc, {
+      track: 'webcam',
+      part: 0,
+      durationSec: webcamPart.durationSec,
+      frameCount: webcamPart.frameCount,
+      observedFps: webcamPart.observedFps,
+      endedEarly: true,
+      endReason: 'device-lost',
+    });
+    await store.writeRecordingDoc(id, doc);
+
+    // Six seconds of screen and microphone, which is what the user still has.
+    for (const frame of screenFrames) {
+      await store.appendMediaChunk(id, 'screen', {
+        data: frame.data,
+        isKey: frame.isKey,
+        timestampUs: frame.timestampUs,
+        durationUs: null,
+      });
+    }
+    const micFrames = Math.ceil((6 * AUDIO_RATE + AAC_ENCODER_DELAY_SAMPLES) / AAC_FRAME_SAMPLES);
+    for (let i = 0; i < micFrames; i++) {
+      await store.appendMediaChunk(id, 'mic', {
+        data: new Uint8Array(64).fill((i % 251) + 1),
+        isKey: true,
+        timestampUs: Math.round((i * AAC_FRAME_SAMPLES * 1_000_000) / AUDIO_RATE),
+        durationUs: null,
+      });
+    }
+    return { id, doc };
+  }
+
+  /** What a recovered bundle says about itself, once the pass has run. */
+  async function recoveredDoc(id: RecordingId): Promise<RecordingDoc> {
+    const recording = (await readJson(
+      join(await store.directoryFor(id), 'recording.json'),
+    )) as RecordingDoc;
+    expect(validateRecordingDoc(recording).ok).toBe(true);
+    return recording;
+  }
+
+  /**
+   * §7.4, met by §7.1: the camera is unplugged two seconds into a six second
+   * recording and never comes back, then the process is killed.
+   *
+   * The webcam track ends at two seconds **on purpose** — `capture.partEnded` closed
+   * it and `recording.json` says why — so it is not a short track. Cutting the
+   * recording back to it would report two seconds recovered for a bundle holding six
+   * seconds of screen and audio, and mark four seconds of the user's footage
+   * truncated. Raw sources are deleted after export by captain decision, so a
+   * recovery that describes what is there as less than it is is not a cosmetic bug.
+   */
+  it('does not truncate the recording to a camera that was unplugged on purpose', async () => {
+    const { id } = await recordAnUnpluggedCamera();
+
+    // The crash.
+    await store.close(id);
+
+    const report = await store.recoverBundle(id);
+    expect(report.recovered).toBe(true);
+    expect(
+      report.recoveredSec,
+      'the recording still holds six seconds of screen and audio; a camera that was ' +
+        'unplugged at two must not decide what was recovered',
+    ).toBeCloseTo(6, 1);
+
+    const recording = await recoveredDoc(id);
+    expect(recording.tracks.screen?.parts[0]?.durationSec).toBeCloseTo(6, 1);
+    expect(recording.tracks.mic?.parts[0]?.durationSec).toBeCloseTo(6, 1);
+    expect(recording.integrity.truncatedToSec).toBeCloseTo(report.recoveredSec, 6);
+
+    // And the camera keeps both the two seconds it captured and the reason it
+    // stopped, so nothing downstream mistakes an unplug for a crash.
+    const webcam = recording.tracks.webcam?.parts[0];
+    expect(webcam?.durationSec).toBeCloseTo(2, 1);
+    expect(webcam?.endReason).toBe('device-lost');
+  });
+
+  /**
+   * The same recording, killed in the window a reconnect opens.
+   *
+   * `recording.json` names a part **before** the part file exists — that ordering is
+   * deliberate, so a crash can never leave media with no document describing it. The
+   * cost is this window: the camera comes back at five seconds, `webcam.001.mp4` is
+   * announced and fsynced, and the kill lands before `beginMediaPart` creates it.
+   *
+   * Recovery drops that part, so the webcam still ends at two — but the reason it
+   * ended is only on the part that survived. Reading the reason from the document on
+   * disk instead would find the announced-and-never-written part, call the track
+   * running at two seconds, and truncate the recording to it: review-3's failure,
+   * reached by a different road.
+   */
+  it('does not truncate to a camera part the crash landed before creating', async () => {
+    const { id, doc } = await recordAnUnpluggedCamera();
+    const file = store.mediaRelativePath('webcam', 1);
+    await store.writeRecordingDoc(
+      id,
+      withVideoPart(doc, {
+        track: 'webcam',
+        file,
+        index: file.replace(/\.mp4$/, '.index.json'),
+        codec: 'avc1.64000d',
+        size: [fixture.width, fixture.height],
+        requestedFps: fixture.fps,
+        rateMode: 'constant',
+        startTimeSec: 5,
+        facts: { deviceId: 'camera-1', deviceName: 'FaceTime HD Camera' },
+      }),
+    );
+
+    // The crash, in the two awaits between the document and the file.
+    await store.close(id);
+
+    const report = await store.recoverBundle(id);
+    expect(report.recovered).toBe(true);
+    expect(
+      report.recoveredSec,
+      'a camera part that never reached the disk cannot decide how much of the ' +
+        'screen and the microphone survived',
+    ).toBeCloseTo(6, 1);
+
+    const recording = await recoveredDoc(id);
+    expect(recording.tracks.screen?.parts[0]?.durationSec).toBeCloseTo(6, 1);
+    expect(recording.tracks.mic?.parts[0]?.durationSec).toBeCloseTo(6, 1);
+    expect(recording.integrity.truncatedToSec).toBeCloseTo(report.recoveredSec, 6);
+
+    // The part with no file is dropped; the one that recorded something keeps both
+    // its footage and the reason it stopped.
+    expect(recording.tracks.webcam?.parts).toHaveLength(1);
+    expect(recording.tracks.webcam?.parts[0]?.durationSec).toBeCloseTo(2, 1);
+    expect(recording.tracks.webcam?.parts[0]?.endReason).toBe('device-lost');
   });
 
   it('discards a torn trailing fragment instead of welding the next write to it', async () => {

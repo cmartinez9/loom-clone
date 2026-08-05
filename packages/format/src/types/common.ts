@@ -37,6 +37,21 @@ export function isAudioTrack(track: TrackKey): track is AudioTrackKey {
   return track === 'mic' || track === 'system';
 }
 
+/**
+ * The two tracks that carry pictures, and therefore a frame index and a rate.
+ *
+ * `screen` is first because it is the reference: the recording clock's origin is
+ * its first frame, and every other track's `startTimeSec` is an offset from it
+ * (§5.4 mechanism 2).
+ */
+export type VideoTrackKey = Extract<TrackKey, 'screen' | 'webcam'>;
+
+export const VIDEO_TRACK_KEYS: readonly VideoTrackKey[] = ['screen', 'webcam'];
+
+export function isVideoTrack(track: TrackKey): track is VideoTrackKey {
+  return track === 'screen' || track === 'webcam';
+}
+
 /** Zero-based index of a part within a track (`screen.000.mp4` is part 0). */
 export type PartIndex = number;
 

@@ -72,6 +72,66 @@ export function trackSourceTimeSec(
   return sourceTime + (referenceStartSec - partStartSec);
 }
 
+export interface VideoPartStartOptions {
+  /** This part's first encoded frame, on its own track's clock. */
+  firstTimestampUs: number;
+  /**
+   * The recording clock's origin — the first screen frame — **on the shared
+   * arrival clock**, which is the screen's first timestamp plus its own epoch
+   * offset. See `TrackEpochEstimator` for why that is not simply the timestamp.
+   */
+  originUs: number;
+  /**
+   * Microseconds to add to this track's timestamps to reach the shared clock.
+   *
+   * Zero means "these two tracks are already on one clock", which is what a
+   * platform that shares an epoch produces and what every test that does not care
+   * about epochs passes.
+   */
+  epochOffsetUs?: number;
+  /**
+   * The track every other track is aligned against — the screen's `startTimeSec`,
+   * which is 0 by construction. `null` disables snapping.
+   */
+  referenceStartSec: number | null;
+  /** §5.4 mechanism 3. Defaults to {@link CROSS_TRACK_SNAP_SEC}. */
+  snapThresholdSec?: number;
+}
+
+/**
+ * Where one video part starts on the recording clock — §5.4 mechanisms 2 and 3,
+ * for a track made of pictures rather than samples.
+ *
+ * Deliberately the same arithmetic as `alignAudioPart`'s first two lines and not a
+ * second mechanism: this part's first frame minus the session origin, both moved
+ * onto the shared arrival clock by their own epoch offsets, then snapped onto the
+ * reference when what remains is smaller than one audio buffer.
+ *
+ * Only the start. A part's `durationSec` is measured from the samples that were
+ * actually written — the writer counts them, and it is the only thing that knows
+ * how long the last frame of a variable-rate track had to stand for.
+ *
+ * ## The snap is what makes this safe for a second part
+ *
+ * A camera that is unplugged and plugged back in produces `webcam.001.mp4` with a
+ * `startTimeSec` of its own — 149.204 s in §2.3's example — and that number is the
+ * only record of the hole in the middle of the track. Snapping is threshold-based,
+ * so one call serves both: part 0 begins within a frame or two of the screen and
+ * snaps onto it, part 1 begins two minutes later and is left exactly where it was
+ * measured. A snap that ignored the threshold would close the gap and slide the
+ * whole second part on top of the first — §5.4 mechanism 5's mistake, made with
+ * pictures instead of samples.
+ */
+export function videoPartStartSec(options: VideoPartStartOptions): Seconds {
+  const raw =
+    (options.firstTimestampUs + (options.epochOffsetUs ?? 0) - options.originUs) / 1_000_000;
+  return snapNearby(
+    raw,
+    options.referenceStartSec,
+    options.snapThresholdSec ?? CROSS_TRACK_SNAP_SEC,
+  );
+}
+
 /**
  * `measuredSampleRate / nominal` — the factor audio must be resampled by before
  * mixing, so its duration matches the video timebase (§5.5).

@@ -48,6 +48,7 @@ import {
   type EditDocument,
   type EditOp,
   type EventLogKind,
+  type PartEndReason,
   type PartIndex,
   type ProjectDoc,
   type ProjectState,
@@ -708,13 +709,36 @@ export class ProjectStore {
       const truncatedBytes =
         repaired.reduce((n, t) => n + t.truncatedBytes, 0) +
         [mic, system].reduce((n, t) => n + (t?.truncatedBytes ?? 0), 0);
-      // Every track is cut back to the shortest one: a half-written trailing
-      // fragment on one track must not desynchronise the rest (§7.1, step 1).
-      const ends = [
-        ...repaired.map((t) => t.endSec),
-        ...[mic, system].filter((t) => t !== null).map((t) => t.endSec),
-      ];
-      const shortestEndSec = ends.length === 0 ? null : Math.min(...ends);
+      // Every track that was still running is cut back to the shortest of them: a
+      // half-written trailing fragment on one must not desynchronise the rest
+      // (§7.1, step 1).
+      //
+      // "Still running" is the part this cannot do without. A camera unplugged at
+      // two seconds of a six second recording (§7.4) ends its track *on purpose*,
+      // and the live session wrote down that it did; taking the minimum over that
+      // too would report a recording with six seconds of screen and audio on disk
+      // as two seconds recovered, and mark the other four truncated. So a track
+      // whose last part ended for a recorded reason is excluded — and when every
+      // track ended that way, what the user still has is the longest of them.
+      //
+      // The reason is read from the **repaired** document, not the one on disk, so
+      // that it and `endSec` always come from the same part. A part announced in
+      // `recording.json` whose file the crash landed before creating is dropped by
+      // the repair; taking the reason from it would let a part that contributed
+      // nothing to `endSec` decide whether the track was running.
+      const running: number[] = [];
+      const everyEnd: number[] = [];
+      for (const track of [screen, webcam, mic, system]) {
+        if (track === null) continue;
+        everyEnd.push(track.endSec);
+        if (!endedForARecordedReason(track.track.parts.at(-1))) running.push(track.endSec);
+      }
+      const shortestEndSec =
+        running.length > 0
+          ? Math.min(...running)
+          : everyEnd.length > 0
+            ? Math.max(...everyEnd)
+            : null;
 
       if (frameCount === 0) {
         return await this.failRecovery(id, name, 'no complete frame survived the crash');
@@ -1107,6 +1131,26 @@ interface RepairedTrack {
   endSec: number;
 }
 
+/**
+ * Did this part stop for a reason the live session wrote down?
+ *
+ * §7.4's unplugged camera is the case that matters: `capture.partEnded` closes the
+ * part and records `endedEarly` with `endReason: 'device-lost'` in
+ * `recording.json` while the screen and the audio carry on. A track whose last part
+ * says that is not short — it is finished — and must not shorten the tracks that
+ * were still recording when the process died.
+ *
+ * `'crash'` is deliberately not one of these reasons. It is what recovery itself
+ * stamps on a part it had to repair, so treating it as an explanation would make a
+ * second pass over an already-repaired bundle believe no track was ever running.
+ */
+function endedForARecordedReason(
+  part: { endedEarly: boolean; endReason?: PartEndReason } | undefined,
+): boolean {
+  if (part === undefined) return false;
+  return part.endedEarly && part.endReason !== undefined && part.endReason !== 'crash';
+}
+
 /** Repair every part of one video track, or return `null` if none survived. */
 async function repairVideoTrack(
   dir: string,
@@ -1204,8 +1248,16 @@ async function repairAudioTrack(
   return { track: { ...track, parts }, truncatedBytes, endSec };
 }
 
-/** The part as the bytes on disk actually describe it, after recovery. */
+/**
+ * The part as the bytes on disk actually describe it, after recovery.
+ *
+ * A part that already carries a recorded reason keeps it. It ended when the camera
+ * was unplugged, not when the process died, and overwriting that with `'crash'`
+ * would throw away the only thing that tells the two apart — including from the
+ * next recovery pass over the same bundle.
+ */
 function repairedPart(part: VideoPart, recovered: RecoveredPart): VideoPart {
+  const recorded = part.endReason;
   return {
     ...part,
     codec: recovered.codec,
@@ -1214,7 +1266,7 @@ function repairedPart(part: VideoPart, recovered: RecoveredPart): VideoPart {
     frameCount: recovered.frameCount,
     rate: { ...part.rate, observedFps: recovered.observedFps },
     endedEarly: true,
-    endReason: 'crash',
+    endReason: recorded !== undefined && endedForARecordedReason(part) ? recorded : 'crash',
   };
 }
 

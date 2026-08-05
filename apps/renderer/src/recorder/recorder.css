@@ -8,6 +8,12 @@
 
    The whole bar is a drag region; the controls opt out through the `button`
    rule in components.css.
+
+   `.hud` is the 92 px bar and nothing below it belongs to it: the notice and
+   error lines sit on a shelf underneath, which exists only while it has words
+   on it. The window is 92 px tall for exactly as long as that shelf is empty —
+   main grows it to fit and shrinks it straight back (`windows.ts`), which is
+   why neither line reserves height here.
    ============================================================================ */
 
 body {
@@ -79,6 +85,7 @@ body {
    there is anything to stop. */
 .btn[hidden],
 .hud-dot[hidden],
+.hud-notice[hidden],
 .hud-error[hidden] {
   display: none;
 }
@@ -87,6 +94,16 @@ body {
   margin: 0;
   padding: var(--sp-2) var(--sp-4);
   color: var(--accent);
+  background: var(--bg);
+  border-top: var(--line) solid var(--keyline);
+}
+
+/* §7.4's camera banner. Same shelf as the error line and deliberately quieter:
+   ink rather than the record accent, because the recording is still fine. */
+.hud-notice {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--fg);
   background: var(--bg);
   border-top: var(--line) solid var(--keyline);
 }

@@ -1,6 +1,6 @@
 /**
- * The mutation proof for the capture gates: phase 1's crash gate and phase 3's A/V
- * sync gate.
+ * The mutation proof for the capture gates: phase 1's crash gate, phase 3's A/V
+ * sync gate and phase 4's camera-unplug gate.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -35,6 +35,9 @@ const LIFECYCLE = 'apps/main/test/capture-lifecycle.test.ts';
 const SYNC = 'apps/main/test/av-sync.test.ts';
 const SYNC_UNIT = 'packages/format/test/sync.test.ts';
 const AUDIO_MUX = 'packages/mux/test/audio-part.test.ts';
+/** The phase 4 gate: unplug the camera, keep the screen, two parts placed right. */
+const PHASE4 = 'test/phase4-gate.test.ts';
+const RECORDER = 'apps/main/test/recorder-session.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -133,6 +136,64 @@ const MUTATIONS = [
     find: '    startSec = gap.atSec + Math.max(0, gap.durationSec);',
     replace: '    startSec = gap.atSec;',
     mustFail: [SYNC, SYNC_UNIT],
+  },
+  {
+    name: 'second-part-placed-at-the-origin',
+    breaks:
+      'every part of a video track carries its own startTimeSec (§2.3, §5.4 ' +
+      'mechanism 2). Collapsing it to zero puts webcam.001.mp4 on top of ' +
+      'webcam.000.mp4 for the length of the recording — two files, both playable, ' +
+      'and a camera that plays over the wrong part of the screen.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '                : videoPartStartSec({',
+    replace: '                : 0 * videoPartStartSec({',
+    mustFail: [PHASE4],
+  },
+  {
+    name: 'part-start-not-snapped-to-the-reference',
+    breaks:
+      'sub-buffer offsets are snapped onto the reference track (§5.4 mechanism 3). ' +
+      'Without it a camera that opened 10 ms after the screen is recorded as ' +
+      'starting 10 ms late, and every consumer resamples to honour noise.',
+    file: 'packages/format/src/sync/align.ts',
+    find: '  return snapNearby(\n    raw,\n    options.referenceStartSec,',
+    replace: '  return snapNearby(\n    raw,\n    null,',
+    mustFail: [PHASE4],
+  },
+  {
+    name: 'camera-never-reacquired',
+    breaks:
+      'a camera that comes back opens the next part (§7.4 step 4). Without it the ' +
+      'unplug is permanent: the recording keeps its screen and its audio, and ' +
+      'silently has no camera for everything after the moment the cable moved.',
+    file: 'apps/renderer/src/capture/webcam.ts',
+    find: "      void this.loseCurrentPart('device-lost', { reacquire: true });",
+    replace: "      void this.loseCurrentPart('device-lost', { reacquire: false });",
+    mustFail: [PHASE4],
+  },
+  {
+    name: 'lost-part-never-announced',
+    breaks:
+      'a part that closed while the recording carried on is announced, so main ' +
+      'finalizes that file and lets the next part open. Swallowing it leaves the ' +
+      'first part open forever: main refuses the reconnect as a part it already ' +
+      'has, and the camera is written into one file with the unplug concatenated ' +
+      'out of it.',
+    file: 'apps/renderer/src/capture/webcam.ts',
+    find: '    this.sink.partEnded(this.reportFor(acquisition, true, reason));',
+    replace: '    void reason;',
+    mustFail: [PHASE4],
+  },
+  {
+    name: 'held-frames-dropped-while-a-part-opens',
+    breaks:
+      'frames that arrive while a part is being created are held and written the ' +
+      'moment it opens. Discarding them costs the initial keyframe and everything ' +
+      'up to the next one — a second of footage per part, with no error anywhere.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '      if (chunk.part === state.part) this.appendChunk(active, state, chunk);',
+    replace: '      if (chunk.part !== state.part) this.appendChunk(active, state, chunk);',
+    mustFail: [PHASE4, RECORDER],
   },
 ];
 

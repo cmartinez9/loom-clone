@@ -32,6 +32,7 @@ import {
   type EditOp,
   type LoomApi,
   type MetaMsg,
+  type PartEndMsg,
   type RecorderStatus,
   type RecordingDoc,
   type RecordingId,
@@ -106,6 +107,9 @@ const api: LoomApi = {
       subscribe(CHANNEL.recorderStatus, (payload) => {
         callback(payload as RecorderStatus);
       }),
+    noticeHeight: (px: number): void => {
+      ipcRenderer.send(CHANNEL.recorderNoticeHeight, px);
+    },
   },
 
   /**
@@ -123,6 +127,12 @@ const api: LoomApi = {
     },
     chunk: (message: ChunkMsg): void => {
       ipcRenderer.send(CHANNEL.captureChunk, message);
+    },
+    partEnded: (message: PartEndMsg): void => {
+      ipcRenderer.send(CHANNEL.capturePartEnded, message);
+    },
+    cameraUnavailable: (reason: string): void => {
+      ipcRenderer.send(CHANNEL.captureCameraUnavailable, reason);
     },
     ended: (report: CaptureEndReport): void => {
       ipcRenderer.send(CHANNEL.captureEnded, report);

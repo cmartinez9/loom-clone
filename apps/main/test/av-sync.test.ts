@@ -87,7 +87,7 @@ import {
   finalizedRecordingDoc,
   provisionalRecordingDoc,
   withAudioTrack,
-  withScreenTrack,
+  withVideoPart,
 } from '../src/recorder/recording-doc.ts';
 import {
   decodeToWav,
@@ -314,7 +314,7 @@ async function record(durationSec: number): Promise<Recorded> {
   const screenFile = store.mediaRelativePath('screen', 0);
   const audioFile = store.mediaRelativePath('system', 0);
   let doc = withAudioTrack(
-    withScreenTrack(
+    withVideoPart(
       provisionalRecordingDoc({
         display: {
           id: 1,
@@ -338,11 +338,14 @@ async function record(durationSec: number): Promise<Recorded> {
         },
       }),
       {
+        track: 'screen',
         file: screenFile,
         index: screenFile.replace(/\.mp4$/, '.index.json'),
         codec: 'avc1.42c015',
         size: [fixture.width, fixture.height],
         requestedFps: FPS,
+        rateMode: 'variable',
+        startTimeSec: 0,
       },
     ),
     {
@@ -439,15 +442,23 @@ async function record(durationSec: number): Promise<Recorded> {
   doc = finalizedRecordingDoc(
     doc,
     {
-      screen: {
-        durationSec: screenPart.durationSec,
-        frameCount: screenPart.frameCount,
-        observedFps: screenPart.observedFps,
-        endedEarly: false,
+      video: {
+        screen: {
+          droppedFrames: 0,
+          parts: [
+            {
+              part: 0,
+              startTimeSec: 0,
+              durationSec: screenPart.durationSec,
+              frameCount: screenPart.frameCount,
+              observedFps: screenPart.observedFps,
+              endedEarly: false,
+            },
+          ],
+        },
       },
       audio: { system: { timing, endedEarly: false } },
     },
-    0,
     '2026-08-05T00:00:00.000Z',
   );
   await store.writeRecordingDoc(id, doc);

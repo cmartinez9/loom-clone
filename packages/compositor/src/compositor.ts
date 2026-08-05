@@ -20,7 +20,7 @@
  * checkable at all.
  *
  * Phase 6 draws the screen track and nothing else. The passes that follow — bubble
- * (phase 4), cursor (5), annotations and blur/mask (11) — attach to the same FBO in
+ * (phase 7), cursor (5), annotations and blur/mask (11) — attach to the same FBO in
  * the same `render()` call. Handing this class a `webcam` or `cursor` today throws
  * rather than being quietly ignored, because "the webcam did not appear" is a bug
  * report nobody enjoys receiving.
@@ -66,7 +66,7 @@ import { SCREEN_FRAGMENT_SHADER, SCREEN_VERTEX_SHADER, UNIT_QUAD } from './shade
  */
 export interface CompositorFrames {
   screen: VideoFrame | null;
-  /** Phase 4. */
+  /** Phase 7. */
   webcam?: VideoFrame | null;
   /** Phase 5. */
   cursor?: { texture: WebGLTexture; hotspot: [number, number]; sizePx: [number, number] } | null;
@@ -255,7 +255,9 @@ export class Compositor {
   render(frames: CompositorFrames, state: ResolvedState): void {
     this.#assertLive();
     if (frames.webcam != null) {
-      throw new GlError('webcam compositing lands in phase 4 (architecture report §8)');
+      throw new GlError(
+        'the compositor has no webcam pass yet: the bubble track lands in phase 7 (architecture report §8)',
+      );
     }
     if (frames.cursor != null) {
       throw new GlError('cursor compositing lands in phase 5 (architecture report §8)');

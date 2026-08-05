@@ -83,6 +83,7 @@ async function main(): Promise<void> {
 
   installLoomProtocol({ store, rendererRoot });
   registerIpc({ store, appVersion: app.getVersion() });
+  windows.installHudNoticeFit();
   recorder.install();
 
   // Before any window can ask for a recording: a bundle still saying

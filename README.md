@@ -5,16 +5,19 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 3 of 14: audio and the A/V sync machinery**, plus the phase 5 cursor and click
-sampler and phase 6's decode path and WebGL2 compositor, built early and out of order
-because they are self-contained.
+**Phase 4 of 14: the webcam track and multi-part recordings**, on top of phase 3's
+audio and A/V sync machinery, plus the phase 5 cursor and click sampler and phase 6's
+decode path and WebGL2 compositor, built early and out of order because they are
+self-contained.
 
 What runs today: the app launches, records the screen with the microphone and the
 system's own audio output alongside it, and lists the recordings it finds under
 `~/Movies/Loom Clone` — revealing them in Finder or moving them to the Trash. System
 audio needs no driver and no admin prompt, which is why the floor is macOS 14. The
-webcam is phase 4 and the editor phase 7; they are deliberately absent rather than
-stubbed.
+camera records as a track of its own when a recording asks for one, but it is opt-in
+and the HUD has no toggle yet: opening a camera lights the hardware indicator, so it
+should follow from a user asking, and the asking is phase 2's permission flow and
+later HUD work. The editor is phase 7, deliberately absent rather than stubbed.
 
 The property phase 1 established: **a recording survives the process being killed.**
 Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
@@ -32,8 +35,18 @@ cross-correlating them at 1 minute **and at 20 minutes**, with a 20 ms budget. T
 minutes is the point: a build that trusts a sound card's claim of "48 kHz" is 2.6 ms
 out at one minute and 59.6 ms out at twenty.
 
-`npm run verify:mutation` proves both gates by breaking the writers eight ways and
-requiring a test to fail each time.
+The property phase 4 establishes: **losing a device costs that device and nothing
+else.** A camera unplugged mid-recording closes its part; the screen and the audio do
+not notice; and the same camera plugged back in opens a second part with a
+`startTimeSec` of its own, so the hole lives in `recording.json` and is never
+concatenated out of the media. `npm test` proves it by driving the shipping capture
+page through a device loss and a reconnect — the `ended` and `devicechange` events
+macOS itself delivers — and checking both parts' boundaries, with three controls that
+must fail. What no dev run can exercise is a real camera or a real cable; `AGENTS.md`
+carries those forward.
+
+`npm run verify:mutation` proves all three gates by breaking the capture path one way
+at a time and requiring a test to fail each time.
 
 The native input sampler is complete alongside it, but nothing starts it yet, because
 the permission flow that turns it on is phase 2.

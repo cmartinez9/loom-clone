@@ -19,10 +19,15 @@ interface Recorded {
   options: Record<string, unknown>;
   contentProtection: boolean[];
   loaded: string[];
+  /** Every `setContentSize` this window was given, in order. */
+  contentSizes: [number, number][];
+  window: unknown;
 }
 
 vi.mock('electron', () => {
   const created: Recorded[] = [];
+  const listeners = new Map<string, (event: unknown, ...args: unknown[]) => void>();
+  const byContents = new Map<number, unknown>();
   let nextId = 0;
 
   class FakeWebContents {
@@ -38,13 +43,32 @@ vi.mock('electron', () => {
   class FakeBrowserWindow {
     readonly webContents = new FakeWebContents();
     private readonly record: Recorded;
+    private size: [number, number];
 
     constructor(options: Record<string, unknown>) {
-      this.record = { options, contentProtection: [], loaded: [] };
+      this.record = {
+        options,
+        contentProtection: [],
+        loaded: [],
+        contentSizes: [],
+        window: this,
+      };
+      this.size = [Number(options['width'] ?? 0), Number(options['height'] ?? 0)];
       created.push(this.record);
+      byContents.set(this.webContents.id, this);
+    }
+    static fromWebContents(contents: { id: number }): unknown {
+      return byContents.get(contents.id) ?? null;
     }
     setContentProtection(enabled: boolean): void {
       this.record.contentProtection.push(enabled);
+    }
+    getContentSize(): number[] {
+      return [...this.size];
+    }
+    setContentSize(width: number, height: number): void {
+      this.size = [width, height];
+      this.record.contentSizes.push([width, height]);
     }
     loadURL(url: string): Promise<void> {
       this.record.loaded.push(url);
@@ -72,13 +96,22 @@ vi.mock('electron', () => {
 
   return {
     BrowserWindow: FakeBrowserWindow,
+    ipcMain: {
+      on(channel: string, listener: (event: unknown, ...args: unknown[]) => void) {
+        listeners.set(channel, listener);
+      },
+    },
     nativeTheme: { shouldUseDarkColors: false },
     shell: { openExternal: () => Promise.resolve() },
     __created: created,
+    __listeners: listeners,
   };
 });
 
-const electron = (await import('electron')) as unknown as { __created: Recorded[] };
+const electron = (await import('electron')) as unknown as {
+  __created: Recorded[];
+  __listeners: Map<string, (event: unknown, ...args: unknown[]) => void>;
+};
 const { WINDOW_ROLES, WindowRegistry } = await import('../src/windows.ts');
 type WindowRole = keyof typeof WINDOW_ROLES;
 
@@ -134,6 +167,81 @@ describe('content protection', () => {
       const calls = electron.__created[0]?.contentProtection ?? [];
       expect(calls, `role ${role}`).toEqual(EXPECTED_PROTECTION[role] ? [true] : []);
     }
+  });
+});
+
+/**
+ * The half of `installHudNoticeFit` that `test/hud-notice.test.ts` cannot see.
+ *
+ * That gate measures the pixels a user gets, in a real window, and is the reason
+ * this code exists. What it never exercises is a *wrong* sender or a *wrong*
+ * number — and both would be silent: the HUD is `alwaysOnTop` over the display it
+ * is recording, so a window that grew to a thousand pixels on a stray message
+ * would cover the screen with nothing to drag it out of the way by.
+ */
+describe('the HUD grows only for its own notice', () => {
+  function install(): {
+    registry: InstanceType<typeof WindowRegistry>;
+    fire: (contents: unknown, raw: unknown) => void;
+  } {
+    const registry = new WindowRegistry({ preloadPath: '/preload.cjs' });
+    registry.installHudNoticeFit();
+    const listener = electron.__listeners.get('loom.recorder.noticeHeight');
+    if (listener === undefined) throw new Error('installHudNoticeFit registered no listener');
+    return {
+      registry,
+      fire: (contents: unknown, raw: unknown) => {
+        listener({ sender: contents }, raw);
+      },
+    };
+  }
+
+  it('grows by the reported height and shrinks straight back to 420x92', () => {
+    const { registry, fire } = install();
+    const hud = registry.show('recorder-hud');
+
+    fire(hud.webContents, 45.5);
+    // Rounded up, never down: half a pixel short clips the descenders off the
+    // last line of the notice this exists to show.
+    expect(hud.getContentSize()).toEqual([420, 138]);
+
+    fire(hud.webContents, 0);
+    expect(hud.getContentSize()).toEqual([420, 92]);
+  });
+
+  it('ignores a report from any window that is not the HUD', () => {
+    const { registry, fire } = install();
+    const hud = registry.show('recorder-hud');
+    const library = registry.show('library');
+
+    fire(library.webContents, 400);
+    expect(hud.getContentSize()).toEqual([420, 92]);
+    expect(electron.__created.map((r) => r.contentSizes)).toEqual([[], []]);
+  });
+
+  it('clamps a height no notice could have produced', () => {
+    const { registry, fire } = install();
+    const hud = registry.show('recorder-hud');
+
+    fire(hud.webContents, 10_000);
+    expect(hud.getContentSize()[1]).toBeLessThanOrEqual(92 + 200);
+    fire(hud.webContents, -500);
+    expect(hud.getContentSize()).toEqual([420, 92]);
+    // A renderer that sends nonsense is a renderer main ignores, not one that
+    // resizes the window to `NaN`.
+    fire(hud.webContents, 'tall');
+    expect(hud.getContentSize()).toEqual([420, 92]);
+  });
+
+  it('does not resize when the shelf has not changed', () => {
+    const { registry, fire } = install();
+    const hud = registry.show('recorder-hud');
+    const record = electron.__created[0];
+
+    fire(hud.webContents, 46);
+    fire(hud.webContents, 46);
+    fire(hud.webContents, 46);
+    expect(record?.contentSizes).toEqual([[420, 138]]);
   });
 });
 
