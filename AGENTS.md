@@ -570,15 +570,17 @@ lives, and `sealReport()` in `apps/main/src/verify/checks.ts` rewrites every `pa
 `npm run verify:permissions` packages the app, gives it the frozen identity, launches
 it through LaunchServices and runs the checks from inside the real bundle. Last run
 2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
-`responsibleForSelf: true`, so `sealReport` downgraded nothing.
+`responsibleForSelf: true`, so `sealReport` downgraded nothing. The run's own outcome
+is `incomplete` rather than `verified`, because `verified` needs every check to pass
+and the click row is `skipped`.
 
-| Check                  | Status       | Evidence                                                                                                                                            |
-| ---------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle-identity`      | **pass**     | Packaged, launched by launchd, signing as the frozen id.                                                                                            |
-| `frame-authorisation`  | **pass**     | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.      |
-| `screen-enumeration`   | **pass**     | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.              |
-| `content-protection`   | **pass**     | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched. |
-| `accessibility-clicks` | **deferred** | Tap confirmed live (`tapEnabled: true` under the granted bundle). Rate and latency deferred to phase 10 by captain decision — it consumes the log.  |
+| Check                  | Status      | Evidence                                                                                                                                                                                                             |
+| ---------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`      | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                             |
+| `frame-authorisation`  | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                       |
+| `screen-enumeration`   | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                               |
+| `content-protection`   | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                  |
+| `accessibility-clicks` | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in the window, so the rate is unmeasured. Rate and latency are deferred to phase 10 by captain decision — it consumes the log. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from
 the HUD's rectangle" passes just as well when the capture is black, the coordinates are
