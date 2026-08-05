@@ -1,0 +1,358 @@
+/**
+ * The hidden capture page. Architecture report §1.1, §1.4, §10.2.
+ *
+ * ```
+ * getDisplayMedia → MediaStreamTrackProcessor → VideoEncoder → encoded chunks → main
+ * ```
+ *
+ * No UI, no framework, no DOM output. It exists because Electron already reaches
+ * ScreenCaptureKit through `getDisplayMedia`, so a native helper would buy only
+ * crash isolation — which a dedicated hidden window gives for free, with main
+ * holding the file descriptors (§1.1).
+ *
+ * ## The three rules this file exists to keep
+ *
+ * 1. **`MediaStreamTrackProcessor` + `VideoEncoder`, never `MediaRecorder`.** The
+ *    research scout measured `MediaRecorder` dropping 40–80% of frames on a screen
+ *    track (§5.5). That is not a tuning problem; it is the wrong API.
+ * 2. **Nothing raw crosses IPC.** What leaves this page is `EncodedVideoChunk`
+ *    bytes. A single 3456×2234 NV12 frame is 11.6 MB; at 30 fps that would be
+ *    347 MB/s of structured-clone traffic to accomplish nothing (§1.4).
+ * 3. **Every frame is closed, in a `finally`.** WebCodecs frames are manually
+ *    reference-counted, and a leaked one exhausts the pool and then simply stops
+ *    producing frames — no error, no throw, just a capture that quietly stops
+ *    (§10.2). The loop below closes in `finally` and asserts the live count on
+ *    every iteration, so the *first* leak is loud rather than the hundredth.
+ */
+
+import type { CaptureEndReason, CaptureOptions } from '@loom/ipc';
+
+/**
+ * Codec strings to try, highest level first.
+ *
+ * The level has to cover the display's pixel count; `isConfigSupported` is the
+ * only honest way to find out which the machine's VideoToolbox will take. The
+ * `avcC` that comes back from the encoder is what `recording.json` actually
+ * records, so a downgrade here corrects itself downstream.
+ */
+const CODECS = ['avc1.640034', 'avc1.640033', 'avc1.640032', 'avc1.640028', 'avc1.42E028'];
+
+/** Keyframe cadence during capture. Architecture report §7.1 fixes this at 1 s. */
+const KEYFRAME_INTERVAL_US = 1_000_000;
+
+/**
+ * Frames the encoder may be behind before we start dropping.
+ *
+ * Dropping is better than queueing: a queue is memory this process holds, and
+ * everything this process holds is what a crash costs. Drops are counted and end
+ * up in `recording.json.capture.droppedFrames`, so they are visible rather than
+ * silent.
+ */
+const MAX_ENCODE_QUEUE = 8;
+
+interface Session {
+  stream: MediaStream;
+  track: MediaStreamTrack;
+  reader: ReadableStreamDefaultReader<VideoFrame>;
+  encoder: VideoEncoder;
+  part: number;
+  framesEncoded: number;
+  framesDropped: number;
+  metaSent: boolean;
+  /**
+   * The most recent frame's timestamp, and the `performance.now()` at which it
+   * arrived — together they let a stop be placed on the encoder's clock.
+   *
+   * A screen track produces frames only when the screen changes, so a recording
+   * that ends on a still screen can go seconds without one. The last frame has to
+   * stand for that time, and it can only do so if main is told when capture
+   * actually stopped.
+   */
+  lastFrameUs: number | null;
+  lastFrameAtMs: number;
+  /** Set once, by whichever of stop/track-end/error happens first. */
+  ending: CaptureEndReason | null;
+  endMessage: string | null;
+}
+
+let session: Session | null = null;
+let starting = false;
+
+window.loom.capture.onCommand((command) => {
+  if (command.kind === 'start') {
+    void begin(command.options);
+  } else {
+    void end('stopped');
+  }
+});
+
+async function begin(options: CaptureOptions): Promise<void> {
+  if (session !== null || starting) return;
+  starting = true;
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: options.fps,
+        // Research trap 9: an unclamped 6K or 8K display overwhelms the encoder
+        // and the disk. Clamping the *track* rather than scaling afterwards keeps
+        // the pixels we never wanted from being produced at all.
+        width: { max: options.maxDimension },
+        height: { max: options.maxDimension },
+      },
+      // Audio is phase 3. `audio: 'loopback'` is what will go here.
+      audio: false,
+    });
+
+    const track = stream.getVideoTracks()[0];
+    if (track === undefined) throw new Error('the screen stream carried no video track');
+
+    const encoder = new VideoEncoder({
+      output: (chunk, metadata) => {
+        onEncoded(chunk, metadata);
+      },
+      error: (error: DOMException) => {
+        void end('error', error.message);
+      },
+    });
+
+    session = {
+      stream,
+      track,
+      reader: new MediaStreamTrackProcessor({ track }).readable.getReader(),
+      encoder,
+      part: 0,
+      framesEncoded: 0,
+      framesDropped: 0,
+      metaSent: false,
+      lastFrameUs: null,
+      lastFrameAtMs: 0,
+      ending: null,
+      endMessage: null,
+    };
+
+    // The screen source ending on its own is not a normal stop — a revoked Screen
+    // Recording permission and the macOS "Stop sharing" control both arrive this
+    // way (§7.3). Main is told which it was so it can finalize rather than wait.
+    track.addEventListener('ended', () => {
+      void end('source-ended', 'the screen source stopped');
+    });
+
+    starting = false;
+    await pump(session, options);
+  } catch (error) {
+    starting = false;
+    const current = session;
+    session = null;
+    if (current !== null) await release(current);
+    window.loom.capture.failed(describe(error));
+  }
+}
+
+/**
+ * The frame loop.
+ *
+ * One `VideoFrame` is alive at a time, and it is closed in a `finally` so that an
+ * encoder that throws, a configure that fails, or a drop decision all release it.
+ * `live` is the assertion that this is actually true — it trips on the first leak,
+ * not the hundredth (§10.2).
+ */
+async function pump(current: Session, options: CaptureOptions): Promise<void> {
+  let configured = false;
+  let lastKeyframeUs = Number.NEGATIVE_INFINITY;
+  let live = 0;
+
+  for (;;) {
+    const { value, done } = await current.reader.read();
+    if (done || value === undefined) break;
+    live += 1;
+    try {
+      if (live > 1) {
+        throw new Error(`${String(live)} VideoFrames are live at once; one of them leaked`);
+      }
+      if (current.ending !== null) break;
+
+      if (!configured) {
+        await configure(current.encoder, value, options);
+        configured = true;
+      }
+
+      // Backpressure before the encode, so the frame we decline is closed by the
+      // `finally` below rather than handed to a queue we already know is behind.
+      if (current.encoder.encodeQueueSize >= MAX_ENCODE_QUEUE) {
+        current.framesDropped += 1;
+        continue;
+      }
+
+      const keyFrame = value.timestamp - lastKeyframeUs >= KEYFRAME_INTERVAL_US;
+      if (keyFrame) lastKeyframeUs = value.timestamp;
+      current.encoder.encode(value, { keyFrame });
+      current.framesEncoded += 1;
+      current.lastFrameUs = value.timestamp;
+      current.lastFrameAtMs = performance.now();
+    } finally {
+      value.close();
+      live -= 1;
+    }
+  }
+
+  await end(current.ending ?? 'source-ended', current.endMessage);
+}
+
+/**
+ * Configure the encoder from the first frame.
+ *
+ * Lazily, because the frame is the only honest source of the coded size: the
+ * constraints handed to `getDisplayMedia` are a request, and what ScreenCaptureKit
+ * delivers on a retina display is its own business.
+ */
+async function configure(
+  encoder: VideoEncoder,
+  frame: VideoFrame,
+  options: CaptureOptions,
+): Promise<void> {
+  // H.264 wants even dimensions; a 4:2:0 chroma plane has no half pixels.
+  const width = Math.max(2, frame.displayWidth - (frame.displayWidth % 2));
+  const height = Math.max(2, frame.displayHeight - (frame.displayHeight % 2));
+
+  for (const codec of CODECS) {
+    const config: VideoEncoderConfig = {
+      codec,
+      width,
+      height,
+      bitrate: options.bitrate,
+      framerate: options.fps,
+      // `realtime` is what keeps B-frames out of the stream, which is what lets
+      // the frame index treat presentation and decode order as the same thing
+      // (§2.4) and lets a fragment carry its exact time in `tfdt`.
+      latencyMode: 'realtime',
+      // AVCC framing, so chunks arrive length-prefixed with the parameter sets in
+      // `decoderConfig.description` — exactly what an MP4 sample entry wants.
+      avc: { format: 'avc' },
+      hardwareAcceleration: 'prefer-hardware',
+    };
+    const support = await VideoEncoder.isConfigSupported(config);
+    if (support.supported === true) {
+      encoder.configure(config);
+      return;
+    }
+  }
+  throw new Error(`no supported H.264 configuration for ${String(width)}x${String(height)}`);
+}
+
+function onEncoded(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata): void {
+  const current = session;
+  if (current === null) return;
+
+  if (!current.metaSent) {
+    const config = metadata?.decoderConfig;
+    const description = config?.description;
+    if (config === undefined || description === undefined) {
+      void end('error', 'the encoder produced no decoder configuration');
+      return;
+    }
+    current.metaSent = true;
+    window.loom.capture.meta({
+      track: 'screen',
+      part: current.part,
+      decoderConfig: {
+        codec: config.codec,
+        ...(config.codedWidth === undefined ? {} : { codedWidth: config.codedWidth }),
+        ...(config.codedHeight === undefined ? {} : { codedHeight: config.codedHeight }),
+        description: toBytes(description),
+      },
+    });
+  }
+
+  // `copyTo` into a fresh buffer: what crosses IPC is a copy of the encoded bytes
+  // and nothing else. The chunk itself is not transferable and must not be kept.
+  const data = new Uint8Array(chunk.byteLength);
+  chunk.copyTo(data);
+  window.loom.capture.chunk({
+    track: 'screen',
+    part: current.part,
+    kind: chunk.type === 'key' ? 'key' : 'delta',
+    timestampUs: chunk.timestamp,
+    durationUs: chunk.duration ?? null,
+    data,
+  });
+}
+
+/**
+ * Stop producing frames and tell main what we produced.
+ *
+ * `encoder.flush()` before `close()`: the encoder may be holding frames it has
+ * not emitted, and those frames are already on the user's screen-recording clock.
+ * Dropping them to stop a few milliseconds sooner would be losing footage the
+ * capture already succeeded at.
+ *
+ * `current.ending` is what makes this idempotent — a stop, a track that ended and
+ * an encoder error can all arrive at once, and only the first gets past it. The
+ * module-level `session` is cleared *after* the flush, because {@link onEncoded}
+ * routes on it: clearing it first would discard exactly the frames the flush
+ * exists to collect.
+ */
+async function end(reason: CaptureEndReason, detail?: string | null): Promise<void> {
+  const current = session;
+  if (current === null) return;
+  if (current.ending !== null) return;
+  current.ending = reason;
+  current.endMessage = detail ?? null;
+
+  try {
+    await current.reader.cancel().catch(() => undefined);
+    current.track.stop();
+    if (current.encoder.state === 'configured') await current.encoder.flush();
+  } catch (error) {
+    current.endMessage ??= describe(error);
+  } finally {
+    if (session === current) session = null;
+    await release(current);
+  }
+
+  window.loom.capture.ended({
+    reason,
+    endedAtUs: stoppedAtUs(current),
+    framesEncoded: current.framesEncoded,
+    framesDropped: current.framesDropped,
+    ...(current.endMessage === null ? {} : { message: current.endMessage }),
+  });
+}
+
+async function release(current: Session): Promise<void> {
+  try {
+    if (current.encoder.state !== 'closed') current.encoder.close();
+  } catch {
+    // A closed encoder is the goal; a failure to close one is not worth reporting
+    // over whatever caused us to be here.
+  }
+  for (const track of current.stream.getTracks()) track.stop();
+  await current.reader.cancel().catch(() => undefined);
+}
+
+/**
+ * When capture stopped, on the encoder's clock.
+ *
+ * There is no clock reading available for "now" in `VideoFrame.timestamp` units —
+ * the only samples of that clock are the frames themselves. So: the last frame's
+ * timestamp, plus the wall time elapsed since it arrived. Both clocks run at the
+ * same rate over the sub-second gap this covers, and being a millisecond out at the
+ * end of a recording is not a thing anyone can see. Being three seconds short,
+ * which is what happens without this, is.
+ */
+function stoppedAtUs(current: Session): number | null {
+  if (current.lastFrameUs === null) return null;
+  const elapsedUs = Math.max(0, (performance.now() - current.lastFrameAtMs) * 1000);
+  return Math.round(current.lastFrameUs + elapsedUs);
+}
+
+function toBytes(description: AllowSharedBufferSource): Uint8Array {
+  if (description instanceof ArrayBuffer) return new Uint8Array(description.slice(0));
+  const view = description as ArrayBufferView;
+  return new Uint8Array(
+    view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer,
+  );
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

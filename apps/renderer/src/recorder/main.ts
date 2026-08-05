@@ -1,0 +1,101 @@
+/**
+ * The recorder HUD. Architecture report §1.2.
+ *
+ * Phase 1's HUD is deliberately small: start, stop, a timer and an honest count.
+ * Source and device pickers, audio meters and the live camera preview belong to
+ * the phases that have audio (3) and a camera (4) to point them at.
+ *
+ * **This is the window `setContentProtection(true)` exists for.** It sets
+ * `NSWindowSharingNone`, which is how our own UI stays out of the recording. The
+ * flag lives on the role in `apps/main/src/windows.ts`; this file is what it keeps
+ * out of the frame.
+ *
+ * The timer counts **media time**, not wall clock. A capture that stalls shows a
+ * stalled timer, which is the truth; a wall clock would keep counting and tell the
+ * user their recording is longer than it is.
+ */
+
+import '@loom/design/css';
+import './recorder.css';
+import { formatDuration } from '@loom/design';
+import type { RecorderStatus } from '@loom/ipc';
+
+const loom = window.loom;
+
+const dot = must('dot');
+const phaseLabel = must('phase');
+const timer = must('timer');
+const counts = must('counts');
+const recordButton = must('record') as HTMLButtonElement;
+const stopButton = must('stop') as HTMLButtonElement;
+const errorLine = must('error');
+
+function must(id: string): HTMLElement {
+  const element = document.getElementById(id);
+  if (element === null) throw new Error(`recorder.html is missing #${id}`);
+  return element;
+}
+
+const PHASE_LABEL: Record<RecorderStatus['phase'], string> = {
+  idle: 'Ready',
+  starting: 'Starting',
+  recording: 'Recording',
+  finalizing: 'Finishing',
+  failed: 'Failed',
+};
+
+recordButton.addEventListener('click', () => {
+  errorLine.hidden = true;
+  recordButton.disabled = true;
+  void loom.recorder.start().catch((error: unknown) => {
+    recordButton.disabled = false;
+    showError(error);
+  });
+});
+
+stopButton.addEventListener('click', () => {
+  stopButton.disabled = true;
+  void loom.recorder.stop().catch((error: unknown) => {
+    showError(error);
+  });
+});
+
+loom.recorder.onStatus(render);
+
+render({
+  phase: 'idle',
+  recordingId: null,
+  elapsedSec: 0,
+  frameCount: 0,
+  droppedFrames: 0,
+  error: null,
+});
+
+function render(status: RecorderStatus): void {
+  const live = status.phase === 'recording';
+  dot.hidden = !live;
+  phaseLabel.textContent = PHASE_LABEL[status.phase];
+  timer.textContent = formatDuration(status.elapsedSec);
+
+  recordButton.hidden = live || status.phase === 'finalizing';
+  recordButton.disabled = status.phase === 'starting';
+  stopButton.hidden = !live && status.phase !== 'finalizing';
+  stopButton.disabled = status.phase === 'finalizing';
+
+  // Dropped frames are shown rather than hidden. A recording that could not keep
+  // up is a recording the user may want to make again, and finding that out in
+  // the editor is finding it out too late.
+  const parts = [`${String(status.frameCount)} frames`];
+  if (status.droppedFrames > 0) parts.push(`${String(status.droppedFrames)} dropped`);
+  counts.textContent = live || status.phase === 'finalizing' ? parts.join(' · ') : '';
+
+  if (status.error !== null) {
+    errorLine.textContent = status.error;
+    errorLine.hidden = false;
+  }
+}
+
+function showError(error: unknown): void {
+  errorLine.textContent = error instanceof Error ? error.message : String(error);
+  errorLine.hidden = false;
+}

@@ -24,6 +24,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify:mutation": "node scripts/mutation-check.mjs",
     "package": "npm run build && electron-builder --mac --config electron-builder.yml",
     "verify": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },

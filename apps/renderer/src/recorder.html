@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Same strict CSP as the library. No `media-src`: the HUD shows a timer and a
+      button. The live camera preview arrives with phase 4 and will need one.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self';
+               font-src 'self';
+               img-src 'self' data:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Recorder</title>
+    <script type="module" src="./recorder/main.ts"></script>
+  </head>
+  <body>
+    <!--
+      The HUD is the one window that must never appear in a recording.
+      `setContentProtection(true)` — NSWindowSharingNone — is set on this role in
+      `apps/main/src/windows.ts`, and `apps/main/test/windows.test.ts` fails if it
+      stops being.
+    -->
+    <main class="hud" aria-live="polite">
+      <div class="hud-state">
+        <span class="hud-dot" id="dot" hidden></span>
+        <span class="t-label" id="phase">Ready</span>
+      </div>
+
+      <div class="hud-timer" id="timer">0:00</div>
+
+      <div class="hud-counts t-label" id="counts"></div>
+
+      <div class="hud-actions">
+        <button class="btn btn-rec" id="record" type="button">Record screen</button>
+        <button class="btn btn-sm btn-ghost" id="stop" type="button" hidden>Stop</button>
+      </div>
+    </main>
+
+    <p class="hud-error t-label" id="error" hidden></p>
+  </body>
+</html>

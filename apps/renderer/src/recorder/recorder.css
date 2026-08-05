@@ -1,0 +1,92 @@
+/* ============================================================================
+   Recorder HUD — Direction A, "Pressroom"
+
+   A 420x92 frameless bar that floats above the desktop. It is the one window in
+   the app that *is* floating, so it is the one window entitled to a raised
+   ground and a keyline all the way round — and still no gradient, no blur and
+   no soft shadow (`data/loom-design/report.md` §2, §8).
+
+   The whole bar is a drag region; the controls opt out through the `button`
+   rule in components.css.
+   ============================================================================ */
+
+body {
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  -webkit-app-region: drag;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.hud {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 92px;
+  padding: 0 var(--sp-4);
+  background: var(--bg-raised);
+  border: var(--line) solid var(--keyline);
+}
+
+.hud-state {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 96px;
+}
+
+/* The record dot. Same shape and cadence as the library's live chip, because it
+   means the same thing. */
+.hud-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: live-pulse 1.6s var(--e-soft) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-dot {
+    animation: none;
+  }
+}
+
+.hud-timer {
+  font-family: var(--font-mono);
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
+.hud-counts {
+  grid-column: 2;
+  grid-row: 2;
+  text-align: center;
+  color: var(--fg-dim);
+}
+
+.hud-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* `components.css` gives `.btn` a `display`, which outranks the UA's
+   `[hidden] { display: none }`. Without this the Stop button is visible before
+   there is anything to stop. */
+.btn[hidden],
+.hud-dot[hidden],
+.hud-error[hidden] {
+  display: none;
+}
+
+.hud-error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--accent);
+  background: var(--bg);
+  border-top: var(--line) solid var(--keyline);
+}

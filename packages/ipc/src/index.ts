@@ -32,13 +32,14 @@
  * }
  * ```
  *
- * Phase 0 ships `library` and `project`. `recorder` (phase 1) and `export` (phase 8)
- * are deliberately absent rather than stubbed: their payload types — `Devices`,
- * `CaptureOptions`, `PermissionReport`, `RecorderStatus`, `ExportSettings`,
- * `ExportProgress` — are not specified anywhere in the architecture report, and a
- * guessed shape that thirteen workers compile against is worse than no shape.
- * Adding a namespace is three lines here, one handler in `apps/main/src/ipc`, and
- * one line in the preload.
+ * Phase 0 shipped `library` and `project`. Phase 1 adds `recorder` — `start`,
+ * `stop` and `onStatus`, with the `CaptureOptions` and `RecorderStatus` the screen
+ * spine actually needs, plus an `open` the §1.4 sketch has no name for: the library
+ * asks for the HUD, and the HUD owns the recording (§1.2). `devices` and `preflight`
+ * belong to phase 2 (permissions and first run) and `export` to phase 8; both stay
+ * absent rather than stubbed, because a guessed shape that thirteen workers compile
+ * against is worse than no shape. Adding a namespace is three lines here, one handler
+ * in main, and one line in the preload.
  *
  * ## What must never cross
  *
@@ -103,6 +104,124 @@ export interface ProjectApi {
   mediaUrl(id: RecordingId, track: TrackKey, part: number): Promise<string>;
 }
 
+// ---------------------------------------------------------------- recorder
+
+/**
+ * What to capture. Phase 1 is **screen video only**; microphone and system audio
+ * (phase 3) and the webcam (phase 4) add fields here rather than a second options
+ * type, because they are options on one capture, not three captures.
+ */
+export interface CaptureOptions {
+  /** Electron display id. `null` records the primary display. */
+  displayId: number | null;
+  /** Requested frame rate. The screen track is genuinely variable-rate (§2.3). */
+  fps: number;
+  /**
+   * Longest edge, in pixels, the capture is clamped to.
+   *
+   * Research report trap 9: an unclamped 6K or 8K display overwhelms the encoder
+   * and the disk. Loom clamps to 4K and so do we.
+   */
+  maxDimension: number;
+  /** Target video bitrate, bits per second. */
+  bitrate: number;
+}
+
+export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
+  displayId: null,
+  fps: 30,
+  maxDimension: 3840,
+  bitrate: 12_000_000,
+};
+
+/**
+ * Where a recording is in its life. A subset of `project.json`'s `state` (§2.2)
+ * plus `idle`, because "no recording in progress" is a state of the *recorder*
+ * rather than of any recording.
+ */
+export type RecorderPhase = 'idle' | 'starting' | 'recording' | 'finalizing' | 'failed';
+
+export interface RecorderStatus {
+  phase: RecorderPhase;
+  recordingId: RecordingId | null;
+  /** Seconds of media written so far — not wall clock, so a stall is visible. */
+  elapsedSec: number;
+  frameCount: number;
+  droppedFrames: number;
+  /** Present only in `failed`, and already phrased for a person to read. */
+  error: string | null;
+}
+
+/** What a crash-recovery pass found, so the app can say it out loud (§7.1). */
+export interface RecoveryReport {
+  recordingId: RecordingId;
+  name: string;
+  /** `true` when the bundle came back as an editable recording. */
+  recovered: boolean;
+  /** Seconds of media that survived. */
+  recoveredSec: number;
+  frameCount: number;
+  /** Bytes discarded from a fragment that was mid-write when the process died. */
+  truncatedBytes: number;
+  /** Set when the bundle could not be recovered at all. */
+  error: string | null;
+}
+
+export interface RecorderApi {
+  /** Show the recorder HUD. Fire-and-forget, like `library.reveal`. */
+  open(): void;
+  start(options?: Partial<CaptureOptions>): Promise<{ recordingId: RecordingId }>;
+  stop(): Promise<void>;
+  onStatus(callback: (status: RecorderStatus) => void): Unsubscribe;
+}
+
+// ---------------------------------------------------------------- capture
+
+/**
+ * The hidden capture page's half of the contract.
+ *
+ * Separate from {@link RecorderApi} because it is a different conversation with a
+ * different window: the HUD asks for a recording, the capture page produces one.
+ * Main accepts these channels **only** from the capture window; the preload is
+ * shared by every window, so the authorisation is in main, where it can be checked
+ * against the sender.
+ */
+export type CaptureCommand = { kind: 'start'; options: CaptureOptions } | { kind: 'stop' };
+
+/** Why the renderer stopped producing frames. */
+export type CaptureEndReason = 'stopped' | 'source-ended' | 'error';
+
+export interface CaptureEndReport {
+  reason: CaptureEndReason;
+  /**
+   * When capture stopped, on the same microsecond clock as the chunk timestamps.
+   *
+   * The screen track only produces a frame when the screen changes, so the last
+   * frame of a recording that ends on a still screen has to stand for everything
+   * after it. Without this, that time is simply not in the file: a four second
+   * recording of a static screen reports as a fraction of a second. `null` when the
+   * capture never produced a frame to measure against.
+   */
+  endedAtUs: number | null;
+  framesEncoded: number;
+  /**
+   * Frames the encoder could not keep up with. Recorded in
+   * `recording.json.capture.droppedFrames` rather than swallowed — a recording
+   * that dropped frames is a recording the user may need to be told about.
+   */
+  framesDropped: number;
+  message?: string;
+}
+
+export interface CaptureApi {
+  onCommand(callback: (command: CaptureCommand) => void): Unsubscribe;
+  /** The decoder configuration for a part, sent before its first chunk. */
+  meta(message: MetaMsg): void;
+  chunk(message: ChunkMsg): void;
+  ended(report: CaptureEndReport): void;
+  failed(message: string): void;
+}
+
 // ---------------------------------------------------------------- app
 
 /** Ambient facts about the running app, for the window chrome and the About box. */
@@ -121,19 +240,36 @@ export interface AppApi {
 
 // ---------------------------------------------------------------- LoomApi
 
-/** The object the preload exposes as `window.loom`. */
+/**
+ * The object the preload exposes as `window.loom`.
+ *
+ * Every window gets all of it, because there is one preload. Which window may
+ * actually *use* a namespace is decided in main against the sender: `capture` is
+ * accepted only from the hidden capture window, and `recorder.start`/`stop` only
+ * from a window that is allowed to drive a recording. A capability the preload
+ * hands out is not the same as a capability main honours.
+ */
 export interface LoomApi {
   app: AppApi;
   library: LibraryApi;
   project: ProjectApi;
+  recorder: RecorderApi;
+  capture: CaptureApi;
 }
 
 // ---------------------------------------------------------------- channels
 
 /**
- * Channel names. Every one is `invoke`/`handle` except the two `send`-only ones,
- * which are marked. Strings are namespaced so a typo is a missing handler rather
- * than a collision with a future channel.
+ * Channel names, in three disjoint kinds:
+ *
+ * - **invoke** — renderer asks, main answers;
+ * - **send** — renderer tells main, no answer;
+ * - **event** — main pushes to a renderer; the preload only ever `on`s these.
+ *
+ * Strings are namespaced so a typo is a missing handler rather than a collision
+ * with a future channel. `packages/ipc/test/ipc-boundary.test.ts` asserts the
+ * three sets partition this table exactly, and that an event channel is never
+ * `send` or `invoke`d from a renderer.
  */
 export const CHANNEL = {
   appInfo: 'loom.app.info',
@@ -148,6 +284,24 @@ export const CHANNEL = {
   projectOpen: 'loom.project.open',
   projectApplyOps: 'loom.project.applyOps',
   projectMediaUrl: 'loom.project.mediaUrl',
+
+  /** send-only */
+  recorderOpen: 'loom.recorder.open',
+  recorderStart: 'loom.recorder.start',
+  recorderStop: 'loom.recorder.stop',
+  /** event: main -> renderer */
+  recorderStatus: 'loom.recorder.status',
+
+  /** event: main -> the capture window */
+  captureCommand: 'loom.capture.command',
+  /** send-only, capture window -> main */
+  captureMeta: 'loom.capture.meta',
+  /** send-only, capture window -> main. The one high-rate channel. */
+  captureChunk: 'loom.capture.chunk',
+  /** send-only, capture window -> main */
+  captureEnded: 'loom.capture.ended',
+  /** send-only, capture window -> main */
+  captureFailed: 'loom.capture.failed',
 } as const;
 
 export type ChannelName = (typeof CHANNEL)[keyof typeof CHANNEL];
@@ -159,9 +313,25 @@ export const INVOKE_CHANNELS: readonly ChannelName[] = [
   CHANNEL.projectOpen,
   CHANNEL.projectApplyOps,
   CHANNEL.projectMediaUrl,
+  CHANNEL.recorderStart,
+  CHANNEL.recorderStop,
 ];
 
-export const SEND_CHANNELS: readonly ChannelName[] = [CHANNEL.appRevealRoot, CHANNEL.libraryReveal];
+export const SEND_CHANNELS: readonly ChannelName[] = [
+  CHANNEL.appRevealRoot,
+  CHANNEL.libraryReveal,
+  CHANNEL.recorderOpen,
+  CHANNEL.captureMeta,
+  CHANNEL.captureChunk,
+  CHANNEL.captureEnded,
+  CHANNEL.captureFailed,
+];
+
+/** Main -> renderer pushes. A renderer subscribes; it never sends on these. */
+export const EVENT_CHANNELS: readonly ChannelName[] = [
+  CHANNEL.recorderStatus,
+  CHANNEL.captureCommand,
+];
 
 /** The key the preload binds the API to on `window`. */
 export const LOOM_API_KEY = 'loom';
@@ -173,8 +343,10 @@ export const LOOM_API_KEY = 'loom';
  * process that writes them (§1.4). Measured ceiling 289 MB/s against a ~2 MB/s
  * requirement — about 190× headroom — *because* what crosses is already encoded.
  *
- * Declared in phase 0 so that phase 1 inherits the shape rather than inventing it;
- * no handler is registered for it yet.
+ * Declared in phase 0, carried unchanged into phase 1, which registers the
+ * handler. `part` is chosen by the renderer, which is what makes a new part on a
+ * device loss (phase 4) a message rather than a round trip; main refuses a part
+ * index it has already opened.
  */
 export interface ChunkMsg {
   track: TrackKey;
@@ -196,11 +368,6 @@ export interface MetaMsg {
     description?: Uint8Array;
   };
 }
-
-export const CAPTURE_CHANNEL = {
-  chunk: 'loom.capture.chunk',
-  meta: 'loom.capture.meta',
-} as const;
 
 // ---------------------------------------------------------------- loom://
 

@@ -24,6 +24,7 @@ import { DEFAULT_RECORDINGS_SUBPATH, LOOM_BUNDLE_ID, LOOM_PRODUCT_NAME } from '.
 import { ProjectStore } from './project-store.ts';
 import { installLoomProtocol, registerLoomScheme } from './protocol.ts';
 import { registerIpc, unregisterIpc } from './ipc.ts';
+import { RecorderSession } from './recorder/session.ts';
 import { WindowRegistry } from './windows.ts';
 
 // ---- identity, before anything reads a path ---------------------------------
@@ -54,6 +55,16 @@ const store = new ProjectStore({
 
 const windows = new WindowRegistry({ preloadPath });
 
+const recorder = new RecorderSession({
+  store,
+  windows,
+  appVersion: app.getVersion(),
+  // `process.getSystemVersion()` is the marketing version ("26.5.1"), which is
+  // what `recording.json` should carry; `os.release()` is the Darwin kernel
+  // version, which nobody can act on.
+  osVersion: process.getSystemVersion(),
+});
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -72,6 +83,15 @@ async function main(): Promise<void> {
 
   installLoomProtocol({ store, rendererRoot });
   registerIpc({ store, appVersion: app.getVersion() });
+  recorder.install();
+
+  // Before any window can ask for a recording: a bundle still saying
+  // `state: "recording"` means we crashed mid-capture, and it is repaired to the
+  // last complete fragment rather than left for the library to stumble into
+  // (architecture report §7.1).
+  await recorder.recoverOnLaunch().catch((error: unknown) => {
+    console.error('[main] crash recovery failed:', error);
+  });
 
   windows.show('library');
 
@@ -93,8 +113,12 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   shuttingDown = true;
   unregisterIpc();
-  store
-    .closeAll()
+  // The recorder first: a recording in flight is finalized properly rather than
+  // left for the next launch to recover. If it cannot be, the bundle keeps
+  // `state: "recording"` and recovery handles it — the same path a crash takes.
+  recorder
+    .shutdown()
+    .then(() => store.closeAll())
     .catch((error: unknown) => {
       console.error('[main] shutdown flush failed:', error);
     })

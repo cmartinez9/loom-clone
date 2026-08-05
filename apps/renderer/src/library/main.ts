@@ -13,6 +13,7 @@ import '@loom/design/css';
 import './library.css';
 import { formatBytes, formatDuration, formatRelativeDate, icon, mountIcons } from '@loom/design';
 import type { ProjectState, RecordingSummary } from '@loom/format';
+import type { RecorderStatus } from '@loom/ipc';
 
 const loom = window.loom;
 
@@ -20,6 +21,7 @@ const rows = must('rows');
 const facts = must('facts');
 const refreshButton = must('refresh') as HTMLButtonElement;
 const revealRootButton = must('reveal-root');
+const newRecordingButton = must('new-recording');
 
 /** An element the page is required to contain; a missing one is a broken build. */
 function must(id: string): HTMLElement {
@@ -59,7 +61,7 @@ const STATE_CHIPS: Record<ProjectState, StateChip> = {
 
 const STATE_NOTES: Partial<Record<ProjectState, string>> = {
   recording: 'A recording was in progress when the app last closed.',
-  'needs-recovery': 'This will be repaired and truncated to the last complete second when opened.',
+  'needs-recovery': 'This will be repaired and truncated to the last complete frame when opened.',
   exported: 'The sources were deleted after the export was verified. This recording is final.',
 };
 
@@ -309,11 +311,26 @@ async function start(): Promise<void> {
   recordingsRoot = info.recordingsRoot;
   document.title = 'Recordings';
 
+  newRecordingButton.addEventListener('click', () => {
+    // The library opens the HUD; the HUD owns the recording. Two windows, one
+    // job each (§1.2).
+    loom.recorder.open();
+  });
   refreshButton.addEventListener('click', () => {
     void refresh();
   });
   revealRootButton.addEventListener('click', () => {
     loom.app.revealRecordingsRoot();
+  });
+  // A recording that starts or finishes elsewhere still changes this list. Status
+  // arrives four times a second while recording, and a refresh measures every
+  // bundle on disk, so this reacts to the phase *changing* rather than to being
+  // told about it.
+  let lastPhase: RecorderStatus['phase'] = 'idle';
+  loom.recorder.onStatus((status) => {
+    if (status.phase === lastPhase) return;
+    lastPhase = status.phase;
+    void refresh();
   });
   // Escape backs out of a pending delete, the same way it cancels the countdown.
   window.addEventListener('keydown', (event) => {
