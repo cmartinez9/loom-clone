@@ -26,6 +26,4 @@ export {
 
 export { GpuTimer } from './gpu-timer.ts';
 
-export { identityState, type ResolvedState, type ResolvedZoom } from './resolved-state.ts';
-
 export { SCREEN_FRAGMENT_SHADER, SCREEN_VERTEX_SHADER, UNIT_QUAD } from './shaders.ts';

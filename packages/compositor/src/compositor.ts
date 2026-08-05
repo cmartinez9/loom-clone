@@ -55,7 +55,7 @@ import {
   type RenderTarget,
 } from './gl-util.ts';
 import { GpuTimer } from './gpu-timer.ts';
-import type { ResolvedState } from './resolved-state.ts';
+import type { ResolvedState } from '@loom/edl';
 import { SCREEN_FRAGMENT_SHADER, SCREEN_VERTEX_SHADER, UNIT_QUAD } from './shaders.ts';
 
 /**

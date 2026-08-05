@@ -19,16 +19,34 @@ import type { Clip, Keyframe, Span, Track } from '../types/edit.ts';
 import type { IsoTimestamp, Seconds } from '../types/common.ts';
 import type { SchemaId } from '../schema.ts';
 
-/** Fields of a track that a patch may change. `id` and `kind` are structural. */
-export type TrackPatch = Partial<Omit<Track, 'id' | 'kind'>>;
+/**
+ * Fields of a track that a patch may change. `id` and `kind` are structural.
+ *
+ * A key present with the value `undefined` **removes** it, which is what makes the
+ * inverse of "add a generator block" expressible. `Partial<>` alone would not say
+ * so under `exactOptionalPropertyTypes`, hence the explicit `| undefined`.
+ */
+export type TrackPatch = {
+  [K in keyof Omit<Track, 'id' | 'kind'>]?: Track[K] | undefined;
+};
 
 export type EditOp =
-  | { op: 'track.add'; track: Track }
+  /**
+   * `at` is the index to insert at; omitted means append.
+   *
+   * Track order **is** the stacking order — §3.5's *"tracks on the same `target`
+   * stack, and the topmost track with an opinion wins"* — so an `add` that could
+   * only append would make undoing the removal of a middle track silently change
+   * which zoom wins. It is optional so that a journal line written without it, and
+   * every ordinary "add a track" from the editor, still mean append.
+   */
+  | { op: 'track.add'; track: Track; at?: number }
   | { op: 'track.remove'; trackId: string }
   | { op: 'track.patch'; trackId: string; patch: TrackPatch }
   | { op: 'key.set'; trackId: string; channel: string; key: Keyframe }
   | { op: 'key.remove'; trackId: string; channel: string; t: Seconds }
-  | { op: 'span.set'; trackId: string; span: Span }
+  /** `at` places a *new* span; replacing an existing one keeps its position. */
+  | { op: 'span.set'; trackId: string; span: Span; at?: number }
   | { op: 'span.remove'; trackId: string; spanId: string }
   | { op: 'clips.set'; clips: Clip[] };
 
@@ -62,6 +80,13 @@ export function isEditOpKind(value: unknown): value is EditOpKind {
   return typeof value === 'string' && (EDIT_OP_KINDS as readonly string[]).includes(value);
 }
 
+/** An absent, or a non-negative integer, insertion index. */
+function isOptionalIndex(value: unknown): boolean {
+  return (
+    value === undefined || (typeof value === 'number' && Number.isInteger(value) && value >= 0)
+  );
+}
+
 /**
  * Shape-check an op that came off disk or across IPC.
  *
@@ -75,7 +100,7 @@ export function isEditOp(value: unknown): value is EditOp {
   if (!isEditOpKind(o['op'])) return false;
   switch (o['op']) {
     case 'track.add':
-      return typeof o['track'] === 'object' && o['track'] !== null;
+      return typeof o['track'] === 'object' && o['track'] !== null && isOptionalIndex(o['at']);
     case 'track.remove':
       return typeof o['trackId'] === 'string';
     case 'track.patch':
@@ -105,7 +130,8 @@ export function isEditOp(value: unknown): value is EditOp {
         typeof o['trackId'] === 'string' &&
         typeof o['span'] === 'object' &&
         o['span'] !== null &&
-        typeof (o['span'] as Record<string, unknown>)['id'] === 'string'
+        typeof (o['span'] as Record<string, unknown>)['id'] === 'string' &&
+        isOptionalIndex(o['at'])
       );
     case 'span.remove':
       return typeof o['trackId'] === 'string' && typeof o['spanId'] === 'string';

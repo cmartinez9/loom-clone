@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { contentRect, MIN_ZOOM, rectToNdc, sourceSampleRect } from '../src/geometry.ts';
-import { identityState } from '../src/resolved-state.ts';
+import { identityState } from '@loom/edl';
 
 const FOUR_K: readonly [number, number] = [3456, 2234];
 

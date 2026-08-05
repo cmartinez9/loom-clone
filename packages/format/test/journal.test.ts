@@ -88,12 +88,75 @@ describe('applying ops', () => {
     expect(doc.tracks.some((t) => t.id === 'hijacked')).toBe(false);
   });
 
+  it('inserts a track at an index when one is given, and appends when it is not', () => {
+    // Track order is stacking order (architecture report §3.5), so `at` exists so
+    // that undoing the removal of a middle track puts it back in the middle. A
+    // journal line written without it still means append.
+    const before = fixtureEdit();
+    const appended = applyOps(before, [ADD_OP]);
+    expect(appended.tracks.at(-1)?.id).toBe('t-new');
+
+    const inserted = applyOps(before, [{ ...ADD_OP, at: 1 }]);
+    expect(inserted.tracks[1]?.id).toBe('t-new');
+    expect(inserted.tracks.map((t) => t.id)).toEqual([
+      before.tracks[0]?.id,
+      't-new',
+      ...before.tracks.slice(1).map((t) => t.id),
+    ]);
+  });
+
+  it('refuses an out-of-range insertion index rather than appending quietly', () => {
+    const before = fixtureEdit();
+    expect(() => applyOps(before, [{ ...ADD_OP, at: 99 }])).toThrow(OpApplyError);
+    expect(() => applyOps(before, [{ ...ADD_OP, at: 1.5 }])).toThrow(OpApplyError);
+  });
+
+  it('removes a key from a track when a patch carries an explicit undefined', () => {
+    // What makes a patch invertible: the inverse of "add a generator block" is
+    // "there was no generator block", and a property holding `undefined` is a
+    // different document from one without the property until it is serialized.
+    const withGenerator = applyOps(fixtureEdit(), [
+      {
+        op: 'track.patch',
+        trackId: 't-zoom-manual',
+        patch: { shapePreset: 'circle' },
+      },
+    ]);
+    expect(
+      'shapePreset' in (withGenerator.tracks.find((t) => t.id === 't-zoom-manual') ?? {}),
+    ).toBe(true);
+
+    const removed = applyOps(withGenerator, [
+      { op: 'track.patch', trackId: 't-zoom-manual', patch: { shapePreset: undefined } },
+    ]);
+    const track = removed.tracks.find((t) => t.id === 't-zoom-manual');
+    expect(track).toBeDefined();
+    expect(track === undefined ? true : 'shapePreset' in track).toBe(false);
+  });
+
+  it('places a new span at an index, and keeps an existing one where it was', () => {
+    const spanA = { id: 's-a', start: 1, end: 2, type: 'arrow' };
+    const spanB = { id: 's-b', start: 3, end: 4, type: 'rect' };
+    const doc = applyOps(fixtureEdit(), [
+      { op: 'span.set', trackId: 't-ann', span: spanA },
+      { op: 'span.set', trackId: 't-ann', span: spanB, at: 0 },
+      // Replacing keeps the position — array order is z-order for annotations.
+      { op: 'span.set', trackId: 't-ann', span: { ...spanA, type: 'ellipse' }, at: 0 },
+    ]);
+    const spans = doc.tracks.find((t) => t.id === 't-ann')?.spans ?? [];
+    expect(spans.map((s) => s.id)).toEqual(['s-b', 'a1', 's-a']);
+    expect(spans.find((s) => s.id === 's-a')?.type).toBe('ellipse');
+  });
+
   it('shape-checks ops that came off disk', () => {
     expect(isEditOp(KEY_OP)).toBe(true);
     expect(isEditOp({ op: 'key.set', trackId: 't', channel: 'a' })).toBe(false);
     expect(isEditOp({ op: 'nope' })).toBe(false);
     expect(isEditOp(null)).toBe(false);
     expect(isEditOp({ op: 'clips.set', clips: 'all of them' })).toBe(false);
+    expect(isEditOp({ ...ADD_OP, at: 2 })).toBe(true);
+    expect(isEditOp({ ...ADD_OP, at: -1 })).toBe(false);
+    expect(isEditOp({ ...ADD_OP, at: 'first' })).toBe(false);
   });
 });
 

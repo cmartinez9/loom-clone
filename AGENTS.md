@@ -31,7 +31,7 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break the capture path one way at a time; each must fail a gate
+npm run verify:mutation   # break capture and the timeline model 18 ways; each must fail a gate
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -61,6 +61,11 @@ packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
 packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
+packages/edl/      the timeline model (report §3): tracks, channels, keyframes, the
+                   two evaluators, `compile`/`resolve`, inverse ops and undo/redo.
+                   Owns the SEMANTICS; `@loom/format` owns the `EditDocument` types
+                   and their schema. `ResolvedState` lives here and the compositor
+                   imports it.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
@@ -74,19 +79,20 @@ apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture p
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
-Later phases add `packages/edl` and `apps/export` beside these (report §1.3). The
+A later phase adds `apps/export` beside these (report §1.3). The
 report also lists `apps/capture`; the hidden capture page lives in
 `apps/renderer/src/capture/` instead, because a window in this repo is a role in
 `apps/main/src/windows.ts` plus an entry in `apps/renderer/vite.config.ts`, and a
 second renderer app would fork that.
 
-`decode` and `compositor` are **pure**: DOM types, no `node:`, no `electron`, no I/O,
-enforced in `eslint.config.mjs`. They reach the world through three narrow seams —
-a `ByteRangeReader`, a `DecoderFactory`, and the GL context they are handed. Wiring a
-real captured part to `SourceReader` needs exactly a byte-range reader, a
-`loom.index/1` sidecar and a `VideoDecoderConfig`; `source-reader.ts` says so at the
-top, including the one thing an adapter has to decide (where the `avcC` description
-comes from after a restart, since `recording.json` does not carry it).
+`edl`, `decode` and `compositor` are **pure**: no `node:`, no `electron`, no I/O,
+enforced in `eslint.config.mjs`. They reach the world through narrow declared seams —
+a `ByteRangeReader`, a `DecoderFactory`, the GL context they are handed, and `edl`'s
+`CursorEventStream`/`ClickEventStream`. Wiring a real captured part to `SourceReader`
+needs exactly a byte-range reader, a `loom.index/1` sidecar and a
+`VideoDecoderConfig`; `source-reader.ts` says so at the top, including the one thing
+an adapter has to decide (where the `avcC` description comes from after a restart,
+since `recording.json` does not carry it).
 
 ## The four rules that are not style preferences
 
@@ -194,6 +200,27 @@ timestamp and epoch offset and they are all placed in one pass at finalize, thro
 `videoPartStartSec` (§5.4 mechanisms 2 and 3, the arithmetic `alignAudioPart`
 already used). The camera is opt-in: `webcamDeviceId` defaults to `null`, because
 opening one lights the hardware indicator and that should follow from a user asking.
+
+## The timeline model, in one paragraph
+
+Report §3, and `packages/edl` is all of it. Two time domains — **source** (seconds
+into the raw recording) and **timeline** (seconds into the edited output) — and the
+clip list is the _only_ thing that maps between them; every object states its domain
+and never straddles. Effect tracks are anchored in **source** time so trimming does
+not re-time your zooms (§3.2, a deliberate divergence from Cap); tracks that describe
+the _output_ set `domain: 'timeline'`. **The field is per-track and explicit — never
+inferred, from the target or from anything else.** One primitive: four track kinds,
+one keyframe, one channel. Tracks on the same `target` stack and the topmost with an
+opinion wins — read per _channel_, so a zoom track carrying only `amount` leaves the
+centre the track below it set. A channel is evaluated one of two ways and mixing them
+inside one channel is a validation error: curves are pointwise, springs are
+**precomputed on a fixed 8 ms grid at compile time** and sampled with an index and a
+lerp. `compile()` once per edit (debounced 100 ms), `resolve()` once per frame —
+preview and export both call it, which is why they cannot disagree. `resolve` returns
+the `CompiledTimeline`'s **own** state object, overwritten in place; keep one with
+`cloneResolvedState`. Undo/redo is the inverse-op stack in the editor
+(`EditHistory`), over the same §2.7 op vocabulary that main journals — so an undo is
+journalled, revisioned and crash-safe on exactly the path the edit it reverses took.
 
 ## Sharp edges
 
@@ -416,6 +443,29 @@ opening one lights the hardware indicator and that should follow from a user ask
   and "the tap was dead" are kept apart by `capability.count` being `null` rather than
   `0`, and by `clicks.ndjson` existing only once the tap is live. Phase 10's auto-zoom
   is the consumer that breaks silently if either collapses.
+- **Never integrate the spring at frame rate — anywhere, including a preview fast
+  path.** Report §3.4 measured the alternative at 82.6 px of divergence at 3456 wide,
+  which is a 60 fps preview and a 30 fps export framing the shot differently and one
+  dropped preview frame shifting it permanently. The grid is 8 ms, the solution is
+  **analytic** (three closed forms, one per damping regime — not Euler, not RK4), and
+  `verify:mutation` breaks both on disk and requires `packages/edl/test/` to notice.
+  The tail past the last key runs `16/decay`, not §6.3's settling rule of `4`: what
+  matters there is the _permanent_ error, and a critically damped response still holds
+  3×10⁻³ of its step at `8/(ζω₀)` — ten pixels, forever.
+- **`resolve` hands back the same `ResolvedState` object every call.** That is how
+  §3.6 gets "no allocation", and it means a caller that stores one is storing a
+  reference to next frame's state. `cloneResolvedState` is the way out. Measured at
+  0.08 µs for an identity timeline and 0.3 µs for a 30-minute, 3000-key one, against a
+  16.67 ms frame the phase-6 gate already spends 89% of on CI.
+- **Track order is stacking order, so an inverse op has to preserve it.** `track.add`
+  and `span.set` carry an optional `at` for exactly that: undoing the removal of a
+  middle track by appending leaves a valid document and a wrong picture, which is the
+  hardest kind of bug to see. Same reason `track.patch` treats an explicit `undefined`
+  as "remove this key" — the inverse of adding a `generator` block has to be a
+  document without one, not one holding `undefined`.
+- **An empty `activeRanges` means never active, and "always" is `[[0, 1e9]]`** — the
+  idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
+  outside activeRanges", and it is what lets a track be parked without deleting it.
 
 ## Carried forward to phase 2: seven things no dev run has verified
 

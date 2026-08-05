@@ -7,6 +7,7 @@
   "dependencies": {
     "@loom/compositor": "0.1.0",
     "@loom/design": "0.1.0",
+    "@loom/edl": "0.1.0",
     "@loom/format": "0.1.0",
     "@loom/ipc": "0.1.0"
   }

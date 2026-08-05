@@ -44,11 +44,22 @@ function setKey(channel: Channel, key: Keyframe): void {
   else channel.keys.splice(insertAt, 0, key);
 }
 
-function upsertSpan(track: Track, span: Span): void {
+/**
+ * Insert or replace a span.
+ *
+ * Replacing keeps the span where it was — array order is z-order for annotations —
+ * and `at` places a new one, so undoing a `span.remove` puts the span back where the
+ * user had it rather than on top of everything else.
+ */
+function upsertSpan(track: Track, span: Span, at?: number): void {
   const spans = (track.spans ??= []);
-  const at = spans.findIndex((s) => s.id === span.id);
-  if (at >= 0) spans[at] = span;
-  else spans.push(span);
+  const existing = spans.findIndex((s) => s.id === span.id);
+  if (existing >= 0) {
+    spans[existing] = span;
+    return;
+  }
+  if (at === undefined || at < 0 || at > spans.length) spans.push(span);
+  else spans.splice(at, 0, span);
 }
 
 /** Apply one op **in place**. Callers own cloning; see {@link applyOps}. */
@@ -57,6 +68,19 @@ export function applyOpInPlace(doc: EditDocument, op: EditOp): void {
     case 'track.add': {
       if (doc.tracks.some((t) => t.id === op.track.id)) {
         throw new OpApplyError(`track ${JSON.stringify(op.track.id)} already exists`, op);
+      }
+      const at = op.at;
+      // Order is stacking order (§3.5), so an `at` out of range is a lost edit
+      // rather than a rounding error — refuse it instead of appending quietly.
+      if (at !== undefined) {
+        if (!Number.isInteger(at) || at < 0 || at > doc.tracks.length) {
+          throw new OpApplyError(
+            `track.add at index ${String(at)} is outside 0..${String(doc.tracks.length)}`,
+            op,
+          );
+        }
+        doc.tracks.splice(at, 0, op.track);
+        return;
       }
       doc.tracks.push(op.track);
       return;
@@ -74,7 +98,17 @@ export function applyOpInPlace(doc: EditDocument, op: EditOp): void {
       const { id: _id, kind: _kind, ...patch } = op.patch as Record<string, unknown>;
       void _id;
       void _kind;
-      Object.assign(track, patch);
+      // An explicit `undefined` removes the key rather than setting it to
+      // `undefined`. That is what makes a patch invertible: the inverse of
+      // "add a `generator` block" has to be "there was no `generator` block", and a
+      // property holding `undefined` is a different document from one without the
+      // property — until it is serialized, at which point they become the same and
+      // an undo would stop round-tripping.
+      const fields = track as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) Reflect.deleteProperty(fields, key);
+        else fields[key] = value;
+      }
       return;
     }
     case 'key.set': {
@@ -97,7 +131,7 @@ export function applyOpInPlace(doc: EditDocument, op: EditOp): void {
       return;
     }
     case 'span.set': {
-      upsertSpan(findTrack(doc, op.trackId, op), op.span);
+      upsertSpan(findTrack(doc, op.trackId, op), op.span, op.at);
       return;
     }
     case 'span.remove': {

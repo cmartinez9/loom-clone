@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { CompositorFrames, ResolvedState } from '@loom/compositor';
+import type { CompositorFrames } from '@loom/compositor';
+import type { ResolvedState } from '@loom/edl';
 import {
   PreviewLoop,
   type FrameScheduler,
