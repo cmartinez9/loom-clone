@@ -54,10 +54,11 @@ mac:
   extendInfo:
     LSMinimumSystemVersion: '14.0'
     NSHighResolutionCapable: true
-    # TCC purpose strings. The app does not ask for any of these yet — capture is
-    # phase 1 and the first-run permission flow is phase 2, which owns the final
-    # copy. They are declared here from the first commit because a *missing*
+    # TCC purpose strings: the sentence macOS itself shows in the Camera and
+    # Microphone prompts, which first-run setup triggers (`permissions.request` →
+    # `askForMediaAccess`). Declared here from the first commit because a *missing*
     # purpose string is not a prompt the user declines, it is an immediate crash.
+    # The longer in-app explanation of each grant is `packages/permissions`, not here.
     NSCameraUsageDescription: >-
       Loom Clone records your camera into the recording you are making. The video
       stays on this Mac.

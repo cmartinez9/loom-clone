@@ -510,6 +510,19 @@ export function validateSettingsDoc(input: unknown): ValidationResult<SettingsDo
   checkSchema(sink, doc, 'loom.settings');
   const root = requireString(sink, doc['recordingsRoot'], 'recordingsRoot');
   if (root !== null && root.length === 0) sink.add('recordingsRoot', 'expected a non-empty path');
+
+  // `setup` arrived in `loom.settings/2`. A v1 file reaching here has already been
+  // through the migration chain, so the field is present or the file is malformed —
+  // there is no "old file, be lenient" branch, because that branch is how a format
+  // stops being a format.
+  const setup = requireObject(sink, doc['setup'], 'setup');
+  if (setup !== null) {
+    // Both are nullable: `null` is "has not happened", which is the state a fresh
+    // install is in and a perfectly valid one to persist.
+    for (const key of ['completedAt', 'accessibilityOpenedAt'] as const) {
+      if (setup[key] !== null) requireIsoTimestamp(sink, setup[key], `setup.${key}`);
+    }
+  }
   return sink.ok ? ok(input as SettingsDoc) : fail(sink);
 }
 

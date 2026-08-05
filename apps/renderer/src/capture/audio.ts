@@ -365,9 +365,10 @@ export function reportOf(capture: AudioCapture): AudioTrackReport {
     epochOffsetUs: capture.epoch.offsetUs,
     endedEarly: capture.endedEarly,
     // A microphone that stops on its own is most often a device that went away —
-    // a headset unplugged, a USB interface asleep. Phase 2 re-checks TCC to tell
-    // that apart from a revoked permission; until then this is the likelier of the
-    // two and it is recorded rather than guessed at silently.
+    // a headset unplugged, a USB interface asleep. Telling that apart from a revoked
+    // grant takes a TCC read, which only main can do: phase 2 added that re-check for
+    // the screen track and not for this one (`endReasonFor` in `recorder/session.ts`),
+    // so this stays the likelier of the two, recorded rather than guessed at silently.
     ...(capture.endedEarly ? { endReason: 'device-lost' as const } : {}),
   };
 }

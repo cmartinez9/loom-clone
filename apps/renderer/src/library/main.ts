@@ -13,7 +13,8 @@ import '@loom/design/css';
 import './library.css';
 import { formatBytes, formatDuration, formatRelativeDate, icon, mountIcons } from '@loom/design';
 import type { ProjectState, RecordingSummary } from '@loom/format';
-import type { RecorderStatus } from '@loom/ipc';
+import type { PreflightReport, RecorderStatus } from '@loom/ipc';
+import { describePermission } from '@loom/permissions';
 
 const loom = window.loom;
 
@@ -22,6 +23,8 @@ const facts = must('facts');
 const refreshButton = must('refresh') as HTMLButtonElement;
 const revealRootButton = must('reveal-root');
 const newRecordingButton = must('new-recording');
+const permissionsButton = must('permissions');
+const permBanner = must('perm-banner');
 
 /** An element the page is required to contain; a missing one is a broken build. */
 function must(id: string): HTMLElement {
@@ -306,6 +309,49 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// ------------------------------------------------------------- permissions
+
+/**
+ * Say so when a recording could not start, and offer the one screen that can fix it.
+ *
+ * Only the blocking grants earn a banner. The optional three are a degraded recording
+ * rather than no recording, and the captain's decision is explicit that declining them
+ * must leave a working recorder — a permanent nag about them would be arguing with
+ * an answer the user already gave.
+ */
+function renderPreflight(preflight: PreflightReport): void {
+  if (preflight.blocking.length === 0) {
+    permBanner.hidden = true;
+    permBanner.replaceChildren();
+    return;
+  }
+
+  const text = document.createElement('p');
+  text.textContent = preflight.blocking
+    .map((kind) => describePermission(kind, preflight.report.statuses[kind]))
+    .join(' ');
+
+  const open = button('Open setup', 'btn btn-sm');
+  open.prepend(iconSpan('lock', 14));
+  open.addEventListener('click', () => {
+    loom.setup.open();
+  });
+
+  permBanner.replaceChildren(iconSpan('alert', 17), text, open);
+  permBanner.hidden = false;
+}
+
+async function refreshPermissions(): Promise<void> {
+  try {
+    renderPreflight(await loom.recorder.preflight());
+  } catch (error) {
+    // A preflight this window could not run is not a permission problem, and
+    // claiming one would send the user to a screen that has nothing to fix.
+    console.error('[library] preflight failed:', error);
+    permBanner.hidden = true;
+  }
+}
+
 async function start(): Promise<void> {
   const info = await loom.app.info();
   recordingsRoot = info.recordingsRoot;
@@ -321,6 +367,17 @@ async function start(): Promise<void> {
   });
   revealRootButton.addEventListener('click', () => {
     loom.app.revealRecordingsRoot();
+  });
+  // The route back to the first-run explanation, whether or not anything is wrong
+  // right now: the four grants can be changed in System Settings at any time, and
+  // this is the window that is open when someone wants to.
+  permissionsButton.addEventListener('click', () => {
+    loom.setup.open();
+  });
+  // macOS never tells an app a grant was given. Main re-probes on focus and pushes
+  // what changed, which is what keeps this banner honest without a poll.
+  loom.permissions.onChange(() => {
+    void refreshPermissions();
   });
   // A recording that starts or finishes elsewhere still changes this list. Status
   // arrives four times a second while recording, and a refresh measures every
@@ -341,6 +398,7 @@ async function start(): Promise<void> {
   });
 
   await refresh();
+  await refreshPermissions();
 }
 
 void start();

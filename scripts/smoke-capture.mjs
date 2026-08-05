@@ -23,8 +23,9 @@
  * but it deliberately does **not** exercise `desktopCapturer` enumeration,
  * `setDisplayMediaRequestHandler`'s frame authorisation, `audio: 'loopback'` reaching
  * a real speaker output, or `setContentProtection` keeping the HUD out of the frames.
- * Those are carried forward as phase 2 signed-bundle obligations; see `AGENTS.md`.
- * Do not report a synthetic run as proof of them.
+ * Those are carried forward as phase 2 signed-bundle obligations, answered by
+ * `npm run verify:permissions`; `AGENTS.md` § Phase 2 gate status records their
+ * current state. Do not report a synthetic run as proof of them.
  *
  * ## What the audio half of this is for
  *

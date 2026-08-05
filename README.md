@@ -5,20 +5,29 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 4 of 14: the webcam track and multi-part recordings**, on top of phase 3's
-audio and A/V sync machinery, plus the phase 5 cursor and click sampler, phase 6's
-decode path and WebGL2 compositor, and phase 7's timeline model, built early and out
-of order because they are self-contained.
+**Phase 2 of 14: permissions and first run**, on top of phase 1's capture spine,
+phase 3's audio and A/V sync machinery and phase 4's webcam track and multi-part
+recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
+WebGL2 compositor, and phase 7's timeline model, built early and out of order because
+they are self-contained.
 
-What runs today: the app launches, records the screen with the microphone and the
-system's own audio output alongside it, and lists the recordings it finds under
-`~/Movies/Loom Clone` — revealing them in Finder or moving them to the Trash. System
-audio needs no driver and no admin prompt, which is why the floor is macOS 14. The
-camera records as a track of its own when a recording asks for one, but it is opt-in
-and the HUD has no toggle yet: opening a camera lights the hardware indicator, so it
-should follow from a user asking, and the asking is phase 2's permission flow and
-later HUD work. The editor window that will drive phase 7's timeline model is later
-still, deliberately absent rather than stubbed.
+What runs today: the first launch explains the four macOS permissions this app can
+use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
+together, as one step, before the first recording. Only Screen Recording is required;
+declining the other three leaves a recorder that still records, with the features that
+needed them switched off. Accessibility is used to detect clicks and nothing else, and
+because macOS does not hand that grant to a running process, the setup window offers to
+relaunch once it is switched on. The library keeps a route back to that screen, so a
+permission answered "no" is not a reinstall.
+
+After setup the app records the screen with the microphone and the system's own audio
+output alongside it, and lists the recordings it finds under `~/Movies/Loom Clone` —
+revealing them in Finder or moving them to the Trash. System audio needs no driver and
+no admin prompt, which is why the floor is macOS 14. The camera records as a track of
+its own when a recording asks for one, but it is opt-in and the HUD has no toggle yet:
+opening a camera lights the hardware indicator, so it should follow from a user asking,
+and that asking is later HUD work. The editor window that will drive phase 7's timeline
+model is later still, deliberately absent rather than stubbed.
 
 The property phase 1 established: **a recording survives the process being killed.**
 Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
@@ -46,8 +55,10 @@ macOS itself delivers — and checking both parts' boundaries, with three contro
 must fail. What no dev run can exercise is a real camera or a real cable; `AGENTS.md`
 carries those forward.
 
-The native input sampler is complete alongside it, but nothing starts it yet, because
-the permission flow that turns it on is phase 2.
+The native input sampler is complete alongside it. First run uses it to check that a
+real event tap can be built, because macOS answering "Accessibility is granted" is
+not evidence that clicks will arrive — the API succeeds either way. No recording
+samples the cursor into a log yet.
 
 Phase 6's one decode path and WebGL2 compositor — the pair preview and export will
 share — are complete alongside it too, built ahead of the capture spine against
@@ -100,10 +111,24 @@ it is missing. It prints what each audio device claimed, what it actually ran at
 where each track started relative to the first frame. Adding `--synthetic` puts a
 canvas and an oscillator where the real sources would be and runs everything below
 them for real, so it works without the grant — at the cost of covering neither
-`desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`,
-nor whether macOS honours the constraints on a real loopback track. Those remain
-unverified in a dev environment and are carried forward to phase 2's signed-bundle
-gate; `AGENTS.md` records them.
+`desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`.
+Those three cannot be settled by any dev run: in development macOS permissions are
+inherited from the terminal, so a pass there says nothing about the shipped app. They,
+and only they, are answered from a signed bundle instead:
+
+```bash
+npm run verify:permissions   # package, sign under the frozen bundle id, run the checks
+```
+
+That gate has **no audio checks at all**. Whether macOS honours the AEC/NS/AGC-off
+stereo constraints on a real loopback track, and where a real microphone's
+`startTimeSec` actually lands, are phase 3's obligations and both are still open. The
+thing that would answer them is `node scripts/smoke-capture.mjs` **without**
+`--synthetic`, on a machine that has been granted Screen Recording and Microphone —
+not `npm run verify:permissions`.
+
+`AGENTS.md` § Phase 2 gate status is the record of what that has closed and what is
+still waiting on a permission only System Settings can give.
 
 ## How it is put together
 

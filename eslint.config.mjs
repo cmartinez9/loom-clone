@@ -1,7 +1,7 @@
 /**
  * Lint.
  *
- * Beyond ordinary hygiene, three rules here are **architecture enforcement** and
+ * Beyond ordinary hygiene, five rules here are **architecture enforcement** and
  * should not be relaxed without a decision above the implementation worker:
  *
  * 1. **`node:fs` is import-restricted inside `apps/main`.** "Main is the only
@@ -15,6 +15,12 @@
  * 3. **Renderers may import no `node:`, no `electron`, and no `@loom/format/fs`.**
  *    They are sandboxed and have nothing to reach with; an import that looked like
  *    it worked would be a bug waiting for a packaging change.
+ * 4. **`systemPreferences` is import-restricted to `apps/main/src/permissions.ts`.**
+ *    A grant read anywhere else escapes the provenance rule that decides whether
+ *    macOS was talking about us at all, and it fails silently.
+ * 5. **`packages/permissions` stays pure.** It is the policy — what each grant is
+ *    for, what may be concluded from a set of answers — and it is unit-testable
+ *    without an app only for as long as it cannot ask one.
  *
  * Together with sandboxed renderers, those make the sole-writer rule structural
  * rather than a convention someone has to remember.
@@ -24,6 +30,57 @@ import js from '@eslint/js';
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
+
+/**
+ * The sole-writer restrictions, shared because `no-restricted-imports` is configured
+ * per file rather than accumulated: a later block naming the same file replaces this
+ * rule's whole configuration, so every block that restricts anything inside
+ * `apps/main` has to restate what it still restricts.
+ */
+const MAIN_DISK_IMPORTS = [
+  {
+    name: 'node:fs',
+    message:
+      'Only ProjectStore writes to disk and only media-reader.ts reads. ' +
+      'Go through ProjectStore (architecture report §0, rule 2).',
+  },
+  {
+    name: 'node:fs/promises',
+    message:
+      'Only ProjectStore writes to disk and only media-reader.ts reads. ' +
+      'Go through ProjectStore (architecture report §0, rule 2).',
+  },
+  {
+    name: '@loom/format/fs',
+    message:
+      'The filesystem half of @loom/format has exactly one caller: ProjectStore. ' +
+      'Import the pure @loom/format entry point instead.',
+  },
+  {
+    name: '@loom/mux/fs',
+    message:
+      'The filesystem half of @loom/mux has exactly one caller: ProjectStore. ' +
+      'Capture writes reach the disk through it like every other write.',
+  },
+];
+
+/**
+ * Within `apps/main/src`, only `permissions.ts` may ask macOS about a grant. That
+ * file's header states the boundary and its one deliberate exception; this is the
+ * half that enforces it.
+ *
+ * Not style: a second caller reads TCC without the trust rule `isTrustworthy()`
+ * states, and the failure is silent — a raw `getMediaAccessStatus` cast is what wrote
+ * an out-of-type value into a user's `recording.json`. Everything else takes the
+ * answer from `readMediaStatus`/`readAxTrusted` or from a `PermissionReport`.
+ */
+const SYSTEM_PREFERENCES_IMPORT = {
+  name: 'electron',
+  importNames: ['systemPreferences'],
+  message:
+    'apps/main/src/permissions.ts is the only file under apps/main/src that calls ' +
+    'systemPreferences. Use readMediaStatus/readAxTrusted from it, or a PermissionReport.',
+};
 
 export default tseslint.config(
   {
@@ -87,42 +144,35 @@ export default tseslint.config(
     },
   },
 
-  // ---- architecture enforcement: the sole writer ----------------------------
+  // ---- architecture enforcement: the sole writer, and the sole TCC caller -----
   {
     files: ['apps/main/src/**/*.ts'],
-    ignores: ['apps/main/src/project-store.ts', 'apps/main/src/media-reader.ts'],
+    ignores: [
+      'apps/main/src/project-store.ts',
+      'apps/main/src/media-reader.ts',
+      'apps/main/src/permissions.ts',
+    ],
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          paths: [
-            {
-              name: 'node:fs',
-              message:
-                'Only ProjectStore writes to disk and only media-reader.ts reads. ' +
-                'Go through ProjectStore (architecture report §0, rule 2).',
-            },
-            {
-              name: 'node:fs/promises',
-              message:
-                'Only ProjectStore writes to disk and only media-reader.ts reads. ' +
-                'Go through ProjectStore (architecture report §0, rule 2).',
-            },
-            {
-              name: '@loom/format/fs',
-              message:
-                'The filesystem half of @loom/format has exactly one caller: ProjectStore. ' +
-                'Import the pure @loom/format entry point instead.',
-            },
-            {
-              name: '@loom/mux/fs',
-              message:
-                'The filesystem half of @loom/mux has exactly one caller: ProjectStore. ' +
-                'Capture writes reach the disk through it like every other write.',
-            },
-          ],
-        },
+        { paths: [...MAIN_DISK_IMPORTS, SYSTEM_PREFERENCES_IMPORT] },
       ],
+    },
+  },
+
+  // permissions.ts is the one TCC caller, and still writes nothing.
+  {
+    files: ['apps/main/src/permissions.ts'],
+    rules: {
+      'no-restricted-imports': ['error', { paths: MAIN_DISK_IMPORTS }],
+    },
+  },
+
+  // project-store.ts writes; it has no business asking macOS about a grant.
+  {
+    files: ['apps/main/src/project-store.ts'],
+    rules: {
+      'no-restricted-imports': ['error', { paths: [SYSTEM_PREFERENCES_IMPORT] }],
     },
   },
 
@@ -142,6 +192,7 @@ export default tseslint.config(
               name: '@loom/mux/fs',
               message: 'media-reader.ts reads bytes; capture writes belong to ProjectStore.',
             },
+            SYSTEM_PREFERENCES_IMPORT,
           ],
         },
       ],
@@ -185,6 +236,32 @@ export default tseslint.config(
               message:
                 'The @loom/format and @loom/mux entry points are pure: no node, no DOM, ' +
                 'no I/O. Filesystem code belongs in src/fs (architecture report §1.3).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // ---- the permission model is policy, not a probe ---------------------------
+  // `packages/permissions/src/index.ts`: *"This entry point is **pure**: no
+  // `electron`, no `node:`, no DOM."* The split is what keeps the trust rule
+  // (`isTrustworthy`) unit-testable without launching an app, and what keeps the
+  // probes on the far side of the boundary `apps/main/src/permissions.ts`'s header
+  // states. An `electron` import here would move a probe into the policy and take
+  // both of those with it.
+  {
+    files: ['packages/permissions/src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'electron', '@loom/format/fs', '@loom/mux/fs', '@loom/ipc'],
+              message:
+                '@loom/permissions is pure: no electron, no node, no DOM. Asking macOS ' +
+                'belongs in apps/main/src/permissions.ts.',
             },
           ],
         },

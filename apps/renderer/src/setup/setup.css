@@ -1,0 +1,355 @@
+/*
+ * First run. The approved mockup is `data/loom-design/a-permissions.html`
+ * ("Ask once, and say why"); this is that layout in the shipped design system, with
+ * the token names `@loom/design/css` actually defines.
+ *
+ * Pressroom rules that are binding here (design report §2, §8): flat ink keylines and
+ * hard offset shadows, no gradients, no blur, no `backdrop-filter`, no emoji as
+ * iconography. `packages/design/test/no-generic-look.test.ts` enforces the mechanical
+ * half of that across every stylesheet in the repo, including this one.
+ */
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 0 var(--sp-5) var(--sp-4);
+}
+
+/* ------------------------------------------------------------------ hero */
+
+.hero {
+  padding: var(--sp-2) 0 var(--sp-5);
+}
+
+/*
+ * The local-only promise leads, above the headline and before any ask. It is the
+ * single fact that makes four permission requests reasonable rather than alarming.
+ */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  margin-bottom: var(--sp-4);
+  padding: 0 11px;
+  border: var(--line) solid var(--ok);
+  border-radius: var(--r-pill);
+  background: var(--ok-wash);
+  color: var(--ok);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.hero h1 {
+  margin: 0 0 var(--sp-2);
+}
+
+.lede {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* ----------------------------------------------------------- permission rows */
+
+/*
+ * The window is resizable and the copy is not negotiable: `flex: none` keeps the
+ * rows at their natural height so a short display scrolls to the sentence about what
+ * Accessibility does *not* read, rather than compressing it away.
+ */
+.perms {
+  flex: none;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--lift);
+  overflow: hidden;
+}
+
+.perm {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: start;
+  padding: var(--sp-4);
+  border-bottom: var(--line-thin) solid var(--divider);
+}
+
+.perm:last-child {
+  border-bottom: 0;
+}
+
+.perm .glyph {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/*
+ * Filled green is a tick earned. For the three media grants `granted` is that; for
+ * Accessibility only `live` is, because macOS trusting us and clicks actually
+ * arriving are different facts and the click API succeeds without the permission and
+ * then silently delivers nothing. `trusted-unverified` and `relaunch-required` keep
+ * the neutral subject glyph above, so the glyph agrees with the control beside it.
+ */
+.perm[data-state='granted']:not([data-ax]) .glyph,
+.perm[data-ax='live'] .glyph {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--bg-raised);
+}
+
+/*
+ * Red means the user answered no. Only the three media grants can say that: macOS
+ * distinguishes "denied" from "not-determined" for them, so `denied` here is a
+ * refusal. The Accessibility row carries `data-ax` and is styled from it instead.
+ */
+.perm[data-state='denied']:not([data-ax]) .glyph {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+
+/* Dashed: onboarding can be finished without it, and the border says so. */
+.perm[data-optional='true'][data-state='not-determined'] .glyph,
+.perm[data-ax='not-granted'] .glyph,
+.perm[data-ax='relaunch-to-find-out'] .glyph {
+  border-style: dashed;
+  border-color: var(--fg-faint);
+  color: var(--fg-subtle);
+}
+
+.perm .ttl {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.perm h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.tag {
+  padding: 2px 5px;
+  border: var(--line-thin) solid var(--fg-faint);
+  border-radius: 3px;
+  color: var(--fg-subtle);
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-stretch: 78%;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tag-req {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--vermilion-600);
+}
+
+/* The sentence that earns the ask. */
+.why {
+  max-width: 56ch;
+  margin: 5px 0 0;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* The limit, in the quieter voice. Never removed to save space. */
+.limit {
+  max-width: 56ch;
+  margin: 5px 0 0;
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.state-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.state-note {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  color: var(--fg-subtle);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ refusal card */
+
+.card {
+  margin-top: var(--sp-4);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.card-h {
+  padding: 11px 15px;
+  border-bottom: var(--line) solid var(--keyline);
+  background: var(--bg-sunken);
+}
+
+.card-h .t-label {
+  color: var(--fg-subtle);
+}
+
+.card-b {
+  padding: 15px;
+}
+
+.blocked {
+  display: flex;
+  gap: 11px;
+  margin-bottom: 13px;
+}
+
+.blocked .ico {
+  flex: none;
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+.blocked p {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  border: var(--line-thin) solid var(--divider);
+  border-radius: var(--r-sm);
+  list-style: none;
+  overflow: hidden;
+}
+
+.steps li {
+  display: flex;
+  gap: 10px;
+  padding: 9px 11px;
+  border-bottom: var(--line-thin) solid var(--divider);
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.steps li:last-child {
+  border-bottom: 0;
+}
+
+.steps .n {
+  flex: none;
+  height: 17px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--fg);
+  color: var(--bg-raised);
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-stretch: 78%;
+  font-weight: 600;
+}
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 13px;
+}
+
+.card-actions .btn:first-child {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ---------------------------------------------------- untrustworthy build */
+
+/*
+ * Ochre, not vermilion: this is not a failure, it is a statement that the answers
+ * above cannot be believed. Vermilion in this design language means "record" and
+ * "danger", and neither is what a dev build is.
+ */
+.untrusted {
+  display: flex;
+  gap: 10px;
+  margin-top: var(--sp-4);
+  padding: 11px 13px;
+  border: var(--line-thin) solid var(--audio);
+  border-radius: var(--r-sm);
+  background: var(--audio-wash);
+}
+
+.untrusted .ico {
+  flex: none;
+  margin-top: 1px;
+  color: var(--ochre-600);
+}
+
+.untrusted p {
+  margin: 0;
+  color: var(--ochre-600);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* An author `display` outranks the UA's `[hidden] { display: none }` — the trap
+   `recorder.css` documents. Without this the Relaunch button offers a restart to a
+   Camera denial it cannot help, and a signed build still shows the empty
+   dev-build box. */
+.btn[hidden],
+.untrusted[hidden] {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ footer */
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: auto;
+  padding-top: var(--sp-4);
+}
+
+.foot .note {
+  max-width: 46ch;
+  color: var(--fg-subtle);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.foot .btn {
+  margin-left: auto;
+  height: 34px;
+  padding: 0 16px;
+}

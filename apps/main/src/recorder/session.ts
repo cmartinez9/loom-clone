@@ -38,7 +38,6 @@ import {
   ipcMain,
   screen,
   session,
-  systemPreferences,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -46,6 +45,7 @@ import {
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  requestedCaptureOptions,
   type AudioTrackFacts,
   type AudioTrackReport,
   type AudioTrackSettings,
@@ -81,6 +81,8 @@ import {
   type VideoTrackKey,
 } from '@loom/format';
 import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
+import { toRecordingState } from '@loom/permissions';
+import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
 import {
@@ -138,11 +140,13 @@ const MAX_PLAUSIBLE_TRACK_OFFSET_SEC = 1;
 const MAX_REPORTED_GAPS = 1024;
 
 /**
- * Longest microphone device id a renderer may name.
+ * Longest device id a renderer may name in a track's facts.
  *
  * A `deviceId` from `enumerateDevices` is a 64-character hash. The bound is here
- * because the value is handed straight back to the capture page as a constraint,
- * and an unbounded string from a renderer is a payload rather than a device.
+ * because the value is written into `recording.json` as the device a part came from,
+ * and an unbounded string from a renderer is a payload rather than a device. The
+ * same bound guards the ids a renderer *asks* for; that copy lives beside
+ * `requestedCaptureOptions` in `@loom/ipc`.
  */
 const MAX_DEVICE_ID_LENGTH = 200;
 
@@ -311,7 +315,7 @@ export class RecorderSession {
 
     ipcMain.handle(CHANNEL.recorderStart, async (event, raw: unknown) => {
       this.requireRecorderWindow(event);
-      const id = await this.enqueue(() => this.start(captureOptions(raw)));
+      const id = await this.enqueue(() => this.start(requestedCaptureOptions(raw)));
       return { recordingId: id };
     });
 
@@ -1093,7 +1097,10 @@ export class RecorderSession {
    * managed to flush.
    */
   private async finalizeVideo(active: Active, report: CaptureEndReport | null): Promise<void> {
-    const screenEnd = endReasonFor(report);
+    // The grant is read *now*, not at start: §7.3's whole point is that it may have
+    // gone away during the recording, and the answer is only meaningful at the moment
+    // the source ended.
+    const screenEnd = endReasonFor(report, readMediaStatus('screen') === 'granted');
     for (const track of VIDEO_TRACK_KEYS) {
       const state = active.video.get(track);
       if (state?.part == null) continue;
@@ -1636,10 +1643,13 @@ export class RecorderSession {
     accessibility: boolean;
   } {
     return {
-      screen: systemPreferences.getMediaAccessStatus('screen') as PermissionState,
-      camera: systemPreferences.getMediaAccessStatus('camera') as PermissionState,
-      microphone: systemPreferences.getMediaAccessStatus('microphone') as PermissionState,
-      accessibility: systemPreferences.isTrustedAccessibilityClient(false),
+      // Read through `@loom/permissions` rather than cast: Electron can return
+      // `unknown`, which `PermissionState` has no member for, and casting it wrote a
+      // value into the user's recording that the type says cannot be there.
+      screen: toRecordingState(readMediaStatus('screen')),
+      camera: toRecordingState(readMediaStatus('camera')),
+      microphone: toRecordingState(readMediaStatus('microphone')),
+      accessibility: readAxTrusted(),
     };
   }
 }
@@ -1684,67 +1694,12 @@ function videoTrack(active: Active, track: VideoTrackKey): ActiveVideo {
  * Our own code sends these, which is exactly why they are checked: the renderer is
  * the process most likely to be compromised, and it is the one that must never be
  * able to name a path, an unbounded allocation, or a track it is not recording.
+ *
+ * `CaptureOptions` is checked by `requestedCaptureOptions` in `@loom/ipc` rather than
+ * here: `recorder.start` is not the only handler taking that shape —
+ * `recorder.preflight` takes it too — and one sanitizer beside the contract is the
+ * only arrangement in which a second handler cannot quietly read the message laxly.
  */
-function captureOptions(raw: unknown): Partial<CaptureOptions> {
-  if (raw === null || typeof raw !== 'object') return {};
-  const input = raw as Record<string, unknown>;
-  const out: Partial<CaptureOptions> = {};
-  if (typeof input['displayId'] === 'number' && Number.isInteger(input['displayId'])) {
-    out.displayId = input['displayId'];
-  }
-  if (typeof input['fps'] === 'number' && input['fps'] > 0 && input['fps'] <= 120) {
-    out.fps = Math.round(input['fps']);
-  }
-  const max = input['maxDimension'];
-  if (typeof max === 'number' && max >= 320 && max <= 7680) out.maxDimension = Math.round(max);
-  const bitrate = input['bitrate'];
-  if (typeof bitrate === 'number' && bitrate >= 100_000 && bitrate <= 200_000_000) {
-    out.bitrate = Math.round(bitrate);
-  }
-  // Strict booleans, not truthiness: a renderer that sends `0` or `''` for
-  // `systemAudio` is malformed, and reading it as "off" would answer a question it
-  // did not ask. An absent or out-of-range field falls through to
-  // `DEFAULT_CAPTURE_OPTIONS`, which is what decides whether a microphone opens.
-  if (typeof input['systemAudio'] === 'boolean') out.systemAudio = input['systemAudio'];
-  if (typeof input['micVoiceProcessing'] === 'boolean') {
-    out.micVoiceProcessing = input['micVoiceProcessing'];
-  }
-  const mic = input['micDeviceId'];
-  if (mic === null) out.micDeviceId = null;
-  else if (typeof mic === 'string' && mic.length > 0 && mic.length <= MAX_DEVICE_ID_LENGTH) {
-    out.micDeviceId = mic;
-  }
-  const audioBitrate = input['audioBitrate'];
-  if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
-    out.audioBitrate = Math.round(audioBitrate);
-  }
-  const webcam = input['webcamDeviceId'];
-  if (webcam === null) out.webcamDeviceId = null;
-  else if (
-    typeof webcam === 'string' &&
-    webcam.length > 0 &&
-    webcam.length <= MAX_DEVICE_ID_LENGTH
-  ) {
-    out.webcamDeviceId = webcam;
-  }
-  const webcamFps = input['webcamFps'];
-  if (typeof webcamFps === 'number' && webcamFps > 0 && webcamFps <= 120) {
-    out.webcamFps = Math.round(webcamFps);
-  }
-  const webcamMax = input['webcamMaxDimension'];
-  if (typeof webcamMax === 'number' && webcamMax >= 160 && webcamMax <= 7680) {
-    out.webcamMaxDimension = Math.round(webcamMax);
-  }
-  const webcamBitrate = input['webcamBitrate'];
-  if (
-    typeof webcamBitrate === 'number' &&
-    webcamBitrate >= 100_000 &&
-    webcamBitrate <= 200_000_000
-  ) {
-    out.webcamBitrate = Math.round(webcamBitrate);
-  }
-  return out;
-}
 
 /** A `PartEndReason`, or `undefined` when the value is not one. */
 function partEndReason(value: unknown): PartEndReason | undefined {
@@ -2096,20 +2051,31 @@ function writtenAudio(
 /**
  * Why a part stopped before the user asked it to, or `null` for a clean stop.
  *
- * - **`source-ended` → `permission-revoked`.** The screen track ending on its own is
- *   the shape a revoked Screen Recording grant takes, and §7.3 is explicit that it
- *   must not be treated as a normal stop. It is also the shape macOS's own "Stop
- *   sharing" control takes; phase 2 re-checks TCC to tell the two apart, and until
- *   then this is the more useful of the two guesses.
+ * - **`source-ended` → `permission-revoked` *or* `device-lost`.** The screen track
+ *   ending on its own is the shape a revoked Screen Recording grant takes, and §7.3
+ *   is explicit that it must not be treated as a normal stop. It is *also* the shape
+ *   macOS's own "Stop sharing" control and a disconnected display take. §7.3 gives
+ *   the way to tell them apart — *"distinguish revocation from a normal stop by
+ *   re-checking `getMediaAccessStatus('screen')`"* — and phase 2 does the re-check
+ *   that phase 1 left as the more useful of two guesses. If the grant is still
+ *   there, the source went away and the permission did not: that is `device-lost`.
  * - **`error` → `crash`.** `PartEndReason` has no "the writer failed" member, and
  *   `crash` is what it means: this part ended because the thing writing it stopped.
  *   `disk-full` would be a guess at a cause we have not measured, and §7.2's disk
  *   monitor — which would know — is not built yet.
  * - **A missing report → `crash`.** The capture page never answered; whatever
  *   happened to it, the recording did not end the way the user asked.
+ *
+ * `screenStillGranted` is passed rather than read here so this stays a pure function
+ * over the two facts it decides between, and so the test can exercise both branches
+ * without a TCC database.
  */
-function endReasonFor(report: CaptureEndReport | null): 'permission-revoked' | 'crash' | null {
+function endReasonFor(
+  report: CaptureEndReport | null,
+  screenStillGranted: boolean,
+): 'permission-revoked' | 'device-lost' | 'crash' | null {
   if (report === null) return 'crash';
   if (report.reason === 'stopped') return null;
-  return report.reason === 'source-ended' ? 'permission-revoked' : 'crash';
+  if (report.reason !== 'source-ended') return 'crash';
+  return screenStillGranted ? 'device-lost' : 'permission-revoked';
 }

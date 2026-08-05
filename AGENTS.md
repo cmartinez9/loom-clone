@@ -32,6 +32,7 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture and the timeline model 19 ways; each must fail a gate
+npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -58,6 +59,11 @@ packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it w
                    like `@loom/format/fs`, has exactly one caller.
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
+packages/permissions/  the four macOS grants: what each is for, what breaks without it,
+                   which System Settings pane turns it on, and whether an answer can be
+                   believed at all. PURE. The probes are in
+                   `apps/main/src/permissions.ts`, whose header states which files may
+                   call `systemPreferences` and what enforces it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
 packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
@@ -71,11 +77,11 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
-                   loom:// protocol, IPC.
-apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture page
-                   (screen in `capture/main.ts`, camera in `capture/webcam.ts`, the
-                   two audio tracks in `capture/audio.ts`) and the preview loop
-                   today; overlay and editor later.
+                   PermissionManager, loom:// protocol, IPC.
+apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
+                   capture page (screen in `capture/main.ts`, camera in
+                   `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`)
+                   and the preview loop today; overlay and editor later.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -158,6 +164,10 @@ debounce, so an editor crash costs at most 250 ms.
 
 Time is **seconds, float**, everywhere except the frame index sidecar. Media tracks
 are lists of parts (`screen.000.mp4`) from day one, never a single file.
+
+`loom.settings` is at **version 2** — phase 2 added first-run state — so the migration
+registry has a real step in it and `loadAndUpgradeDocument` is exercised on every
+launch. Adding a version is the three steps in `packages/format/src/schema.ts`.
 
 ## Capture, in one paragraph
 
@@ -282,6 +292,11 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   one that killed a copy of `writeAtomic`. Both gates now kill the real path, both
   have a control that must fail, and `npm run verify:mutation` breaks the writer on
   disk and requires the tests to notice. Add a mutation when you add a property.
+  The kill waits for the stream as well as the clock: a `SIGKILL` costs a _constant_
+  one or two frames, not a proportion, so ≥95% recovered is only a claim about the
+  writer once ~60 frames are behind it. Killing purely on a 400 ms timer gave ~80
+  frames on an idle machine and ~36 under the full suite, where two lost frames is
+  5.6% and the gate failed on arithmetic. See `MIN_HANDED_FRAMES`.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
@@ -434,7 +449,8 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   trap 6). The one way to shed that inheritance in a test is
   `loom-input-sampler spawn-disclaimed`, which makes the child answer for its own code
   identity — that is how the phase-5 gate exercises "Accessibility revoked" on a
-  machine whose terminal is trusted. See also the carried-forward obligations below.
+  machine whose terminal is trusted. For the app itself that is
+  `npm run verify:permissions`; § Phase 2 gate status below is its standing record.
 - **A permission that fails silently must be reported, never inferred.** Clicks need
   Accessibility, and without it `CGEventTapCreate` has been seen both to return NULL
   and to return a port that reports success and never fires — so the sampler gates on
@@ -477,18 +493,22 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward to phase 2: seven things no dev run has verified
+## Carried forward to phase 2: three closed, four still open, one phase 2 added
 
-Phases 1, 3 and 4 shipped with these **unverified**, not verified-and-passing. They
-are obligations on phase 2's signed-bundle gate, and until that gate runs, no report
-may describe them as working:
+Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
+signed-bundle gate. Three are now closed on real measurements from a granted, signed
+bundle; four are not, and **phase 2's harness does not cover them** — it has no audio
+and no camera checks at all, so nothing here has looked at them. Phase 2 then left one
+of its own, recorded below as item 8.
 
-1. **`desktopCapturer` screen enumeration.**
-2. **`setDisplayMediaRequestHandler`'s frame authorisation** — that the real handler
-   hands a source to the capture page and refuses every other frame.
-3. **`setContentProtection(true)` actually keeping the recorder HUD out of captured
-   frames.** `windows.test.ts` asserts the flag is set on the role; nothing has
-   watched the pixels.
+**Closed** (see the gate status below for the figures):
+
+1. ~~`desktopCapturer` screen enumeration.~~
+2. ~~`setDisplayMediaRequestHandler`'s frame authorisation.~~
+3. ~~`setContentProtection(true)` keeping the recorder HUD out of captured frames.~~
+
+**Still open, and still nobody's evidence:**
+
 4. **`audio: 'loopback'` reaching a real speaker output**, and whether macOS honours
    the AEC/NS/AGC-off stereo constraints on the track it hands back (research trap 3).
    The code asserts the constraints and records what was actually applied in
@@ -509,10 +529,10 @@ may describe them as working:
    how long `getUserMedia` refuses a device that has just re-enumerated, and whether
    the same `deviceId` really comes back.
 
-Why they are open: a machine that has not granted Screen Recording to the _terminal_
-cannot run the leg that would prove any of them, and granting it to a dev binary
-proves the wrong thing anyway, because a dev build inherits the terminal's TCC (§7,
-trap 6) — a pass there would not predict a packaged build.
+None of the four is answered by `npm run verify:permissions`: the two audio ones need
+`node scripts/smoke-capture.mjs` without `--synthetic` on a granted machine, and the
+two camera ones need a real camera and a real cable. Do not read the gate's green rows
+as covering them.
 
 What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
 replaces only the _source acquisition_ — `getDisplayMedia` and `getUserMedia` — in the
@@ -523,6 +543,113 @@ M4A → finalize path end to end, on Chromium's real capture clocks. Without
 grant, rather than failing three layers down in `desktopCapturer` with "Failed to get
 sources". Run it after any change to capture: it is the only thing that watches the
 two clocks, and it is what caught both of phase 3's real bugs.
+
+**And one phase 2 opened and did not close:**
+
+8. **A revoked Microphone is recorded as a lost device.** §7.3 asks for the mic case —
+   _"Microphone revoked → keep recording screen and system audio. Mark the mic part
+   `endedEarly`"_ — and the part is marked, but with the wrong reason. The TCC re-check
+   that tells `permission-revoked` apart from `device-lost` is applied to the **screen**
+   track only (`endReasonFor` in `apps/main/src/recorder/session.ts`); an audio track
+   that ends on its own still carries the capture page's `device-lost`, which `reportOf`
+   in `apps/renderer/src/capture/audio.ts` states at the field. Closing it is a
+   `readMediaStatus('microphone')` read on the same path in main, not a design question
+   — the renderer cannot do it, because reading TCC is main's alone (see
+   `apps/main/src/permissions.ts`'s header).
+
+## Permissions and first run, in one paragraph
+
+The four grants the app asks for — Screen Recording, Camera, Microphone,
+Accessibility — are modelled in `packages/permissions` (pure: what each is for, what
+breaks without it, which System Settings pane turns it on) and probed in
+`apps/main/src/permissions.ts`, **which owns the `systemPreferences` boundary** — its
+header states the scope exactly, and `eslint.config.mjs` enforces it. The captain
+settled the flow
+(`data/loom-scope/decision-accessibility-clicks.md`): ask up front, all four together,
+explain each, and a user who declines the three optional ones still gets a working
+recorder. Accessibility is read from `AXIsProcessTrusted()`
+(`isTrustedAccessibilityClient(false)` — **`false`, or a status check becomes a dialog**)
+and cross-checked against a live event tap via `@loom/sampler`'s `probeInput`; TCC's
+word alone renders as _granted · unverified_, never as a tick, because the click API
+succeeds without the permission and then silently delivers nothing.
+
+**The rule that makes any of this worth reading: a `granted` only counts if macOS was
+talking about _us_.** A dev binary inherits its launching terminal's grants (research
+§7, trap 6 — measured again on this machine: an unpackaged run reports
+`screen/camera/microphone = granted` with `ppid` of a shell). So every
+`PermissionReport` carries `provenance`, `isTrustworthy()` is the one place that rule
+lives, and `sealReport()` in `apps/main/src/verify/checks.ts` rewrites every `pass` to
+`untrusted` when it fails. Nothing downstream can opt out.
+
+## Phase 2 gate status — three obligations closed on real measurements
+
+`npm run verify:permissions` packages the app, gives it the frozen identity, launches
+it through LaunchServices and runs the checks from inside the real bundle. Last run
+2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
+`responsibleForSelf: true`, so `sealReport` downgraded nothing. The run's own outcome
+is `incomplete` rather than `verified`, because `verified` needs every check to pass
+and the click row is `skipped`.
+
+| Check                  | Status      | Evidence                                                                                                                                                                                                             |
+| ---------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`      | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                             |
+| `frame-authorisation`  | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                       |
+| `screen-enumeration`   | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                               |
+| `content-protection`   | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                  |
+| `accessibility-clicks` | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in the window, so the rate is unmeasured. Rate and latency are deferred to phase 10 by captain decision — it consumes the log. |
+
+The `content-protection` row is the one worth understanding. "The marker is absent from
+the HUD's rectangle" passes just as well when the capture is black, the coordinates are
+wrong, or the window never painted — so a second window, same page, same size,
+`setContentProtection` **not** called, is placed beside it and must show the marker
+first. Without that control clearing, the check reports `blocked`, not a pass. Same
+discipline as `kill-mid-write.test.ts`'s naive writer.
+
+## Sharp edges — permissions
+
+- **`npm run package` does not sign this app.** With no Developer ID, electron-builder
+  skips signing and leaves Electron's own linker-signed stub: `Identifier=Electron`,
+  Info.plist _not bound_. macOS would file every grant under "Electron" — the identity
+  churn `identity.ts` exists to prevent, arriving through the back door.
+  `scripts/verify-permissions.mjs` ad-hoc signs with the frozen identifier and
+  entitlements (research §5.3, note 4) and refuses to run if the identifier is wrong.
+- **An ad-hoc signature is content-derived, so every rebuild is a new identity.** A
+  grant given to one build does not survive `npm run package`. Worse, two bundles with
+  the same identifier and different signatures — `release/mac` and `release/mac-arm64`
+  — put two rows in System Settings, and granting the wrong one is indistinguishable
+  from granting nothing: the app still reports `denied`. That cost a full grant cycle
+  here. The runner prefers the host architecture; keep exactly one bundle on disk, and
+  if it is rebuilt, the grant has to be given again.
+- **`open -a`, never the executable.** Running `Loom Clone.app/Contents/MacOS/…` from a
+  shell makes the _shell_ the responsible process, which is the lie the gate is about.
+  The harness independently checks `process.ppid === 1`.
+- **A captured pixel is in the display's colour space, not sRGB.** The content-protection
+  marker is painted sRGB `#FF00FF` and comes back near `(232, 51, 245)` on this
+  Display-P3 machine. A tight per-channel match reported 0% _inside the control_ on the
+  first run — which is exactly what the control is for. Match the shape of the colour,
+  not its coordinates.
+- **Refusing a `getDisplayMedia` request logs an `UnhandledPromiseRejectionWarning`**
+  ("Video was requested, but no video stream was provided") from Electron's own
+  internals, on every refusal. It is the normal, correct path for an unauthorised
+  window — not a bug in `provideSource`.
+- **Settings writes are serialized in `ProjectStore`, not by their callers.**
+  `updateSetup` merges a patch into the document it last read and the read is separated
+  from the write by an `fsync`ing rename, so two unqueued patches both read the
+  pre-first snapshot and the second drops the first's field. `PermissionManager` keeps
+  its own chain on top for a different question — `relaunch()` waits on it, because
+  "Open System Settings" and "Relaunch" are adjacent buttons and a quit that beat the
+  `accessibilityOpenedAt` write would come back having forgotten it ever asked.
+- **`PermissionManager` is built after `store.loadSettings()` resolves**, and reads
+  `store.setup` on every probe rather than latching it. Both, because either alone
+  turns a persisted Accessibility ask into a fresh-install default on the very launch
+  it exists to survive.
+- **The click-tap leg of a probe costs a process.** The other three are
+  `systemPreferences` reads; this one runs the native sampler, and `refresh()` fires on
+  every window focus. It is coalesced and cached for a few seconds, invalidated by
+  `axTrusted` changing.
+- **`apps/main` still has no filesystem.** The harness prints its JSON report between
+  markers on stdout and the runner script saves it, rather than punching the first hole
+  in the `node:fs` restriction for a test.
 
 ## Maintaining this file
 

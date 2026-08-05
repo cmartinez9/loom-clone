@@ -8,6 +8,7 @@
     "@loom/format": "0.1.0",
     "@loom/ipc": "0.1.0",
     "@loom/mux": "0.1.0",
+    "@loom/permissions": "0.1.0",
     "@loom/sampler": "0.1.0"
   }
 }

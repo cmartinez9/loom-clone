@@ -8,9 +8,11 @@
  * same atomic writes as `edit.json`. Report §0, rule 2: main is the only writer, and
  * within main there is one.
  *
- * Nothing here starts a sampler on its own. Capture is phase 1 and the permission
- * flow is phase 2; when they land, they call {@link startInputSampler} with the
- * recording's id and the clock origin from `recording.json`.
+ * Nothing here starts a sampler on its own, and nothing yet does: phase 2's
+ * permission flow only *probes* the tap (`probeInput`, from `permissions.ts`), and no
+ * recording samples into a log. The phase that wires it in calls
+ * {@link startInputSampler} with the recording's id and the clock origin from
+ * `recording.json`.
  */
 
 import { join } from 'node:path';
@@ -72,8 +74,8 @@ export interface StartInputSamplerOptions {
   /**
    * Whether to attempt click capture.
    *
-   * Phase 2 passes `false` when the user declined Accessibility, which is the
-   * difference between the log saying `not-requested` and saying
+   * The caller passes `false` when the user declined Accessibility in first-run
+   * setup, which is the difference between the log saying `not-requested` and saying
    * `accessibility-denied` — two different sentences to show a user.
    */
   clicks?: boolean;

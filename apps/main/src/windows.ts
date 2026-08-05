@@ -3,6 +3,7 @@
  *
  * | Window          | Visible | `setContentProtection` | Job |
  * |-----------------|---------|------------------------|-----|
+ * | Setup           | yes     | no                     | First run: the four permissions, explained, asked for together |
  * | Library         | yes     | no                     | Recording list, sizes, export state, retention warnings |
  * | Recorder HUD    | yes     | **yes**                | Source/device pickers, start/stop, timer, meters, camera preview |
  * | Countdown       | yes     | **yes**                | 3-2-1 |
@@ -36,7 +37,14 @@ import {
 import { CHANNEL, appUrl } from '@loom/ipc';
 
 export type WindowRole =
-  'library' | 'recorder-hud' | 'countdown' | 'drawing-overlay' | 'capture' | 'editor' | 'export';
+  | 'setup'
+  | 'library'
+  | 'recorder-hud'
+  | 'countdown'
+  | 'drawing-overlay'
+  | 'capture'
+  | 'editor'
+  | 'export';
 
 interface RoleSpec {
   /** Renderer page under `dist/renderer/`. */
@@ -80,6 +88,37 @@ const HUD_SIZE = { width: 420, height: 92 } as const;
 const HUD_MAX_NOTICE_PX = 200;
 
 const ROLES: Record<WindowRole, RoleSpec> = {
+  /**
+   * First run. Shown instead of the library when `settings.setup.completedAt` is
+   * `null`, and openable afterwards from the library.
+   *
+   * Sized to its content and resizable, which is a correction rather than a
+   * preference: at a fixed 760px the Accessibility row's second sentence — "not
+   * keystrokes, not window contents, not what you type" — fell off the bottom edge
+   * with no way to reach it. That sentence is the one the captain's decision requires
+   * and the one that earns the most invasive of the four asks, so the window is tall
+   * enough for it and lets a short display scroll to it.
+   *
+   * `titleBarStyle` matches the library so the two do not look like they came from
+   * different apps.
+   */
+  setup: {
+    page: 'setup.html',
+    visible: true,
+    contentProtected: false,
+    multiple: false,
+    options: {
+      width: 720,
+      height: 880,
+      minWidth: 640,
+      minHeight: 520,
+      maximizable: false,
+      fullscreenable: false,
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 14, y: 12 },
+      title: 'Welcome',
+    },
+  },
   library: {
     page: 'library.html',
     visible: true,

@@ -6,22 +6,18 @@
  * > the result atomically, and leaves `edit.json.v1.bak` behind. **Never** silently
  * > accept an unknown schema — refuse to open and say so.
  *
- * Every family is at version 1 today, so {@link defaultRegistry} registers no steps.
- * The machinery is here from the first commit anyway, and it is the code path every
- * read already goes through — which means the first real migration is a data change,
- * not an architecture change, and it arrives with tests that already exist.
+ * The machinery was here from the first commit and phase 2 is the first caller: it
+ * added `setup` to `loom.settings`, so the chain that every read already went
+ * through now actually has a step in it. That was the point of building it early —
+ * the first migration was a data change, not an architecture change, and it arrived
+ * with tests that already existed.
  *
  * ## Adding a migration
  *
- * ```ts
- * defineMigration('loom.edit', 1, (doc) => {
- *   doc['output'] = { ...(doc['output'] as object), colorSpace: 'srgb' };
- *   return doc;
- * });
- * ```
- *
- * and bump `CURRENT_VERSION['loom.edit']` to 2. A step takes a document at version
- * `n` and returns one at `n + 1`. It receives a deep clone, so it may mutate freely.
+ * Add a step to {@link defaultRegistry} below, bump `CURRENT_VERSION[family]` in
+ * `schema.ts`, and add a fixture at the old version. A step takes a document at
+ * version `n` and returns one at `n + 1`; it receives a deep clone, so it may mutate
+ * freely, and the runner stamps the new `schema` string itself.
  */
 
 import { CURRENT_VERSION, parseSchemaId, schemaId, type SchemaFamily } from '../schema.ts';
@@ -99,12 +95,29 @@ export class MigrationRegistry {
 }
 
 /**
- * The registry this build reads and writes with.
+ * `loom.settings/1` → `/2`: give an existing install the phase 2 `setup` block.
  *
- * Empty because every family is at version 1. When that changes, add the steps here.
+ * `completedAt: null` is deliberate, and it is the only defensible answer. A user
+ * upgrading from a build that predates first-run setup has never been asked for
+ * Camera, Microphone or Accessibility — phases 0 and 1 asked for nothing — so
+ * marking setup complete would hide the one screen that explains why an app wants
+ * four permissions. They see it once, on the next launch, which is exactly what a
+ * fresh install sees.
  */
+const SETTINGS_1_TO_2: MigrationStep = (doc) => {
+  doc['setup'] = { completedAt: null, accessibilityOpenedAt: null };
+  return doc;
+};
+
+/** The registry this build reads and writes with. */
 export function defaultRegistry(): MigrationRegistry {
-  return new MigrationRegistry();
+  return new MigrationRegistry().with(
+    'loom.settings',
+    new Map([[1, SETTINGS_1_TO_2]]),
+    // Read rather than repeated: a future bump to 3 that forgets this line would
+    // otherwise leave the chain silently capped at 2.
+    CURRENT_VERSION['loom.settings'],
+  );
 }
 
 /** Structured-clone the document so a step can mutate without surprising the caller. */

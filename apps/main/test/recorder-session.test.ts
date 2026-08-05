@@ -52,6 +52,13 @@ const harness = vi.hoisted(() => ({
   listeners: new Map<string, Listener[]>(),
   handlers: new Map<string, Handler>(),
   windows: new Map<WindowRole, FakeWindow>(),
+  /**
+   * What TCC says about Screen Recording. Mutable because architecture report §7.3
+   * turns on reading it *after* the source ended: a revoked grant and a "Stop
+   * sharing" click produce the same `source-ended`, and this is the only thing that
+   * tells them apart.
+   */
+  screenAccess: 'granted',
 }));
 
 vi.mock('electron', () => {
@@ -84,8 +91,11 @@ vi.mock('electron', () => {
     },
     screen: { getPrimaryDisplay: () => display, getAllDisplays: () => [display] },
     session: { defaultSession: { setDisplayMediaRequestHandler: () => undefined } },
+    app: { isPackaged: false },
+    shell: { openExternal: () => Promise.resolve() },
     systemPreferences: {
-      getMediaAccessStatus: () => 'granted',
+      getMediaAccessStatus: (kind: string) =>
+        kind === 'screen' ? harness.screenAccess : 'granted',
       isTrustedAccessibilityClient: () => false,
     },
   };
@@ -409,6 +419,7 @@ beforeEach(async () => {
   harness.listeners.clear();
   harness.handlers.clear();
   harness.windows.clear();
+  harness.screenAccess = 'granted';
   scratch = await mkdtemp(join(tmpdir(), 'loom-recorder-session-'));
   store = new ProjectStore({
     recordingsRoot: join(scratch, 'recordings'),
@@ -756,5 +767,74 @@ describe('who may drive a recording', () => {
       // got past the sender check at all.
       await expect(invoke(CHANNEL.recorderStop, window.webContents)).resolves.toBeUndefined();
     }
+  });
+});
+
+/**
+ * Architecture report §7.3: *"Distinguish revocation from a normal stop by
+ * re-checking `getMediaAccessStatus('screen')`."*
+ *
+ * Phase 1 could not, and said so in `endReasonFor`: a `source-ended` was recorded as
+ * `permission-revoked` because that was "the more useful of the two guesses". It is
+ * also the shape macOS's own "Stop sharing" control and a disconnected display take,
+ * and the difference matters — one of them is worth telling the user to go and fix a
+ * permission for, and the other is not.
+ *
+ * Both branches are asserted, because a test for only the revoked case would pass
+ * against the phase 1 code that always guessed revoked.
+ */
+describe('a source that ends by itself (§7.3)', () => {
+  async function recordThenEndSource(): Promise<RecordingDoc> {
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of fixture.frames.slice(0, 10)) {
+      emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    }
+    // The writer holds one sample so every duration is measured against the next
+    // frame's timestamp, so ten chunks is nine frames on the file until finalize
+    // flushes the last one.
+    await until(() => store.mediaFrameCount(id, 'screen') >= 9, 'the frames to be written');
+
+    // Not a stop: the track ended on its own, which is what both a revoked grant and
+    // a "Stop sharing" click look like from in here.
+    emit(CHANNEL.captureEnded, contents, {
+      reason: 'source-ended',
+      endedAtUs: fixture.frames[9]?.timestampUs ?? 0,
+      framesEncoded: 10,
+      framesDropped: 0,
+    });
+    await untilState(id, 'editable');
+
+    const dir = await store.directoryFor(id);
+    const raw: unknown = JSON.parse(await readFile(join(dir, 'recording.json'), 'utf8'));
+    const result = validateRecordingDoc(raw);
+    if (!result.ok) throw new Error('recording.json did not validate');
+    return result.value;
+  }
+
+  it('calls it permission-revoked when the grant is gone', async () => {
+    harness.screenAccess = 'denied';
+    const doc = await recordThenEndSource();
+    const part = doc.tracks.screen?.parts[0];
+    expect(part?.endedEarly).toBe(true);
+    expect(part?.endReason).toBe('permission-revoked');
+  });
+
+  it('CONTROL: calls it device-lost when the grant is still there', async () => {
+    // Without this the test above would pass against the phase 1 code, which
+    // recorded `permission-revoked` for every `source-ended` regardless.
+    harness.screenAccess = 'granted';
+    const doc = await recordThenEndSource();
+    const part = doc.tracks.screen?.parts[0];
+    expect(part?.endedEarly).toBe(true);
+    expect(part?.endReason).toBe('device-lost');
+  });
+
+  it('keeps the footage either way, and never discards it', async () => {
+    // §7.3: "Finalize what we have — never discard."
+    harness.screenAccess = 'denied';
+    const doc = await recordThenEndSource();
+    expect(doc.tracks.screen?.parts[0]?.frameCount).toBe(10);
   });
 });
