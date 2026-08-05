@@ -108,6 +108,27 @@ export function springSettleSec(params: SpringParams): number {
 }
 
 /**
+ * Hard ceiling on the grid one channel may span, in seconds.
+ *
+ * The table is sized from the last keyframe's `t`, and nothing upstream bounds
+ * that: `validateChannel` requires a finite `t` and no more, so a seconds/
+ * milliseconds slip in a generator, or a hand-edited `edit.json` — the case
+ * `bezier.ts` is explicit about staying openable for — would size the allocation
+ * instead of the recording. A key at `t = 1e6` is 125 million samples (~1 GB for a
+ * 2-wide channel) and one at `t = 1e9` is a `RangeError` thrown out of `compile`.
+ * Twelve hours is longer than any recording this app can make and still only 5.4
+ * million samples, so the bound refuses the slip and never the real project.
+ */
+export const MAX_SPRING_TABLE_SEC = 12 * 60 * 60;
+
+/** Where this channel's grid would end: its last key, plus the settle tail. */
+export function springTableEndSec(keys: readonly Keyframe[], params: SpringParams): number {
+  if (keys.length === 0) return 0;
+  const lastT = keys[keys.length - 1]?.t ?? 0;
+  return Math.max(0, lastT) + springSettleSec(params);
+}
+
+/**
  * One analytic step of a scalar spring, written into `out` as `[position, velocity]`.
  *
  * Exact for any `dt`. `out` is a caller-owned two-element scratch so the precompute
@@ -192,6 +213,10 @@ export interface SpringTable {
  * `clamp` is applied to what is **stored**, never to the spring's internal state:
  * clamping the state would change the dynamics, and §3.3 declares `clamp` as a
  * bound on the channel's value, not as a wall the mass bounces off.
+ *
+ * The table is sized by the keys, so a key far out of range sizes the allocation:
+ * {@link MAX_SPRING_TABLE_SEC} is the bound, and `compileChannel` is where a channel
+ * that exceeds it is refused by name before this runs.
  */
 export function precomputeSpring(
   keys: readonly Keyframe[],
@@ -205,8 +230,7 @@ export function precomputeSpring(
 
   const constants = springConstants(params);
   const dt = SPRING_GRID_SEC;
-  const lastT = keys[keys.length - 1]?.t ?? 0;
-  const endSec = Math.max(0, lastT) + springSettleSec(params);
+  const endSec = springTableEndSec(keys, params);
   // §12.5: 60 s → 7,502 samples; 600 s → 75,002; 1800 s → 225,002. Two guard
   // samples past the end so a lerp at the final grid point always has a right
   // neighbour to reach for.

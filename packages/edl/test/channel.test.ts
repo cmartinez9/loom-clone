@@ -18,6 +18,7 @@ import {
   cubicBezierEase,
   CurveChannel,
   DEFAULT_SPRING,
+  MAX_SPRING_TABLE_SEC,
   SpringChannel,
 } from '../src/index.ts';
 
@@ -167,6 +168,35 @@ describe('classification — §3.4’s validation error', () => {
     const orphan: Channel = { keys: [{ t: 0, v: 1, ease: { kind: 'spring' } }] };
     expect(() => classifyChannel('t.amount', orphan)).toThrow(/spring parameters/);
     expect(() => compileChannel('t.amount', orphan)).toThrow(/spring parameters/);
+  });
+
+  it('refuses a spring channel whose last key would size the grid past the ceiling', () => {
+    // The table runs from zero to the last key, and nothing upstream bounds a
+    // keyframe `t` — `validateChannel` asks only that it be finite. A
+    // seconds/milliseconds slip, or a hand-edited `edit.json`, must therefore come
+    // back as a typed refusal naming the channel rather than as a gigabyte of
+    // `Float32Array` or a `RangeError` thrown out of `compile`.
+    const slipped: Channel = {
+      keys: [{ t: 1e6, v: 1, ease: { kind: 'spring' } }],
+      spring: DEFAULT_SPRING,
+    };
+    expect(() => compileChannel('t.amount', slipped)).toThrow(ChannelCompileError);
+    expect(() => compileChannel('t.amount', slipped)).toThrow(/t\.amount/);
+    expect(() =>
+      compileChannel('t.amount', {
+        keys: [{ t: 1e9, v: 1, ease: { kind: 'spring' } }],
+        spring: DEFAULT_SPRING,
+      }),
+    ).toThrow(ChannelCompileError);
+
+    // A key inside the ceiling still compiles, so the bound refuses the slip and not
+    // the recording: this is thirty minutes, §12.5's own worked example.
+    const real = compileChannel('t.amount', {
+      keys: [{ t: 1800, v: 1, ease: { kind: 'spring' } }],
+      spring: DEFAULT_SPRING,
+    });
+    expect(real).toBeInstanceOf(SpringChannel);
+    expect(MAX_SPRING_TABLE_SEC).toBeGreaterThan(1800);
   });
 
   it('reports an empty channel as no opinion rather than as zero', () => {

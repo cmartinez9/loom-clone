@@ -8,7 +8,7 @@
  */
 
 import type { Channel, EditDocument, Keyframe, Span, Track } from '../types/edit.ts';
-import type { EditOp } from './ops.ts';
+import { isRemovableTrackKey, REMOVABLE_TRACK_KEYS, type EditOp } from './ops.ts';
 
 export class OpApplyError extends Error {
   readonly op: EditOp;
@@ -49,17 +49,50 @@ function setKey(channel: Channel, key: Keyframe): void {
  *
  * Replacing keeps the span where it was — array order is z-order for annotations —
  * and `at` places a new one, so undoing a `span.remove` puts the span back where the
- * user had it rather than on top of everything else.
+ * user had it rather than on top of everything else. An `at` outside the array is
+ * refused for the same reason `track.add` refuses one: z-order is the picture, so a
+ * lost index is a lost edit rather than a rounding error.
  */
-function upsertSpan(track: Track, span: Span, at?: number): void {
+function upsertSpan(track: Track, span: Span, at: number | undefined, op: EditOp): void {
   const spans = (track.spans ??= []);
+  if (at !== undefined && (!Number.isInteger(at) || at < 0 || at > spans.length)) {
+    throw new OpApplyError(
+      `span.set at index ${String(at)} is outside 0..${String(spans.length)}`,
+      op,
+    );
+  }
   const existing = spans.findIndex((s) => s.id === span.id);
   if (existing >= 0) {
     spans[existing] = span;
     return;
   }
-  if (at === undefined || at < 0 || at > spans.length) spans.push(span);
+  if (at === undefined) spans.push(span);
   else spans.splice(at, 0, span);
+}
+
+/**
+ * Delete the keys a patch names.
+ *
+ * Only a `Track`'s optional fields can go. `applyOpInPlace` is also fed journal
+ * lines, which the compiler never saw, and a track that lost `domain` is one
+ * `compile` refuses (§3.2) *after* the editor has already applied the op locally —
+ * so the refusal belongs here, where the op still exists to name.
+ */
+function removeTrackKeys(fields: Record<string, unknown>, remove: unknown, op: EditOp): void {
+  if (remove === undefined) return;
+  if (!Array.isArray(remove)) {
+    throw new OpApplyError('track.patch remove must be an array of key names', op);
+  }
+  for (const key of remove as unknown[]) {
+    if (typeof key !== 'string' || !isRemovableTrackKey(key)) {
+      throw new OpApplyError(
+        `track.patch cannot remove ${JSON.stringify(String(key))}; ` +
+          `only ${REMOVABLE_TRACK_KEYS.join(', ')} are optional`,
+        op,
+      );
+    }
+    Reflect.deleteProperty(fields, key);
+  }
 }
 
 /** Apply one op **in place**. Callers own cloning; see {@link applyOps}. */
@@ -95,20 +128,24 @@ export function applyOpInPlace(doc: EditDocument, op: EditOp): void {
       const track = findTrack(doc, op.trackId, op);
       // `id` and `kind` are excluded by TrackPatch's type; strip them again here
       // because a journal line is data from disk, not a value the compiler saw.
-      const { id: _id, kind: _kind, ...patch } = op.patch as Record<string, unknown>;
+      const { id: _id, kind: _kind, remove, ...patch } = op.patch as Record<string, unknown>;
       void _id;
       void _kind;
-      // An explicit `undefined` removes the key rather than setting it to
-      // `undefined`. That is what makes a patch invertible: the inverse of
-      // "add a `generator` block" has to be "there was no `generator` block", and a
-      // property holding `undefined` is a different document from one without the
-      // property — until it is serialized, at which point they become the same and
-      // an undo would stop round-tripping.
       const fields = track as unknown as Record<string, unknown>;
       for (const [key, value] of Object.entries(patch)) {
-        if (value === undefined) Reflect.deleteProperty(fields, key);
-        else fields[key] = value;
+        // A key holding `undefined` is dropped by `JSON.stringify`, so accepting one
+        // here would make the document in memory and the document the journal
+        // replays two different documents. Removal has its own, serializable form.
+        if (value === undefined) {
+          throw new OpApplyError(
+            `track.patch cannot set ${JSON.stringify(key)} to undefined; ` +
+              'removal travels as patch.remove, which survives JSON',
+            op,
+          );
+        }
+        fields[key] = value;
       }
+      removeTrackKeys(fields, remove, op);
       return;
     }
     case 'key.set': {
@@ -131,7 +168,7 @@ export function applyOpInPlace(doc: EditDocument, op: EditOp): void {
       return;
     }
     case 'span.set': {
-      upsertSpan(findTrack(doc, op.trackId, op), op.span, op.at);
+      upsertSpan(findTrack(doc, op.trackId, op), op.span, op.at, op);
       return;
     }
     case 'span.remove': {

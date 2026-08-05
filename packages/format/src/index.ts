@@ -187,12 +187,15 @@ export {
 // ---- the edit journal ------------------------------------------------------
 export {
   EDIT_OP_KINDS,
+  REMOVABLE_TRACK_KEYS,
   isEditOp,
   isEditOpKind,
+  isRemovableTrackKey,
   type EditOp,
   type EditOpKind,
   type JournalEntry,
   type JournalHeader,
+  type RemovableTrackKey,
   type TrackPatch,
 } from './journal/ops.ts';
 export { OpApplyError, applyOpInPlace, applyOps } from './journal/apply.ts';

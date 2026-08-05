@@ -336,8 +336,23 @@ export function randomOp(rng: Rng, doc: EditDocument): EditOp | null {
   }
 
   if (roll < 0.3) {
+    // Removing `spans` is the removal `resolve` can see — a mute stops muting, an
+    // annotation stops drawing — so it is the one that makes the gate's comparator,
+    // and not just the type, prove that a removal survived the journal.
+    const withSpans = tracks.filter((t) => (t.spans?.length ?? 0) > 0);
+    if (withSpans.length > 0 && rng.bool(0.3)) {
+      return { op: 'track.patch', trackId: rng.pick(withSpans).id, patch: { remove: ['spans'] } };
+    }
     const track = rng.pick(tracks);
-    const which = rng.int(0, 5);
+    const which = rng.int(0, 7);
+    // A key a patch added and a later patch takes away again: the shape an undo of
+    // "add a generator block" has, on a field nothing else in the corpus touches.
+    if (which === 5) {
+      return { op: 'track.patch', trackId: track.id, patch: { shapePreset: 'pill' } };
+    }
+    if (which === 6) {
+      return { op: 'track.patch', trackId: track.id, patch: { remove: ['shapePreset'] } };
+    }
     if (which === 0)
       return { op: 'track.patch', trackId: track.id, patch: { enabled: !track.enabled } };
     if (which === 1)
@@ -421,6 +436,8 @@ export interface Coverage {
   domains: Set<string>;
   blends: Set<string>;
   easeKinds: Set<string>;
+  /** Track keys a `track.patch` actually removed — §2.7's `patch.remove`. */
+  removedKeys: Set<string>;
   springChannels: number;
   clampedChannels: number;
   crossfadedTracks: number;
@@ -435,6 +452,7 @@ export function emptyCoverage(): Coverage {
     domains: new Set(),
     blends: new Set(),
     easeKinds: new Set(),
+    removedKeys: new Set(),
     springChannels: 0,
     clampedChannels: 0,
     crossfadedTracks: 0,
@@ -445,6 +463,8 @@ export function emptyCoverage(): Coverage {
 
 export function observe(coverage: Coverage, doc: EditDocument, op: EditOp): void {
   coverage.opKinds.add(op.op);
+  if (op.op === 'track.patch')
+    for (const key of op.patch.remove ?? []) coverage.removedKeys.add(key);
   for (const track of doc.tracks) {
     coverage.targets.add(track.target);
     coverage.domains.add(track.domain);

@@ -111,7 +111,7 @@ describe('applying ops', () => {
     expect(() => applyOps(before, [{ ...ADD_OP, at: 1.5 }])).toThrow(OpApplyError);
   });
 
-  it('removes a key from a track when a patch carries an explicit undefined', () => {
+  it('removes a key from a track when a patch names it in `remove`', () => {
     // What makes a patch invertible: the inverse of "add a generator block" is
     // "there was no generator block", and a property holding `undefined` is a
     // different document from one without the property until it is serialized.
@@ -126,12 +126,38 @@ describe('applying ops', () => {
       'shapePreset' in (withGenerator.tracks.find((t) => t.id === 't-zoom-manual') ?? {}),
     ).toBe(true);
 
-    const removed = applyOps(withGenerator, [
-      { op: 'track.patch', trackId: 't-zoom-manual', patch: { shapePreset: undefined } },
-    ]);
+    const removeOp: EditOp = {
+      op: 'track.patch',
+      trackId: 't-zoom-manual',
+      patch: { remove: ['shapePreset'] },
+    };
+    const removed = applyOps(withGenerator, [removeOp]);
     const track = removed.tracks.find((t) => t.id === 't-zoom-manual');
     expect(track).toBeDefined();
     expect(track === undefined ? true : 'shapePreset' in track).toBe(false);
+
+    // The whole point of the representation: the instruction is still there after a
+    // trip through the journal's bytes, so a crash before the next `edit.json`
+    // snapshot replays the removal rather than losing it.
+    const line: unknown = JSON.parse(JSON.stringify(removeOp));
+    expect(isEditOp(line)).toBe(true);
+    const replayed = applyOps(withGenerator, [line as EditOp]);
+    expect('shapePreset' in (replayed.tracks.find((t) => t.id === 't-zoom-manual') ?? {})).toBe(
+      false,
+    );
+  });
+
+  it('refuses a patch that says undefined, and one that removes a required key', () => {
+    // `JSON.stringify` drops an undefined-valued property, so a patch that removed
+    // by that route would apply in memory and replay as a no-op. And `remove` can
+    // only take the optional fields: a track without `domain` is one `compile`
+    // refuses (§3.2) after the editor has already applied the op.
+    const doc = fixtureEdit();
+    const patchOp = (patch: unknown): EditOp =>
+      ({ op: 'track.patch', trackId: 't-zoom-manual', patch }) as unknown as EditOp;
+    expect(() => applyOps(doc, [patchOp({ blendMs: undefined })])).toThrow(OpApplyError);
+    expect(() => applyOps(doc, [patchOp({ remove: ['domain'] })])).toThrow(OpApplyError);
+    expect(() => applyOps(doc, [patchOp({ remove: 'spans' })])).toThrow(OpApplyError);
   });
 
   it('places a new span at an index, and keeps an existing one where it was', () => {
@@ -146,6 +172,19 @@ describe('applying ops', () => {
     const spans = doc.tracks.find((t) => t.id === 't-ann')?.spans ?? [];
     expect(spans.map((s) => s.id)).toEqual(['s-b', 'a1', 's-a']);
     expect(spans.find((s) => s.id === 's-a')?.type).toBe('ellipse');
+  });
+
+  it('refuses an out-of-range span index, exactly as `track.add` does', () => {
+    // Span order is z-order, so an `at` that fell off the end would put the
+    // annotation on top of everything instead of where the user had it.
+    const span = { id: 's-a', start: 1, end: 2, type: 'arrow' };
+    const doc = fixtureEdit();
+    expect(() => applyOps(doc, [{ op: 'span.set', trackId: 't-ann', span, at: 99 }])).toThrow(
+      OpApplyError,
+    );
+    expect(() => applyOps(doc, [{ op: 'span.set', trackId: 't-ann', span, at: 1.5 }])).toThrow(
+      OpApplyError,
+    );
   });
 
   it('shape-checks ops that came off disk', () => {

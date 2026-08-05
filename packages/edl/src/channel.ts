@@ -31,7 +31,14 @@
 
 import type { Channel, Ease, Keyframe, SpringParams } from '@loom/format';
 import { cubicBezierEase } from './bezier.ts';
-import { precomputeSpring, readKeyValue, SPRING_GRID_SEC, type SpringTable } from './spring.ts';
+import {
+  MAX_SPRING_TABLE_SEC,
+  precomputeSpring,
+  readKeyValue,
+  springTableEndSec,
+  SPRING_GRID_SEC,
+  type SpringTable,
+} from './spring.ts';
 
 export class ChannelCompileError extends Error {
   readonly channelKey: string;
@@ -270,6 +277,19 @@ export class SpringChannel implements CompiledChannel {
     params: SpringParams,
     clamp: readonly [number, number] | null,
   ) {
+    // The grid runs from zero to the last key, so the last key sizes the
+    // allocation. Nothing upstream bounds a keyframe `t`; refusing the channel by
+    // name is what keeps one bad number a typed error rather than a gigabyte or a
+    // `RangeError` out of `compile`.
+    const endSec = springTableEndSec(keys, params);
+    if (!(endSec <= MAX_SPRING_TABLE_SEC)) {
+      throw new ChannelCompileError(
+        key,
+        `its last keyframe puts the spring grid at ${String(endSec)} s, past the ` +
+          `${String(MAX_SPRING_TABLE_SEC)} s ceiling; a keyframe time this far out is a ` +
+          'unit slip or a hand-edited document, not a recording',
+      );
+    }
     const table: SpringTable = precomputeSpring(keys, channelWidth(keys), params, clamp);
     this.key = key;
     this.width = table.width;

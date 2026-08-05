@@ -34,7 +34,7 @@
  *    appear — and the resolved states must actually *vary* across the sample times.
  *    A generator that quietly stopped producing spring channels would fail here
  *    rather than making the gate cheaper to pass.
- * 2. **There are controls.** Eleven deliberate corruptions of the saved bytes, each
+ * 2. **There are controls.** Twelve deliberate corruptions of the saved bytes, each
  *    one a plausible way for a "save" to lose something — a dropped `ease`, a
  *    rounded `t`, a dropped `clamp`, reordered tracks, a flipped `domain` — are run
  *    through the identical comparator, and **every one of them must be caught**. If
@@ -159,6 +159,10 @@ describe('resolve() after a random op sequence == resolve() after save + reload 
     expect([...coverage.domains].sort()).toEqual(['source', 'timeline']);
     expect([...coverage.blends].sort()).toEqual(['add', 'multiply', 'replace']);
     expect([...coverage.easeKinds].sort()).toEqual(['cubic', 'hold', 'linear', 'spring']);
+    // `patch.remove` is the only removal that survives `JSON.stringify`, so the
+    // corpus has to contain one — and one of a key `resolve` reads, or the controls
+    // below would be corrupting something no comparison could see.
+    expect([...coverage.removedKeys].sort()).toEqual(['shapePreset', 'spans']);
     expect(coverage.springChannels).toBeGreaterThan(0);
     expect(coverage.clampedChannels).toBeGreaterThan(0);
     expect(coverage.crossfadedTracks).toBeGreaterThan(0);
@@ -277,6 +281,24 @@ const CORRUPTIONS: readonly Corruption[] = [
       node['speed'] = node['speed'] * 1.0001;
     }
   }),
+  {
+    // The failure `patch.remove` exists to rule out: a removal that applied in the
+    // editor's memory and reached the journal as nothing, so the replay puts the
+    // spans — a mute, an annotation — back.
+    name: 'drops every `track.patch` key removal',
+    mutate: (baseJson, journal) => [
+      baseJson,
+      rewriteJournal(journal, (line) => {
+        walk(line, (node) => {
+          if (node['op'] !== 'track.patch') return;
+          const patch = node['patch'];
+          if (typeof patch === 'object' && patch !== null) {
+            delete (patch as Record<string, unknown>)['remove'];
+          }
+        });
+      }),
+    ],
+  },
   {
     // Not a lossy field but a lost *order* — §3.5 resolves tracks in array order, so
     // a replay that reordered them would change which track wins.

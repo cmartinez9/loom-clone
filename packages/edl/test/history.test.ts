@@ -145,15 +145,30 @@ describe('inverse ops restore the document exactly', () => {
     expect(undone.tracks.map((t) => t.id)).toEqual(['t-a', 't-b', 't-c']);
   });
 
-  it('removes a key that a patch added, rather than leaving it as undefined', () => {
+  it('removes a key that a patch added, through a `remove` that survives the journal', () => {
     const before = baseDocument();
     const ops: EditOp[] = [{ op: 'track.patch', trackId: 't-a', patch: { shapePreset: 'circle' } }];
-    const undone = applyOps(applyOps(before, ops), inverseOps(before, ops));
+    const inverse = inverseOps(before, ops);
+    expect(inverse[0]).toEqual({
+      op: 'track.patch',
+      trackId: 't-a',
+      patch: { remove: ['shapePreset'] },
+    });
+
+    const undone = applyOps(applyOps(before, ops), inverse);
     const track = undone.tracks.find((t) => t.id === 't-a');
     expect(track).toBeDefined();
     expect(track === undefined ? true : 'shapePreset' in track).toBe(false);
     // …and the in-memory document is therefore byte-identical to a reload of itself.
     expect(JSON.stringify(undone)).toBe(JSON.stringify({ ...before, revision: undone.revision }));
+
+    // The undo main journals is the undo main replays. An instruction expressed as a
+    // key holding `undefined` would be `{}` by the time it reached the file, and the
+    // key would come back on the next crash recovery.
+    const throughJournal: unknown = JSON.parse(JSON.stringify(inverse));
+    expect(throughJournal).toEqual(inverse);
+    const replayed = applyOps(applyOps(before, ops), throughJournal as EditOp[]);
+    expect('shapePreset' in (replayed.tracks.find((t) => t.id === 't-a') ?? {})).toBe(false);
   });
 
   it('refuses to invert an op it has nothing to invert against', () => {

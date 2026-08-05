@@ -44,6 +44,7 @@ const EDL_SPRING = 'packages/edl/test/spring.test.ts';
 const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
 const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
 const EDL_HISTORY = 'packages/edl/test/history.test.ts';
+const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -266,6 +267,19 @@ const MUTATIONS = [
     find: "      return { op: 'track.add', track: structuredClone(track), at: doc.tracks.indexOf(track) };",
     replace: "      return { op: 'track.add', track: structuredClone(track) };",
     mustFail: [EDL_HISTORY],
+  },
+  {
+    name: 'undo-of-an-added-key-does-not-remove-it',
+    breaks:
+      'a removal reaching the document at all. `patch.remove` is the one form of ' +
+      '"take this key off" that survives `JSON.stringify`, so it is the whole of ' +
+      'what makes an undo crash-safe: with it ignored, undoing "add a generator ' +
+      'block" leaves the block in place and the editor shows a document its own ' +
+      'file does not describe.',
+    file: 'packages/format/src/journal/apply.ts',
+    find: '      removeTrackKeys(fields, remove, op);',
+    replace: '      removeTrackKeys(fields, undefined, op);',
+    mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
   },
 ];
 

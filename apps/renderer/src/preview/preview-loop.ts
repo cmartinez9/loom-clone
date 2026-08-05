@@ -92,7 +92,12 @@ export const rafScheduler: FrameScheduler = {
 export interface PreviewLoopOptions {
   compositor: PreviewCompositor;
   screen: PreviewSource;
-  /** Timeline duration. Playback stops here. */
+  /**
+   * Timeline duration. Playback stops here.
+   *
+   * It builds the default timeline below, and a caller who supplies `timeline`
+   * instead states the duration in its clip list; there is only ever one of them.
+   */
   durationSec: Seconds;
   /**
    * The compiled timeline `resolve` reads. Defaults to `identityTimeline(durationSec)`
@@ -139,8 +144,9 @@ export class PreviewLoop {
    * The loop reads it within the turn and keeps no reference past `render`.
    */
   #timeline: CompiledTimeline;
+  /** True while `#timeline` is the loop's own `identityTimeline`, not a caller's. */
+  #ownsTimeline: boolean;
 
-  #durationSec: Seconds;
   #time: Seconds = 0;
   #playing = false;
   #scrubbing = false;
@@ -159,8 +165,8 @@ export class PreviewLoop {
     this.#now = options.now ?? (() => performance.now());
     this.#lookaheadSec = options.lookaheadSec ?? 0.5;
     this.#retainBehindSec = options.retainBehindSec ?? 0.1;
-    this.#durationSec = Math.max(0, options.durationSec);
-    this.#timeline = options.timeline ?? identityTimeline(this.#durationSec);
+    this.#ownsTimeline = options.timeline === undefined;
+    this.#timeline = options.timeline ?? identityTimeline(Math.max(0, options.durationSec));
     this.#onError = options.onError ?? (() => undefined);
     this.#onStall = options.onStall ?? (() => undefined);
     this.metrics = new FrameMetrics(4096, FRAME_BUDGET_MS);
@@ -179,11 +185,32 @@ export class PreviewLoop {
   get scrubbing(): boolean {
     return this.#scrubbing;
   }
+  /**
+   * The compiled timeline's duration, and never a second copy of it.
+   *
+   * `resolve` clamps into `CompiledTimeline.durationSec` (§3.6), so a duration the
+   * loop held separately could outrun the one the state comes from: the playhead
+   * would keep advancing while `sourceTime` stuck at the old end, and the preview
+   * would freeze on the last frame with no error anywhere.
+   */
   get durationSec(): Seconds {
-    return this.#durationSec;
+    return this.#timeline.durationSec;
   }
+  /**
+   * Re-length a loop that is showing the recording as captured.
+   *
+   * That is the only case the duration is the loop's to set: a compiled project's
+   * duration is its clip list, and changing it means handing over a recompiled
+   * {@link PreviewLoop.timeline}. Silently discarding a caller's timeline here would
+   * leave a valid loop showing the wrong picture, so it is refused instead.
+   */
   set durationSec(value: Seconds) {
-    this.#durationSec = Math.max(0, value);
+    if (!this.#ownsTimeline) {
+      throw new Error(
+        'durationSec is the compiled timeline’s; assign `timeline` a recompiled one instead',
+      );
+    }
+    this.#timeline = identityTimeline(Math.max(0, value));
   }
   get timeline(): CompiledTimeline {
     return this.#timeline;
@@ -198,6 +225,7 @@ export class PreviewLoop {
    */
   set timeline(value: CompiledTimeline) {
     this.#timeline = value;
+    this.#ownsTimeline = false;
   }
   /** High-water mark of live frames observed by the loop. The gate asserts on it. */
   get peakLiveFrames(): number {
@@ -222,7 +250,7 @@ export class PreviewLoop {
   }
 
   play(): void {
-    if (this.#time >= this.#durationSec) this.#time = 0;
+    if (this.#time >= this.durationSec) this.#time = 0;
     this.#playing = true;
     this.#scrubbing = false;
     this.#lastTickMs = null;
@@ -244,7 +272,7 @@ export class PreviewLoop {
    * was reading, and never blocks this call.
    */
   seek(t: Seconds, options: { scrubbing?: boolean } = {}): void {
-    this.#time = Math.min(Math.max(0, t), this.#durationSec);
+    this.#time = Math.min(Math.max(0, t), this.durationSec);
     this.#scrubbing = options.scrubbing ?? false;
     this.#lastTickMs = null;
     this.#resetStallWatch();
@@ -273,11 +301,11 @@ export class PreviewLoop {
     const started = this.#now();
 
     if (this.#playing) {
+      const durationSec = this.#timeline.durationSec;
       const last = this.#lastTickMs;
-      if (last !== null)
-        this.#time = Math.min(this.#durationSec, this.#time + (nowMs - last) / 1000);
+      if (last !== null) this.#time = Math.min(durationSec, this.#time + (nowMs - last) / 1000);
       this.#lastTickMs = nowMs;
-      if (this.#time >= this.#durationSec) this.#playing = false;
+      if (this.#time >= durationSec) this.#playing = false;
     }
 
     const t = this.#time;

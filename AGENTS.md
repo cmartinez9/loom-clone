@@ -31,7 +31,7 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture and the timeline model 18 ways; each must fail a gate
+npm run verify:mutation   # break capture and the timeline model 19 ways; each must fail a gate
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -460,9 +460,17 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
 - **Track order is stacking order, so an inverse op has to preserve it.** `track.add`
   and `span.set` carry an optional `at` for exactly that: undoing the removal of a
   middle track by appending leaves a valid document and a wrong picture, which is the
-  hardest kind of bug to see. Same reason `track.patch` treats an explicit `undefined`
-  as "remove this key" — the inverse of adding a `generator` block has to be a
-  document without one, not one holding `undefined`.
+  hardest kind of bug to see, and both refuse an out-of-range index rather than
+  appending quietly.
+- **An undo has to survive `JSON.stringify`, so `track.patch` removes by name.** The
+  inverse of adding a `generator` block is a document _without_ one, and the obvious
+  way to say that — a key holding `undefined` — is dropped by `JSON.stringify`: it
+  applies in the editor and reaches `edit.journal.ndjson` as `"patch":{}`, so a crash
+  before the 250 ms snapshot replays the undo as a no-op and the key comes back.
+  Removal is `patch.remove`, a list of key names, restricted to `Track`'s _optional_
+  fields (`REMOVABLE_TRACK_KEYS`, derived from the type so a new optional field is a
+  compile error rather than a silent gap) — and `applyOpInPlace` refuses a patch value
+  of `undefined` outright, so there is only one representation to get right.
 - **An empty `activeRanges` means never active, and "always" is `[[0, 1e9]]`** — the
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.

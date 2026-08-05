@@ -96,6 +96,8 @@ export {
   springDecayRate,
   springSettleSec,
   springStep,
+  springTableEndSec,
+  MAX_SPRING_TABLE_SEC,
   SPRING_GRID_SEC,
   type SpringConstants,
   type SpringTable,
