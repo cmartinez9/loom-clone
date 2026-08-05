@@ -43,7 +43,9 @@ import {
   environmentSustainsBudget,
   expectTracksControl,
   framesPerSpin,
+  hostRepresentsTarget,
   REPRESENTATIVE_GPU_MS,
+  scaledFrameEnvelope,
   type BudgetEvidence,
   type HostProfile,
 } from './gate/budget-control.ts';
@@ -486,25 +488,44 @@ describe('phase 6 gate: 4K scrub and play', () => {
         measured: slow.frames,
         control: slow.control,
         // The play phase's, because this one composites nothing: its source never has a
-        // frame, so `Compositor.render` returns before the timer query opens. Carried
-        // for the failure message only — the branch below is keyed on the control alone,
-        // deliberately. Representativeness decides whether §8's *absolute* number applies
-        // to a host; what this proof needs is that the bound the deferred branch would
-        // actually use still catches a compositor that cannot composite, and consulting
-        // representativeness here would only ever excuse the slowed path on a runner.
-        // This proof must not get weaker on the machine the deferral is for.
+        // frame, so `Compositor.render` returns before the timer query opens, and this
+        // phase's GPU cost is the play phase's borrowed. Which *branch* is required of
+        // the slowed path is still keyed on the control alone, deliberately —
+        // representativeness must never be allowed to excuse it — but
+        // `expectTracksControl` reads the host itself, so which of that branch's bounds
+        // fires is a property of this profile and is worked out from it below rather
+        // than assumed.
         host: playHost,
       };
       if (environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)) {
-        // The host held the budget through this phase, so the ceiling is not the bound
-        // the deferred branch would use here — the *share* is, and it is what has to
-        // catch this. The slowed path burns four budgets on every frame of the phase, so
-        // it misses the budget on 100% of them beside a host that missed it on none:
-        // two orders above the `1/count` this control can resolve, and the only bound
-        // standing between a non-representative host and a catastrophically slow frame.
-        expect(() => expectTracksControl(slowEvidence), detail).toThrow(
-          /a larger share than this host missed it on of its own spins/,
-        );
+        // The host held the budget through this phase, so the ceiling is not a bound the
+        // deferred branch would use here. Which of the two remaining ones catches the
+        // slowed path is decided by measurement, not by hope, and is named in the
+        // assertion so this stays a positive proof that a *specific* bound fired rather
+        // than a matcher that would accept any throw at all. On a representative host
+        // there is no envelope and the share carries it: four budgets burned on every
+        // frame of the phase is 100% of them beside a host that missed none, two orders
+        // above the `1/count` this control can resolve. On a non-representative one the
+        // envelope is reached first and catches it wherever this host's own workload
+        // earns less than the 66.67 ms the path burns — and where it earns more, the
+        // share is still there behind it.
+        const envelope = hostRepresentsTarget(playHost)
+          ? null
+          : scaledFrameEnvelope(playHost, FRAME_BUDGET_MS);
+        const caughtBy =
+          envelope !== null && slow.frames.maxMs > envelope
+            ? {
+                bound: `the ${envelope.toFixed(2)} ms envelope this host's own workload earns`,
+                message: /this host's own workload earns/,
+              }
+            : {
+                bound: "the over-budget share against this host's own",
+                message: /a larger share than this host missed it on of its own spins/,
+              };
+        expect(
+          () => expectTracksControl(slowEvidence),
+          `${detail}\nthe slowed path had to be caught by ${caughtBy.bound}`,
+        ).toThrow(caughtBy.message);
       } else {
         // And where this phase's own control was stalled, the deferred branch's bounds
         // are reported rather than required of it. A control reading past

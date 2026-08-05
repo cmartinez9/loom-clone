@@ -385,6 +385,39 @@ describe('the frame budget is enforced against a measured environment', () => {
   });
 
   /**
+   * The same required throw, on the host the gate actually meets in CI — the combination
+   * no test covered, and the one that reached CI red.
+   *
+   * The slowed path is run beside a healthy control on a machine with no hardware
+   * decoder, so it reaches the representativeness door and the *envelope* answers first,
+   * not the share. `test/phase6-gate.test.ts` therefore picks which message it requires
+   * from the same two measurements rather than assuming one; both outcomes below are a
+   * specific bound firing, and neither is "something threw".
+   */
+  it('CONTROL: catches the slowed path on a non-representative host too', () => {
+    const clearing = control({ count: 24, maxMs: FRAME_BUDGET_MS * CLEARS_BUDGET });
+    const slowed = { count: 24, maxMs: SLOWED_MS, overBudget: 24 };
+
+    // The runner: 10 x 3.309 = 33.09 ms of envelope against 66.67 ms of burn, so the
+    // envelope reaches it before the share does.
+    expect(scaledFrameEnvelope(RUNNER_HOST, FRAME_BUDGET_MS) ?? 0).toBeLessThan(SLOWED_MS);
+    expect(() => expectTracksControl(evidence(slowed, clearing, RUNNER_HOST))).toThrow(
+      /this host's own workload earns/,
+    );
+
+    // And a host so far outside the envelope that it cannot reach the burn — swiftshader
+    // earns 427 ms — falls through to the share, which still has it at 24 of 24.
+    const swiftshader: HostProfile = {
+      hardwareDecode: 'no',
+      gpu: { count: 120, medianMs: 42.749, maxMs: 61 },
+    };
+    expect(scaledFrameEnvelope(swiftshader, FRAME_BUDGET_MS) ?? 0).toBeGreaterThan(SLOWED_MS);
+    expect(() => expectTracksControl(evidence(slowed, clearing, swiftshader))).toThrow(
+      /a larger share than this host missed it on of its own spins/,
+    );
+  });
+
+  /**
    * **The two doors into the deferred branch, and why only one of them carries a ceiling.**
    *
    * The ceiling is relief only while the control that earned it had itself missed the

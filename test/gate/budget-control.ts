@@ -364,11 +364,23 @@ export function hostRepresentsTarget(host: HostProfile): boolean {
  * a one-in-a-hundred over-budget allowance, a p99 standing in for the max — and every
  * one of them let a **worse product pass on the same hardware**. This is **dimensional
  * scaling by a measured quantity**: a host measured doing twice the per-frame work is
- * given twice the frame time, and a compositor that got slower on a fixed host still
- * fails, because the divisor did not move. Decisively, the door this applies to has **no
- * single-frame bound at all** without it — the tracking ceiling belongs to the stalled
- * control's door and is not asked here — so this is strictly *more* checking than not
- * having it, which is the opposite of a weakening.
+ * given twice the frame time. Decisively, the door this applies to has **no single-frame
+ * bound at all** without it — the tracking ceiling belongs to the stalled control's door
+ * and is not asked here — so this is strictly *more* checking than not having it, which
+ * is the opposite of a weakening.
+ *
+ * ## The class it cannot catch, and what does
+ *
+ * The divisor is fixed, but **the numerator is measured on the compositor under test**,
+ * and since {@link REPRESENTATIVE_GPU_MS} is a tenth of the budget this envelope is
+ * exactly `10 × medianMs`. A **GPU-side** regression that lifts the median by *d* therefore
+ * lifts the envelope by *10d* while lifting the frame it judges by about *d*: the bound
+ * grows ten times faster than the cost it bounds, and cannot catch that class on this
+ * door. What catches it is {@link overBudgetRate} beside it — a regression that lifts the
+ * median is a shift in the whole distribution, which is exactly what a rate sees and what
+ * no single-frame bound can. **So do not drop the rate check on the strength of this one**;
+ * they carry different halves. A CPU-side regression — the 20 ms-on-one-composite-in-thirty
+ * burn this gate is judged on — leaves the GPU median where it was and is caught by both.
  *
  * ## Where it stops meaning anything, said out loud
  *
