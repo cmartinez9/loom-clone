@@ -210,12 +210,14 @@ rewriting a growing JSON once a second for the length of the recording.
   `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
   number is painted into every frame and read back out of the framebuffer, so a fast
   blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
-  passes. It judges the 16 ms budget on the p99 plus a one-in-a-hundred allowance and
-  a separate stall ceiling, **not** on the single worst frame: a CI runner decodes 4K
-  in software and shares its host, so its worst frame is 19 ms against a 3.2 ms p99
-  and moves run to run, while the same code measures 0.3 ms on the hardware it ships
-  on. The allowance is stated where it is used, with what a regression would do to
-  those numbers instead.
+  passes. It judges the 16 ms budget on **the single worst frame, with no allowance**,
+  in both phases. That bound was once relaxed to a p99 plus a one-in-a-hundred
+  allowance on the strength of a CI run reporting a 19 ms frame — and the next round
+  proved that run came off a lost WebGL context returning stale pixels (below), so the
+  number was partly fabricated. **A measurement from an instrument since proven
+  unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
+  re-measure, then decide. If a genuine frame over budget turns up on the fixed
+  instrument, that is a decision to take with real numbers, not a threshold to adjust.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and
@@ -225,7 +227,13 @@ rewriting a growing JSON once a second for the length of the recording.
   black, on a commit whose other run of the same SHA passed. `readPixels` now throws
   instead (an exporter would otherwise encode fabricated frames), the gate harness
   aborts the run at the first sign of it, and `test/phase6-gate.test.ts` re-launches
-  **only** for that — never for a run that measured and came out over budget.
+  **only** for that — never for a run that measured and came out over budget. Both
+  halves are pinned by tests rather than by comment: `packages/compositor/test/
+context-loss.test.ts` (with a control proving the fake really does model the silent
+  no-op) and `test/relaunch-policy.test.ts`, which enumerates every bad-run shape and
+  requires that none of them earns a second launch. A retry around an acceptance gate
+  is how a real defect gets to look like weather; it stays defensible only while it
+  stays this narrow.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
