@@ -107,22 +107,15 @@ npm run build && node scripts/smoke-capture.mjs
 ```
 
 That needs Screen Recording granted to your terminal, and stops with instructions if
-<<<<<<< HEAD
 it is missing. It prints what each audio device claimed, what it actually ran at, and
 where each track started relative to the first frame. Adding `--synthetic` puts a
 canvas and an oscillator where the real sources would be and runs everything below
 them for real, so it works without the grant — at the cost of covering neither
 `desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`,
-nor whether macOS honours the constraints on a real loopback track. Those remain
-unverified in a dev environment and are carried forward to phase 2's signed-bundle
-gate; `AGENTS.md` records them.
-=======
-it is missing. Adding `--synthetic` puts a canvas where the display source would be
-and runs everything below it for real, so it works without the grant — at the cost of
-covering neither `desktopCapturer`, nor the `getDisplayMedia` authorisation, nor
-`setContentProtection`. Those three cannot be settled by any dev run: in development
-macOS permissions are inherited from the terminal, so a pass there says nothing about
-the shipped app. They are answered from a signed bundle instead:
+nor whether macOS honours the constraints on a real loopback track. None of those can
+be settled by any dev run: in development macOS permissions are inherited from the
+terminal, so a pass there says nothing about the shipped app. They are answered from a
+signed bundle instead:
 
 ```bash
 npm run verify:permissions   # package, sign under the frozen bundle id, run the checks
@@ -130,7 +123,6 @@ npm run verify:permissions   # package, sign under the frozen bundle id, run the
 
 `AGENTS.md` § Phase 2 gate status is the record of what that has closed and what is
 still waiting on a permission only System Settings can give.
->>>>>>> bd706ed (no-mistakes(document): sync docs with phase 2 permissions and first run)
 
 ## How it is put together
 
