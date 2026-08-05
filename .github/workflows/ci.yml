@@ -51,6 +51,16 @@ jobs:
       - name: Install
         run: npm ci
 
+      # electron 43 ships no install script: the ~100 MB binary is fetched lazily by
+      # the first `require('electron')`, and the only one in this suite is the phase 6
+      # gate. Left alone, that download and its ~250 MB extraction finish two seconds
+      # before the one test here that is a stopwatch, so the page-cache flush and
+      # macOS's first-launch signature scan of a freshly written Electron.app run
+      # straight through its measurement window. `vitest.config.ts` says why that gate
+      # does not share the machine; this is the other half of not sharing it.
+      - name: Fetch the Electron binary
+        run: node -e "require('electron')"
+
       - name: Typecheck
         run: npm run typecheck
 
