@@ -87,6 +87,7 @@ import {
   finalizedRecordingDoc,
   provisionalRecordingDoc,
   withAudioTrack,
+  withClosedVideoPart,
   withVideoPart,
   type FinalizedAudioFacts,
   type FinalizedVideoPartFacts,
@@ -222,6 +223,17 @@ interface ActiveVideo {
   opened: Set<number>;
   /** The device this track is coming from, for `recording.json`. */
   facts: VideoTrackFacts | null;
+  /**
+   * This track's epoch offset, as the open part's announcement reported it.
+   *
+   * Kept because it is the only measure of this track's epoch main holds when the
+   * capture page never gets to send an end report — a renderer that threw, or a
+   * stop that timed out. Without it the fallback in {@link
+   * RecorderSession.finalizeVideo} would subtract two clocks that do not share an
+   * origin, and a camera stamped on this machine's uptime would be written into
+   * `recording.json` as starting 2,678,930 seconds into the recording.
+   */
+  epochOffsetUs: number;
   /** Frames the encoder could not keep up with, across every part. */
   droppedFrames: number;
   /** Set when the track is finished for good, so a late announcement is refused. */
@@ -344,6 +356,14 @@ export class RecorderSession {
       );
     });
 
+    // Not on `metaChain`: it changes no document and closes no file, and a camera
+    // that will not open is exactly the case where nothing else is coming to carry
+    // the news. §7.4's banner is no use once the recording has stopped.
+    ipcMain.on(CHANNEL.captureCameraUnavailable, (event, raw: unknown) => {
+      if (!this.fromCaptureWindow(event)) return;
+      this.onCameraUnavailable(shortString(raw, 500) ?? 'the camera could not be captured');
+    });
+
     ipcMain.on(CHANNEL.captureEnded, (event, raw: unknown) => {
       if (!this.fromCaptureWindow(event)) return;
       this.onEnded(endReport(raw));
@@ -371,6 +391,7 @@ export class RecorderSession {
       CHANNEL.captureMeta,
       CHANNEL.captureChunk,
       CHANNEL.capturePartEnded,
+      CHANNEL.captureCameraUnavailable,
       CHANNEL.captureEnded,
       CHANNEL.captureFailed,
     ]) {
@@ -429,7 +450,10 @@ export class RecorderSession {
         originUs: null,
         audio: new Map(),
         writeError: null,
-        camera: options.webcamDeviceId === null ? 'off' : 'unavailable',
+        // A camera that was asked for is *starting*, not missing: `getUserMedia`
+        // and the first frame take a moment, and calling that `unavailable` would
+        // open every camera recording with the §7.4 banner already on screen.
+        camera: options.webcamDeviceId === null ? 'off' : 'starting',
         end: null,
       };
 
@@ -682,7 +706,13 @@ export class RecorderSession {
     const { store } = this.options;
     const file = store.mediaRelativePath(track, meta.part);
     const nominalFps = track === REFERENCE_TRACK ? active.options.fps : active.options.webcamFps;
-    if (meta.video !== undefined) state.facts = { ...meta.video };
+    if (meta.video !== undefined) {
+      // The identity and the timing are kept apart: `facts` is what
+      // `recording.json` names the device with, and the epoch offset is arithmetic
+      // this track's parts are placed with.
+      state.facts = { deviceId: meta.video.deviceId, deviceName: meta.video.deviceName };
+      state.epochOffsetUs = meta.video.epochOffsetUs;
+    }
 
     const provisional = withVideoPart(this.requireProvisional(active), {
       track,
@@ -917,6 +947,12 @@ export class RecorderSession {
    * frame index sidecar for everything already captured reaches the disk before the
    * next part opens. Nothing about the screen or the audio tracks changes; that is
    * the entire point.
+   *
+   * The close is written into `recording.json` in the same breath, because until it
+   * is, the document on disk still describes this part as open and running. A crash
+   * a minute later would then leave crash recovery unable to tell a camera that
+   * ended when the cable moved from a track that lost its tail to the process death
+   * — and it truncates the recording to the shortest track it cannot explain.
    */
   private async onPartEnded(raw: unknown): Promise<void> {
     const active = this.active;
@@ -927,6 +963,7 @@ export class RecorderSession {
 
     try {
       await this.closeVideoPart(active, state, message);
+      await this.recordPartClose(active, message.track, state.parts.at(-1));
     } catch (error) {
       if (message.track === REFERENCE_TRACK) throw error;
       console.error('[recorder] closing the camera part failed:', error);
@@ -940,6 +977,57 @@ export class RecorderSession {
           `${message.endReason ?? 'unknown'}. The screen and audio are still recording.`,
       );
     }
+    this.publish();
+  }
+
+  /**
+   * Write a part's close into the provisional document, mid-recording.
+   *
+   * Only the facts the writer measured and the reason the part ended — never
+   * `startTimeSec`, which is still a difference between two clocks whose second
+   * half is not known until the capture page stops (see {@link closeVideoPart}).
+   * What this buys is that the document on disk stops describing a finished part as
+   * open: `endedEarly` and `endReason: 'device-lost'` are how crash recovery later
+   * tells a camera that ended on purpose from a track the crash cut short, and they
+   * are facts only the live session has.
+   */
+  private async recordPartClose(
+    active: Active,
+    track: VideoTrackKey,
+    closed: ClosedVideoPart | undefined,
+  ): Promise<void> {
+    if (closed === undefined) return;
+    const provisional = withClosedVideoPart(this.requireProvisional(active), {
+      track,
+      part: closed.part,
+      durationSec: closed.durationSec,
+      frameCount: closed.frameCount,
+      observedFps: closed.observedFps,
+      endedEarly: closed.endedEarly,
+      ...(closed.endReason === undefined ? {} : { endReason: closed.endReason }),
+    });
+    await this.options.store.writeRecordingDoc(active.id, provisional);
+    active.provisional = provisional;
+  }
+
+  /**
+   * The capture page could not capture the camera at all (§7.4).
+   *
+   * The one camera state main cannot derive from its own parts: a `getUserMedia`
+   * that was refused, an encoder the machine does not have, a cable that flapped
+   * past the capture page's part budget. None of them produce a part, so without
+   * this the HUD would sit on `starting` for the rest of the recording and the
+   * banner §7.4 step 3 exists for would never appear.
+   *
+   * The track is *not* marked done here: what a renderer says about a device is
+   * news, not authority, and a part that does turn up afterwards is still footage
+   * the user keeps.
+   */
+  private onCameraUnavailable(reason: string): void {
+    const active = this.active;
+    if (active === null || active.camera === 'off') return;
+    console.error(`[recorder] ${reason}. The screen and audio are still recording.`);
+    active.camera = 'unavailable';
     this.publish();
   }
 
@@ -1018,7 +1106,9 @@ export class RecorderSession {
         firstTimestampUs: state.firstPtsUs,
         lastTimestampUs: state.lastEndUs > 0 ? state.lastEndUs : null,
         endedAtUs: track === REFERENCE_TRACK ? (report?.endedAtUs ?? null) : null,
-        epochOffsetUs: 0,
+        // The offset this track announced itself with, never zero: `firstPtsUs` is
+        // on the track's own epoch, and a camera's is this machine's uptime.
+        epochOffsetUs: state.epochOffsetUs,
         framesEncoded: 0,
         framesDropped: track === REFERENCE_TRACK ? (report?.framesDropped ?? 0) : 0,
         endedEarly: screenEnd !== null,
@@ -1578,6 +1668,7 @@ function videoTrack(active: Active, track: VideoTrackKey): ActiveVideo {
     parts: [],
     opened: new Set(),
     facts: null,
+    epochOffsetUs: 0,
     droppedFrames: 0,
     done: false,
   };

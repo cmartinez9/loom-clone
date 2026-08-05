@@ -378,9 +378,18 @@ export type RecorderPhase = 'idle' | 'starting' | 'recording' | 'finalizing' | '
  * `lost` is the one that earns its keep: *"Camera disconnected — still recording
  * screen and audio."* A recording that quietly loses its camera and says nothing is
  * a recording the user finds out about in the editor, which is too late to redo it.
- * `unavailable` is a camera that was asked for and never opened at all.
+ * `unavailable` is a camera that was asked for and could not be captured — the
+ * capture page says so through {@link CaptureApi.cameraUnavailable}, or main finds
+ * out by failing to open a part for it.
+ *
+ * `starting` is the interval between asking for a camera and its first encoded
+ * frame reaching main: `getUserMedia` plus one frame, which on macOS is several
+ * hundred milliseconds. It is a state of its own because the alternative — opening
+ * every camera recording in `unavailable` — puts a banner about a broken camera on
+ * screen while the camera is opening perfectly well, and a banner that cries wolf
+ * at the start of every recording is a banner nobody reads when it matters.
  */
-export type CameraState = 'off' | 'live' | 'lost' | 'unavailable';
+export type CameraState = 'off' | 'starting' | 'live' | 'lost' | 'unavailable';
 
 export interface RecorderStatus {
   phase: RecorderPhase;
@@ -486,6 +495,18 @@ export interface CaptureApi {
   chunk(message: ChunkMsg): void;
   /** A video part that closed while the recording carried on (§7.4). */
   partEnded(message: PartEndMsg): void;
+  /**
+   * The camera could not be captured, and the recording is carrying on without it.
+   *
+   * The one camera fact main cannot derive from the parts it has opened: a
+   * `getUserMedia` that was refused, a machine with no encoder for the camera, a
+   * cable that has flapped past its part budget. None of them produce a part, so
+   * without this main would have nothing to move {@link CameraState} off `starting`
+   * with and the §7.4 banner would stay hidden for the failure it exists to report.
+   * `live` and `lost` stay derived from the parts, which is what stops a renderer
+   * from claiming a camera is recording when main holds no file for it.
+   */
+  cameraUnavailable(reason: string): void;
   ended(report: CaptureEndReport): void;
   failed(message: string): void;
 }
@@ -568,6 +589,8 @@ export const CHANNEL = {
   captureChunk: 'loom.capture.chunk',
   /** send-only, capture window -> main. A part closed; the recording continues. */
   capturePartEnded: 'loom.capture.partEnded',
+  /** send-only, capture window -> main. No camera; the recording continues. */
+  captureCameraUnavailable: 'loom.capture.cameraUnavailable',
   /** send-only, capture window -> main */
   captureEnded: 'loom.capture.ended',
   /** send-only, capture window -> main */
@@ -594,6 +617,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.captureMeta,
   CHANNEL.captureChunk,
   CHANNEL.capturePartEnded,
+  CHANNEL.captureCameraUnavailable,
   CHANNEL.captureEnded,
   CHANNEL.captureFailed,
 ];

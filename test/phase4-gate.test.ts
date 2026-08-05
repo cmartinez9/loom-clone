@@ -253,6 +253,9 @@ async function loadCapturePage(): Promise<void> {
     partEnded: (message: unknown) => {
       toMain(CHANNEL.capturePartEnded, message);
     },
+    cameraUnavailable: (reason: unknown) => {
+      toMain(CHANNEL.captureCameraUnavailable, reason);
+    },
     ended: (report: unknown) => {
       toMain(CHANNEL.captureEnded, report);
     },

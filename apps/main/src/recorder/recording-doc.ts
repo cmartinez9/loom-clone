@@ -148,6 +148,56 @@ export function withVideoPart(doc: RecordingDoc, input: ProvisionalVideoInput): 
   return { ...doc, tracks: { ...doc.tracks, [input.track]: track } };
 }
 
+export interface ClosedVideoPartInput {
+  track: VideoTrackKey;
+  /** Which part of its track closed — the index in `webcam.000.mp4`. */
+  part: number;
+  durationSec: number;
+  frameCount: number;
+  observedFps: number;
+  endedEarly: boolean;
+  endReason?: PartEndReason;
+}
+
+/**
+ * Record that one part has closed, while the rest of the recording carries on.
+ *
+ * §7.4's unplug closes `webcam.000.mp4` in the middle of a recording. Until that is
+ * written down, `recording.json` still describes the part as open and empty — and a
+ * crash before the next stop leaves recovery with no way to tell a camera that
+ * ended when the cable moved from a track whose tail the crash took, which is the
+ * difference between reporting six seconds recovered and truncating the recording
+ * to two.
+ *
+ * `startTimeSec` is deliberately not touched: it is a difference between two
+ * clocks, and the reference track's half is not known until the capture page stops
+ * (see `session.ts`'s `closeVideoPart`). The provisional value the part was
+ * announced with is still the best answer until then.
+ *
+ * Matched on the part's file, which carries its index — never on position, for the
+ * reason {@link finalizedVideoTrack} gives.
+ */
+export function withClosedVideoPart(doc: RecordingDoc, input: ClosedVideoPartInput): RecordingDoc {
+  const track = doc.tracks[input.track];
+  if (track === undefined) return doc;
+  const file = mediaPartPath(input.track, input.part);
+  let found = false;
+  const parts = track.parts.map((part): VideoPart => {
+    if (part.file !== file) return part;
+    found = true;
+    return {
+      ...part,
+      durationSec: input.durationSec,
+      frameCount: input.frameCount,
+      rate: { ...part.rate, observedFps: input.observedFps },
+      endedEarly: input.endedEarly,
+      ...(input.endReason === undefined ? {} : { endReason: input.endReason }),
+    };
+  });
+  if (!found) return doc;
+  return { ...doc, tracks: { ...doc.tracks, [input.track]: { ...track, parts } } };
+}
+
 export interface ProvisionalAudioInput {
   track: AudioTrackKey;
   /** Bundle-relative path from `ProjectStore.beginAudioPart`. */

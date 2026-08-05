@@ -168,12 +168,17 @@ const webcamSink: WebcamSink = {
   unavailable: (reason) => {
     console.error(`[capture] no webcam track: ${reason}`);
     noteUnavailable(reason);
+    // Told to main as it happens, not only in the end report. A camera that will
+    // not open produces no part, so this is the only thing that can move the HUD
+    // off "the camera is starting" — and §7.4's banner is no use after the stop.
+    window.loom.capture.cameraUnavailable(reason);
   },
   state: () => {
-    // The recorder derives the camera's state from the parts main has actually
-    // opened and closed, so there is nothing to forward from here: a banner driven
-    // from the renderer could claim a camera was live while main held no part for
-    // it. This hook exists so the capture page can log, not decide.
+    // `live` and `lost` are derived by the recorder from the parts main has
+    // actually opened and closed, so there is nothing to forward from here: a
+    // banner driven from the renderer could claim a camera was live while main held
+    // no part for it. This hook exists so the capture page can log, not decide.
+    // The one state main cannot derive travels on `unavailable` above.
   },
 };
 

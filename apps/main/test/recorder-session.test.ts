@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHANNEL, DEFAULT_CAPTURE_OPTIONS } from '@loom/ipc';
+import { CHANNEL, DEFAULT_CAPTURE_OPTIONS, type RecorderStatus } from '@loom/ipc';
 import {
   validateFrameIndexDoc,
   validateRecordingDoc,
@@ -190,6 +190,63 @@ function chunkMessage(frame: FixtureFrame): unknown {
   };
 }
 
+/**
+ * The camera's clock origin, as this project measured it.
+ *
+ * A camera's timestamps are not on the screen's epoch — the machine's uptime is
+ * what Chromium stamps them from — so the announcement carries the offset that
+ * relates the two, and every number below is on the camera's own clock.
+ */
+const WEBCAM_EPOCH_US = 2_678_930_000_000;
+
+function webcamMetaMessage(part: number): unknown {
+  return {
+    track: 'webcam',
+    part,
+    decoderConfig: {
+      codec: 'avc1.64000d',
+      codedWidth: fixture.width,
+      codedHeight: fixture.height,
+      description: fixture.avcC,
+    },
+    video: {
+      deviceId: 'camera-1',
+      deviceName: 'FaceTime HD Camera',
+      firstTimestampUs: WEBCAM_EPOCH_US,
+      epochOffsetUs: -WEBCAM_EPOCH_US,
+    },
+  };
+}
+
+function webcamChunkMessage(part: number, frame: FixtureFrame): unknown {
+  return {
+    track: 'webcam',
+    part,
+    kind: frame.isKey ? 'key' : 'delta',
+    timestampUs: WEBCAM_EPOCH_US + frame.timestampUs,
+    durationUs: null,
+    data: frame.data,
+  };
+}
+
+/** What the capture page sends when the camera is unplugged (§7.4 step 2). */
+function webcamPartEnded(part: number, frames: FixtureFrame[]): unknown {
+  const last = frames[frames.length - 1]!;
+  return {
+    track: 'webcam',
+    part,
+    facts: { deviceId: 'camera-1', deviceName: 'FaceTime HD Camera' },
+    firstTimestampUs: WEBCAM_EPOCH_US + frames[0]!.timestampUs,
+    lastTimestampUs: WEBCAM_EPOCH_US + last.timestampUs,
+    endedAtUs: WEBCAM_EPOCH_US + last.timestampUs + Math.round(1_000_000 / fixture.fps),
+    epochOffsetUs: -WEBCAM_EPOCH_US,
+    framesEncoded: frames.length,
+    framesDropped: 0,
+    endedEarly: true,
+    endReason: 'device-lost',
+  };
+}
+
 /** An AAC-LC 48 kHz stereo AudioSpecificConfig, which is all the writer needs. */
 const AUDIO_ASC = new Uint8Array([0x11, 0x90]);
 const AUDIO_RATE = 48000;
@@ -262,6 +319,42 @@ async function untilAudioPartOpen(id: RecordingId, track: 'mic' | 'system'): Pro
 async function readRecordingDoc(id: RecordingId): Promise<RecordingDoc> {
   const dir = await store.directoryFor(id);
   return JSON.parse(await readFile(join(dir, 'recording.json'), 'utf8')) as RecordingDoc;
+}
+
+/** Wait for a part file to exist — see {@link untilAudioPartOpen} for why. */
+async function untilPartOpen(id: RecordingId, relative: string): Promise<void> {
+  const dir = await store.directoryFor(id);
+  for (let attempt = 0; attempt < 400; attempt++) {
+    try {
+      await stat(join(dir, relative));
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  throw new Error(`timed out waiting for ${relative} to be created`);
+}
+
+/** Poll `recording.json` until it says what the caller is waiting for. */
+async function untilRecordingDoc(
+  id: RecordingId,
+  predicate: (doc: RecordingDoc) => boolean,
+  what: string,
+): Promise<RecordingDoc> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const doc = await readRecordingDoc(id);
+    if (predicate(doc)) return doc;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** The last status main pushed to a window, which is what the HUD renders. */
+function lastStatus(contents: FakeContents): RecorderStatus {
+  const statuses = contents.sent.filter((message) => message.channel === CHANNEL.recorderStatus);
+  const last = statuses[statuses.length - 1]?.payload;
+  if (last === undefined) throw new Error('main never published a status');
+  return last as RecorderStatus;
 }
 
 function startedOptions(contents: FakeContents): Record<string, unknown> {
@@ -406,6 +499,97 @@ describe('the capture page talking to main', () => {
     await untilState(id, 'failed');
     const summary = (await store.list()).find((s) => s.id === id);
     expect(summary?.state).toBe('failed');
+  });
+});
+
+/**
+ * The camera half of the same conversation — §7.4.
+ *
+ * Two things main cannot get from anywhere else. A part that closes *while the
+ * recording carries on* has to reach `recording.json` when it closes, because a
+ * crash after it is what crash recovery has to read; and what the HUD says about
+ * the camera has to distinguish one that is opening from one that is not coming.
+ */
+describe('the camera', () => {
+  it('says a camera that was asked for is starting, and only calls it unavailable when it is', async () => {
+    await recorder.start({ fps: fixture.fps, webcamDeviceId: 'camera-1' });
+    const contents = captureContents();
+
+    // `getUserMedia` plus a frame is several hundred milliseconds on macOS. For
+    // that whole interval the camera is opening, not missing — the §7.4 banner
+    // must not be on screen.
+    expect(lastStatus(contents).camera).toBe('starting');
+
+    emit(CHANNEL.captureCameraUnavailable, contents, 'the camera could not be opened: NotAllowed');
+    expect(lastStatus(contents).camera).toBe('unavailable');
+  });
+
+  it('writes a camera part that closed mid-recording into recording.json', async () => {
+    const id = await recorder.start({ fps: fixture.fps, webcamDeviceId: 'camera-1' });
+    const contents = captureContents();
+
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of fixture.frames.slice(0, 8)) {
+      emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    }
+    emit(CHANNEL.captureMeta, contents, webcamMetaMessage(0));
+    await untilPartOpen(id, 'media/webcam.000.mp4');
+    const webcamFrames = fixture.frames.slice(0, 8);
+    for (const frame of webcamFrames) {
+      emit(CHANNEL.captureChunk, contents, webcamChunkMessage(0, frame));
+    }
+    await until(() => store.mediaFrameCount(id, 'webcam') > 0, 'the camera frames');
+
+    // The cable moves. The screen and the microphone do not notice, and the part
+    // is finalized on the spot.
+    emit(CHANNEL.capturePartEnded, contents, webcamPartEnded(0, webcamFrames));
+
+    const doc = await untilRecordingDoc(
+      id,
+      (recording) => recording.tracks.webcam?.parts[0]?.endedEarly === true,
+      "recording.json to record the camera part's close",
+    );
+    const part = doc.tracks.webcam?.parts[0];
+    expect(part?.endReason).toBe('device-lost');
+    expect(part?.frameCount).toBeGreaterThan(0);
+    expect(part?.durationSec).toBeGreaterThan(0);
+    // Still recording, and the screen track untouched by any of it.
+    expect(doc.tracks.screen?.parts).toHaveLength(1);
+    // And the HUD is told, which is the whole of §7.4 step 3.
+    await until(() => lastStatus(contents).camera === 'lost', 'the camera banner');
+  });
+
+  it('places a camera part on the recording clock even when the capture page dies first', async () => {
+    const id = await recorder.start({ fps: fixture.fps, webcamDeviceId: 'camera-1' });
+    const contents = captureContents();
+
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of fixture.frames.slice(0, 8)) {
+      emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    }
+    emit(CHANNEL.captureMeta, contents, webcamMetaMessage(0));
+    await untilPartOpen(id, 'media/webcam.000.mp4');
+    for (const frame of fixture.frames.slice(0, 8)) {
+      emit(CHANNEL.captureChunk, contents, webcamChunkMessage(0, frame));
+    }
+    await until(() => store.mediaFrameCount(id, 'webcam') > 0, 'the camera frames');
+
+    // The capture page throws instead of stopping, so there is no end report to
+    // close the camera's part with — main has to close it from what it saw. What it
+    // saw are timestamps on the camera's own epoch, and subtracting the screen's
+    // origin from those without the offset that relates them writes a camera that
+    // starts a month into a six second recording.
+    emit(CHANNEL.captureFailed, contents, 'the capture page fell over');
+
+    await untilState(id, 'editable');
+    const doc = await readRecordingDoc(id);
+    expect(validateRecordingDoc(doc).ok).toBe(true);
+    const part = doc.tracks.webcam?.parts[0];
+    expect(part?.frameCount).toBeGreaterThan(0);
+    expect(
+      part?.startTimeSec,
+      'the camera opened with the screen; its part starts with the recording',
+    ).toBeCloseTo(0, 3);
   });
 });
 

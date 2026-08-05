@@ -114,10 +114,19 @@ function render(status: RecorderStatus): void {
  *
  * It is a notice, not an error — the recording is fine — so it does not touch the
  * error line, which is where a recording that actually failed says so.
+ *
+ * `starting` shows nothing. A camera takes `getUserMedia` plus a frame to produce
+ * anything, and announcing that as a camera problem for the first second of every
+ * recording is how a user learns to ignore this line.
  */
 function renderCamera(status: RecorderStatus): void {
   const recording = status.phase === 'recording' || status.phase === 'finalizing';
-  if (!recording || status.camera === 'off' || status.camera === 'live') {
+  if (
+    !recording ||
+    status.camera === 'off' ||
+    status.camera === 'starting' ||
+    status.camera === 'live'
+  ) {
     cameraLine.hidden = true;
     return;
   }

@@ -128,6 +128,9 @@ const api: LoomApi = {
     partEnded: (message: PartEndMsg): void => {
       ipcRenderer.send(CHANNEL.capturePartEnded, message);
     },
+    cameraUnavailable: (reason: string): void => {
+      ipcRenderer.send(CHANNEL.captureCameraUnavailable, reason);
+    },
     ended: (report: CaptureEndReport): void => {
       ipcRenderer.send(CHANNEL.captureEnded, report);
     },
