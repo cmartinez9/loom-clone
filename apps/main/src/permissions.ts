@@ -1,11 +1,19 @@
 /**
  * The macOS permission prober and request driver. Phase 2.
  *
- * **This is the only file in the repo that calls `systemPreferences`.** Everything
- * that is *policy* about the four grants — what each is for, what breaks without it,
- * which System Settings pane turns it on — lives in `@loom/permissions`, which is
- * pure and unit-testable. What lives here is the part that needs a running Electron:
- * asking macOS, asking the user, opening a pane, and coming back.
+ * **This is the only file under `apps/main/src` that calls `systemPreferences`, and
+ * this docblock is where that boundary is stated.** `eslint.config.mjs` enforces it by
+ * restricting the import across `apps/main/src/**`; anything else in main takes its
+ * answer from `readMediaStatus`/`readAxTrusted` here, or from a `PermissionReport`.
+ * There is one caller outside that scope and it is deliberate:
+ * `apps/main/test/helpers/smoke-capture-main.ts`, phase 1's smoke harness, reads the
+ * screen grant for its preflight. It is a test helper, not shipped code, and the lint
+ * rule does not cover it. Do not restate the boundary elsewhere — cite this header.
+ *
+ * Everything that is *policy* about the four grants — what each is for, what breaks
+ * without it, which System Settings pane turns it on — lives in `@loom/permissions`,
+ * which is pure and unit-testable. What lives here is the part that needs a running
+ * Electron: asking macOS, asking the user, opening a pane, and coming back.
  *
  * Authority: the captain's decision in
  * `data/loom-scope/decision-accessibility-clicks.md` (ask up front, all four, explain

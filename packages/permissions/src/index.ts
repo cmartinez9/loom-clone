@@ -11,10 +11,10 @@
  * concluded from a given set of answers.
  *
  * The Electron calls that produce those answers live in
- * `apps/main/src/permissions.ts`. The split is the same one `@loom/format` makes
- * between the format and the filesystem, and it buys the same thing: the policy is
- * unit-testable without launching an app, and there is exactly one file in the repo
- * that talks to `systemPreferences`.
+ * `apps/main/src/permissions.ts`, whose header states the boundary that keeps them
+ * there. The split is the same one `@loom/format` makes between the format and the
+ * filesystem, and it buys the same thing: the policy is unit-testable without
+ * launching an app.
  *
  * **The one rule this package exists to enforce:** a `granted` from macOS is only
  * meaningful if macOS was talking about *us*. See {@link isTrustworthy} and the

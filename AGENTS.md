@@ -61,8 +61,9 @@ packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3
                    §1.4 requires a shared contract and this is it.
 packages/permissions/  the four macOS grants: what each is for, what breaks without it,
                    which System Settings pane turns it on, and whether an answer can be
-                   believed at all. PURE. `apps/main/src/permissions.ts` is the only
-                   file in the repo that calls `systemPreferences`.
+                   believed at all. PURE. The probes are in
+                   `apps/main/src/permissions.ts`, whose header states which files may
+                   call `systemPreferences` and what enforces it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
 packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
@@ -492,12 +493,13 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward to phase 2: three closed, four still open
+## Carried forward to phase 2: three closed, four still open, one phase 2 added
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
 bundle; four are not, and **phase 2's harness does not cover them** — it has no audio
-and no camera checks at all, so nothing here has looked at them.
+and no camera checks at all, so nothing here has looked at them. Phase 2 then left one
+of its own, recorded below as item 8.
 
 **Closed** (see the gate status below for the figures):
 
@@ -542,13 +544,27 @@ grant, rather than failing three layers down in `desktopCapturer` with "Failed t
 sources". Run it after any change to capture: it is the only thing that watches the
 two clocks, and it is what caught both of phase 3's real bugs.
 
+**And one phase 2 opened and did not close:**
+
+8. **A revoked Microphone is recorded as a lost device.** §7.3 asks for the mic case —
+   _"Microphone revoked → keep recording screen and system audio. Mark the mic part
+   `endedEarly`"_ — and the part is marked, but with the wrong reason. The TCC re-check
+   that tells `permission-revoked` apart from `device-lost` is applied to the **screen**
+   track only (`endReasonFor` in `apps/main/src/recorder/session.ts`); an audio track
+   that ends on its own still carries the capture page's `device-lost`, which `reportOf`
+   in `apps/renderer/src/capture/audio.ts` states at the field. Closing it is a
+   `readMediaStatus('microphone')` read on the same path in main, not a design question
+   — the renderer cannot do it, because reading TCC is main's alone (see
+   `apps/main/src/permissions.ts`'s header).
+
 ## Permissions and first run, in one paragraph
 
 The four grants the app asks for — Screen Recording, Camera, Microphone,
 Accessibility — are modelled in `packages/permissions` (pure: what each is for, what
 breaks without it, which System Settings pane turns it on) and probed in
-`apps/main/src/permissions.ts`, **the only file in the repo that calls
-`systemPreferences`**. The captain settled the flow
+`apps/main/src/permissions.ts`, **which owns the `systemPreferences` boundary** — its
+header states the scope exactly, and `eslint.config.mjs` enforces it. The captain
+settled the flow
 (`data/loom-scope/decision-accessibility-clicks.md`): ask up front, all four together,
 explain each, and a user who declines the three optional ones still gets a working
 recorder. Accessibility is read from `AXIsProcessTrusted()`

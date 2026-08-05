@@ -65,7 +65,9 @@ const MAIN_DISK_IMPORTS = [
 ];
 
 /**
- * `apps/main/src/permissions.ts` is the only file that may ask macOS about a grant.
+ * Within `apps/main/src`, only `permissions.ts` may ask macOS about a grant. That
+ * file's header states the boundary and its one deliberate exception; this is the
+ * half that enforces it.
  *
  * Not style: a second caller reads TCC without the trust rule `isTrustworthy()`
  * states, and the failure is silent — a raw `getMediaAccessStatus` cast is what wrote
@@ -76,8 +78,8 @@ const SYSTEM_PREFERENCES_IMPORT = {
   name: 'electron',
   importNames: ['systemPreferences'],
   message:
-    'apps/main/src/permissions.ts is the only file that calls systemPreferences. ' +
-    'Use readMediaStatus/readAxTrusted from it, or a PermissionReport.',
+    'apps/main/src/permissions.ts is the only file under apps/main/src that calls ' +
+    'systemPreferences. Use readMediaStatus/readAxTrusted from it, or a PermissionReport.',
 };
 
 export default tseslint.config(
@@ -244,9 +246,10 @@ export default tseslint.config(
   // ---- the permission model is policy, not a probe ---------------------------
   // `packages/permissions/src/index.ts`: *"This entry point is **pure**: no
   // `electron`, no `node:`, no DOM."* The split is what keeps the trust rule
-  // (`isTrustworthy`) unit-testable without launching an app, and what leaves exactly
-  // one file in the repo talking to `systemPreferences`. An `electron` import here
-  // would move a probe into the policy and take both of those with it.
+  // (`isTrustworthy`) unit-testable without launching an app, and what keeps the
+  // probes on the far side of the boundary `apps/main/src/permissions.ts`'s header
+  // states. An `electron` import here would move a probe into the policy and take
+  // both of those with it.
   {
     files: ['packages/permissions/src/**/*.ts'],
     rules: {
@@ -258,7 +261,7 @@ export default tseslint.config(
               group: ['node:*', 'electron', '@loom/format/fs', '@loom/mux/fs', '@loom/ipc'],
               message:
                 '@loom/permissions is pure: no electron, no node, no DOM. Asking macOS ' +
-                'belongs in apps/main/src/permissions.ts, which is the only file that does.',
+                'belongs in apps/main/src/permissions.ts.',
             },
           ],
         },

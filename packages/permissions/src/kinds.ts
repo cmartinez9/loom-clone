@@ -27,8 +27,7 @@
  *
  * This entry point is **pure**: no `electron`, no `node:`, no DOM. The Electron
  * calls that produce a {@link PermissionStatus} live in
- * `apps/main/src/permissions.ts`, which is the only file in the repo allowed to make
- * them.
+ * `apps/main/src/permissions.ts`; its header states which files may make them.
  */
 
 /**
