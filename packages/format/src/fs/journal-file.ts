@@ -138,7 +138,7 @@ export async function readJournal(
     text = await readFile(path, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { header: null, entries: [], torn: false, problems: [] };
+      return { header: null, entries: [], torn: false, problems: [], headerRejected: false };
     }
     throw error;
   }

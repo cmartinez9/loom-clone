@@ -135,7 +135,13 @@ describe('journal file', () => {
   it('treats a missing journal as an empty one', async () => {
     await withTempDir(async (dir) => {
       const parsed = await readJournal(join(dir, 'nothing.ndjson'));
-      expect(parsed).toEqual({ header: null, entries: [], torn: false, problems: [] });
+      expect(parsed).toEqual({
+        header: null,
+        entries: [],
+        torn: false,
+        problems: [],
+        headerRejected: false,
+      });
     });
   });
 });
@@ -226,6 +232,39 @@ describe('a journal torn by a crash', () => {
       const parsed = await readJournal(path);
       expect(parsed.header).toBeNull();
       expect(parsed.problems[0]?.reason).toContain('refusing to open');
+      expect(parsed.headerRejected).toBe(true);
+    });
+  });
+
+  it('does not replay entries under a header schema it does not understand', () => {
+    // A journal written by a newer build. Its entries may mean anything; reading
+    // them as v1 ops is exactly the guessing §2.7 forbids.
+    const text =
+      '{"schema":"loom.journal/99"}\n' +
+      '{"revision":48,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+    const parsed = parseJournal(text);
+    expect(parsed.headerRejected).toBe(true);
+    expect(parsed.entries).toEqual([]);
+  });
+
+  it('refuses when the header line itself is not JSON', () => {
+    const text =
+      'not json at all\n' +
+      '{"revision":48,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+    const parsed = parseJournal(text);
+    expect(parsed.headerRejected).toBe(true);
+    expect(parsed.entries).toEqual([]);
+  });
+
+  it('does not call a journal torn mid-header a rejected one', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      // A crash while writing the very first line: no complete header, and no
+      // entries to lose either.
+      await writeFile(path, '{"schema":"loom.jour');
+      const parsed = await readJournal(path);
+      expect(parsed.torn).toBe(true);
+      expect(parsed.headerRejected).toBe(false);
     });
   });
 });

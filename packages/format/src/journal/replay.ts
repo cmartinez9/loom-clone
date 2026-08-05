@@ -11,6 +11,12 @@
  * 2. *Replay stops at the first gap or bad line and keeps everything before it.*
  *    A journal is a write-ahead log; a hole in it means the tail is not trustworthy,
  *    and applying past a hole would silently reorder a user's edits.
+ *
+ * The schema rule of §2.7 holds here as it does for every other file in a bundle:
+ * *"**Never** silently accept an unknown schema — refuse to open and say so."* A
+ * journal whose header names a version this build does not understand yields no
+ * entries at all, because replaying its lines under v1 assumptions is exactly the
+ * guessing the rule forbids.
  */
 
 import { migrateDocument, type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
@@ -34,6 +40,15 @@ export interface JournalParseResult {
   torn: boolean;
   /** Lines that were complete but unparseable. Real corruption, not a crash. */
   problems: JournalLineProblem[];
+  /**
+   * True when a complete first line was present but is not a header this build
+   * understands — an unknown family, or a version from the future.
+   *
+   * `entries` is then empty by construction: the reason for the refusal is that we
+   * do not know what the following lines mean. A journal torn mid-header does *not*
+   * set this; it has no complete first line and therefore no entries either.
+   */
+  headerRejected: boolean;
 }
 
 /**
@@ -46,7 +61,13 @@ export function parseJournal(
   text: string,
   registry: MigrationRegistry = defaultRegistry(),
 ): JournalParseResult {
-  const result: JournalParseResult = { header: null, entries: [], torn: false, problems: [] };
+  const result: JournalParseResult = {
+    header: null,
+    entries: [],
+    torn: false,
+    problems: [],
+    headerRejected: false,
+  };
   if (text.length === 0) return result;
 
   const chunks = text.split('\n');
@@ -55,17 +76,23 @@ export function parseJournal(
   const trailing = chunks.pop() ?? '';
   if (trailing.length > 0) result.torn = true;
 
-  chunks.forEach((raw, i) => {
+  for (const [i, raw] of chunks.entries()) {
     const lineNo = i + 1;
     const line = raw.trim();
-    if (line.length === 0) return;
+    if (line.length === 0) continue;
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
       result.problems.push({ line: lineNo, reason: 'not valid JSON' });
-      return;
+      if (i === 0) {
+        // Without a readable header there is no schema, and no schema means no
+        // basis for reading anything after it.
+        result.headerRejected = true;
+        return result;
+      }
+      continue;
     }
 
     if (i === 0) {
@@ -77,14 +104,18 @@ export function parseJournal(
           line: lineNo,
           reason: error instanceof Error ? error.message : String(error),
         });
+        // Stop here rather than replaying a newer build's entries under this
+        // build's assumptions — §2.7's "refuse to open and say so".
+        result.headerRejected = true;
+        return result;
       }
-      return;
+      continue;
     }
 
     const problem = readEntry(parsed);
     if (typeof problem === 'string') result.problems.push({ line: lineNo, reason: problem });
     else result.entries.push(problem);
-  });
+  }
 
   return result;
 }

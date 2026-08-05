@@ -14,14 +14,17 @@
  * every time — for both modes. That is what makes `naive` a real control rather
  * than a hopeful one.
  *
- * `atomic` writes those chunks into a temp file and renames; `naive` writes them
- * straight into the target, which is exactly the bug this whole design exists to
- * prevent.
+ * `atomic` calls the **real** `writeAtomic` from `src/fs/write-atomic.ts`, pacing
+ * it through its `WriteAtomicPacing` hook. That is the point: a harness that
+ * re-implemented open-temp/write/fsync/rename/dir-fsync here would keep passing
+ * after a regression in the writer the app actually uses. `naive` writes the same
+ * chunks straight into the target, which is the bug this whole design exists to
+ * prevent, and is the control that proves the kill really lands mid-write.
  */
 
-import { open, rename, writeFile } from 'node:fs/promises';
+import { open, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname } from 'node:path';
+import { writeAtomic } from '../../src/fs/write-atomic.ts';
 
 function arg(name, fallback) {
   const at = process.argv.indexOf(`--${name}`);
@@ -49,38 +52,27 @@ function payload(generation) {
   return Buffer.from(`${JSON.stringify(body)}\n`, 'utf8');
 }
 
-/** Write `bytes` to an open handle in pieces, pausing between them. */
-async function writeInChunks(handle, bytes) {
-  const size = Math.ceil(bytes.byteLength / chunks);
-  for (let offset = 0; offset < bytes.byteLength; offset += size) {
-    await handle.write(bytes.subarray(offset, Math.min(offset + size, bytes.byteLength)));
-    await sleep(chunkDelayMs);
-  }
+function chunkBytes(bytes) {
+  return Math.ceil(bytes.byteLength / chunks);
 }
 
+/** The production writer, paced so the kill lands inside its write window. */
 async function writeAtomicChunked(bytes) {
-  const tmp = `${target}.tmp-${process.pid}-0`;
-  const handle = await open(tmp, 'w', 0o644);
-  try {
-    await writeInChunks(handle, bytes);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await rename(tmp, target);
-  const dir = await open(dirname(target), 'r');
-  try {
-    await dir.sync();
-  } finally {
-    await dir.close();
-  }
+  await writeAtomic(target, bytes, {
+    chunkBytes: chunkBytes(bytes),
+    betweenChunks: () => sleep(chunkDelayMs),
+  });
 }
 
 async function writeNaiveChunked(bytes) {
   // Truncate-then-write, the obvious implementation and the one that loses data.
+  const size = chunkBytes(bytes);
   const handle = await open(target, 'w', 0o644);
   try {
-    await writeInChunks(handle, bytes);
+    for (let offset = 0; offset < bytes.byteLength; offset += size) {
+      await handle.write(bytes.subarray(offset, Math.min(offset + size, bytes.byteLength)));
+      await sleep(chunkDelayMs);
+    }
     await handle.sync();
   } finally {
     await handle.close();

@@ -45,7 +45,7 @@
  * Report §1.4 again: `VideoFrame`, `AudioData`, `ImageBitmap`, raw pixel buffers,
  * the cursor log as one blob, the compositor's framebuffer. A single 3456×2234 NV12
  * frame is 11.6 MB; at 30 fps that is 347 MB/s of structured-clone traffic to
- * accomplish nothing. `packages/ipc/test/no-frames-cross-ipc.test.ts` fails the
+ * accomplish nothing. `packages/ipc/test/ipc-boundary.test.ts` fails the
  * build if any of those type names appears in this contract or in the preload.
  */
 

@@ -20,7 +20,7 @@ import {
   validateProjectDoc,
   validateRecordingDoc,
 } from '../validate/documents.ts';
-import { type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
+import { MigrationError, type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
 import { replayJournal, type ReplayResult } from '../journal/replay.ts';
 import { loadAndUpgradeDocument, loadDocument } from './documents.ts';
 import { readJournal } from './journal-file.ts';
@@ -150,6 +150,18 @@ export async function readBundle(
 
   const snapshot = (await load(paths.edit, 'loom.edit', validateEditDocument, registry)).doc;
   const journal = await readJournal(paths.journal, registry);
+  // The journal is the one file whose schema check used to be advisory: its header
+  // problem was recorded and its entries replayed anyway. It refuses like every
+  // other document now — opening the bundle and *silently* dropping the tail of the
+  // user's edits would be the worse of the two failures.
+  if (journal.headerRejected) {
+    throw new MigrationError(
+      'unknown-schema',
+      `refusing to open: ${BUNDLE.journal} could not be read — ` +
+        (journal.problems[0]?.reason ?? 'its schema header is unreadable'),
+      paths.journal,
+    );
+  }
   const replay = replayJournal(snapshot, journal.entries);
 
   return {

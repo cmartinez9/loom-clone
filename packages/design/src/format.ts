@@ -40,7 +40,7 @@ export function formatBytes(bytes: number): string {
     value /= 1000;
     unit += 1;
   }
-  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 1;
+  const digits = value >= 100 ? 0 : 1;
   return `${value.toFixed(digits)} ${UNITS[unit] as string}`;
 }
 

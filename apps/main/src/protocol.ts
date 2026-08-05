@@ -86,7 +86,9 @@ export function installLoomProtocol(options: ProtocolOptions): void {
  * whatever ends up in a renderer.
  */
 async function serveApp(root: string, url: URL, rangeHeader: string | null): Promise<Response> {
-  const requested = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+  const decoded = decodePath(url.pathname);
+  if (decoded === null) return new Response('bad url', { status: 400 });
+  const requested = decoded.replace(/^\/+/, '');
   const relative = requested === '' ? 'library.html' : requested;
   const normalized = normalize(relative);
   if (normalized.startsWith('..') || normalized.startsWith(sep) || normalized.includes('\0')) {
@@ -102,6 +104,21 @@ async function serveApp(root: string, url: URL, rangeHeader: string | null): Pro
   }
 }
 
+/**
+ * `decodeURIComponent`, or `null` for a malformed escape.
+ *
+ * `new URL('loom://app/%')` parses, so a stray `%` reaches the handler and the bare
+ * `decodeURIComponent` throws `URIError` out of it — an opaque request failure and
+ * a main-process error instead of the 400 every other bad input here gets.
+ */
+function decodePath(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 /** Serve one file from inside one bundle, read-only. */
 async function serveRecording(
   store: ProjectStore,
@@ -109,10 +126,13 @@ async function serveRecording(
   rangeHeader: string | null,
 ): Promise<Response> {
   // `loom://recording/<id>/<rest…>`
-  const segments = url.pathname
-    .split('/')
-    .filter((s) => s.length > 0)
-    .map(decodeURIComponent);
+  const raw = url.pathname.split('/').filter((s) => s.length > 0);
+  const segments: string[] = [];
+  for (const segment of raw) {
+    const decoded = decodePath(segment);
+    if (decoded === null) return new Response('bad url', { status: 400 });
+    segments.push(decoded);
+  }
   const [id, ...rest] = segments;
   if (id === undefined || rest.length === 0) return new Response('not found', { status: 404 });
 

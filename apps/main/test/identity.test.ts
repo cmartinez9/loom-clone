@@ -93,6 +93,24 @@ describe('macOS floor', () => {
     expect(extendInfo['NSMicrophoneUsageDescription']).toBeTypeOf('string');
   });
 
+  it('ships the entitlements it says it signs against', async () => {
+    // `hardenedRuntime: true` plus a named entitlements file that is not in the
+    // repo is not a warning — `electron-builder` cannot sign, so `npm run package`
+    // fails. And a hardened build that signs without the two device entitlements
+    // is *denied* camera and microphone at runtime with no prompt to accept.
+    const mac = (await builderConfig())['mac'] as Record<string, unknown>;
+    expect(mac['hardenedRuntime']).toBe(true);
+    const declared = mac['entitlements'];
+    expect(declared).toBe(mac['entitlementsInherit']);
+    expect(declared).toBeTypeOf('string');
+
+    const plist = await readFile(resolve(repoRoot, declared as string), 'utf8');
+    expect(plist).toContain('<key>com.apple.security.device.camera</key>');
+    expect(plist).toContain('<key>com.apple.security.device.audio-input</key>');
+    // V8 cannot run under a hardened runtime without this one.
+    expect(plist).toContain('<key>com.apple.security.cs.allow-jit</key>');
+  });
+
   it('packages only the bundled dist, with no runtime node_modules', async () => {
     const config = await builderConfig();
     expect(config['files']).toEqual(['dist/**/*', 'package.json']);

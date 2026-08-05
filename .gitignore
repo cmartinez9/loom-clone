@@ -17,6 +17,12 @@ out/
 build/
 dist/
 
+# ...except electron-builder's buildResources directory, which holds exactly one
+# tracked file: the entitlements the hardened-runtime app is signed against.
+!/build/
+/build/*
+!/build/entitlements.mac.plist
+
 # Production
 *.tsbuildinfo
 next-env.d.ts

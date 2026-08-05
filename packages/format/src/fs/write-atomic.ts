@@ -31,8 +31,9 @@
  * architecture relies on: a *process* that dies at any instant — `SIGKILL`
  * included — leaves the destination file either untouched or completely replaced,
  * because it is only ever replaced by `rename(2)`, which is atomic within a
- * filesystem. `packages/format/test/kill-mid-write.test.ts` proves exactly that,
- * against a naive writer as a control.
+ * filesystem. `packages/format/test/kill-mid-write.test.ts` proves exactly that, by
+ * `SIGKILL`ing a child that calls *this* function — see {@link WriteAtomicPacing} —
+ * against a naive truncate-then-write as a control.
  */
 
 import { open, rename, unlink } from 'node:fs/promises';
@@ -49,13 +50,34 @@ function tempPathFor(path: string): string {
 }
 
 /**
+ * Widens the write window so a `SIGKILL` can be aimed inside it.
+ *
+ * Set only by `packages/format/test/kill-mid-write.test.ts`, and it exists so that
+ * test can kill *this* function rather than a copy of it — a re-implementation in
+ * the test harness would keep passing after a regression here, which is the one
+ * thing the phase 0 gate must not do. Production callers pass nothing and the loop
+ * behaves exactly as it did.
+ */
+export interface WriteAtomicPacing {
+  /** Largest number of bytes handed to a single `write(2)`. */
+  chunkBytes?: number;
+  /** Awaited after each `write(2)` returns. */
+  betweenChunks?: () => Promise<void>;
+}
+
+/**
  * Replace `path` with `bytes`, atomically.
  *
  * The destination is never opened for writing. It is created by `rename(2)` from a
  * fully written, fsync'd temp file in the same directory, so a reader at any
  * moment sees either the previous contents or the new ones, never a mixture.
  */
-export async function writeAtomic(path: string, bytes: Uint8Array): Promise<void> {
+export async function writeAtomic(
+  path: string,
+  bytes: Uint8Array,
+  pacing: WriteAtomicPacing = {},
+): Promise<void> {
+  const chunkBytes = pacing.chunkBytes ?? Number.POSITIVE_INFINITY;
   const tmp = tempPathFor(path);
   let renamed = false;
   try {
@@ -63,9 +85,11 @@ export async function writeAtomic(path: string, bytes: Uint8Array): Promise<void
     try {
       let offset = 0;
       while (offset < bytes.byteLength) {
-        const { bytesWritten } = await fd.write(bytes, offset, bytes.byteLength - offset);
+        const remaining = bytes.byteLength - offset;
+        const { bytesWritten } = await fd.write(bytes, offset, Math.min(chunkBytes, remaining));
         if (bytesWritten <= 0) throw new Error(`write to ${tmp} made no progress`);
         offset += bytesWritten;
+        if (pacing.betweenChunks !== undefined) await pacing.betweenChunks();
       }
       await fd.sync();
     } finally {

@@ -115,6 +115,22 @@ const ROLES: Record<WindowRole, RoleSpec> = {
   },
 };
 
+/**
+ * Schemes `shell.openExternal` may be handed. Anything else is dropped.
+ *
+ * Widening this list is a decision, not a convenience: every entry is a way for a
+ * renderer to make the OS launch something outside the sandbox.
+ */
+const OPENABLE_SCHEMES: ReadonlySet<string> = new Set(['https:', 'http:']);
+
+function isBrowserUrl(url: string): boolean {
+  try {
+    return OPENABLE_SCHEMES.has(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
+
 export interface RegistryOptions {
   preloadPath: string;
 }
@@ -174,8 +190,13 @@ export class WindowRegistry {
 
     // Nothing in this app navigates. A window that can be navigated is a window
     // that can be pointed at someone else's page while holding our preload.
+    //
+    // The URL comes from a renderer, so it is untrusted, and `shell.openExternal`
+    // hands whatever it is given to the OS handler for that scheme — `file:`,
+    // `smb:` and every third-party scheme registered on the machine included.
+    // Only a browser link is ever a legitimate thing for a window here to ask for.
     window.webContents.setWindowOpenHandler(({ url }) => {
-      void shell.openExternal(url);
+      if (isBrowserUrl(url)) void shell.openExternal(url);
       return { action: 'deny' };
     });
     window.webContents.on('will-navigate', (event) => {

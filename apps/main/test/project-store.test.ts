@@ -60,6 +60,8 @@ const ADD_TRACK: EditOp = {
   },
 };
 
+const PATCH_TRACK: EditOp = { op: 'track.patch', trackId: 't1', patch: { enabled: false } };
+
 describe('settings', () => {
   it('creates settings.json on first run', async () => {
     await withStore(async ({ store, root }) => {
@@ -222,11 +224,12 @@ describe('applying ops', () => {
       const { id, paths } = await store.create('Guarded');
       await store.openProject(id);
       const before = await readFile(paths.edit, 'utf8');
+      const journalBefore = await readFile(paths.journal, 'utf8');
 
       // A track whose channel mixes spring and curve easings is a validation error
       // (§3.4). It must not reach disk, because the next launch would refuse to
       // open a file this build wrote.
-      await store.applyOps(
+      const rejected = store.applyOps(
         id,
         [
           {
@@ -256,8 +259,52 @@ describe('applying ops', () => {
         0,
       );
 
-      await expect(store.close(id)).rejects.toThrow(/refusing to write an invalid edit\.json/);
-      expect(await readFile(paths.edit, 'utf8')).toBe(before);
+      // The batch is rejected to its caller, on the queue, before anything is
+      // written. Deferring it to the snapshot timer would leave nobody to reject
+      // to: `edit.json` would stay frozen at this revision and the journal would
+      // grow forever, replaying into the same failure on every launch.
+      await expect(rejected).rejects.toThrow(/the resulting edit\.json would be invalid/);
+      expect(await readFile(paths.journal, 'utf8')).toBe(journalBefore);
+
+      // And the store is still usable: the rejected batch did not half-apply, so
+      // the next valid one lands on the same base revision.
+      await expect(store.applyOps(id, [ADD_TRACK], 0)).resolves.toEqual({ revision: 1 });
+      await store.close(id);
+
+      const edit = JSON.parse(await readFile(paths.edit, 'utf8')) as {
+        revision: number;
+        tracks: { id: string }[];
+      };
+      expect(edit.revision).toBe(1);
+      expect(edit.tracks.map((t) => t.id)).toEqual(['t1']);
+      expect(before).toContain('"revision": 0');
+    });
+  });
+
+  it('opens once when two callers race a project that is not open yet', async () => {
+    await withStore(async ({ store }) => {
+      const { id } = await store.create('Raced');
+      // The bundle lock is between *processes*. Two un-awaited `invoke`s from a
+      // renderer must not make this process fail against its own pid.
+      const [a, b] = await Promise.all([store.openProject(id), store.openProject(id)]);
+      expect(a.paths.dir).toBe(b.paths.dir);
+
+      const applied = await Promise.all([
+        store.applyOps(id, [ADD_TRACK], 0),
+        store.applyOps(id, [PATCH_TRACK], 1),
+      ]);
+      expect(applied).toEqual([{ revision: 1 }, { revision: 2 }]);
+    });
+  });
+
+  it('opens once when applyOps itself is what opens the project', async () => {
+    await withStore(async ({ store }) => {
+      const { id } = await store.create('RacedByApplyOps');
+      const applied = await Promise.all([
+        store.applyOps(id, [ADD_TRACK], 0),
+        store.applyOps(id, [PATCH_TRACK], 1),
+      ]);
+      expect(applied).toEqual([{ revision: 1 }, { revision: 2 }]);
     });
   });
 });

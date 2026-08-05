@@ -45,6 +45,7 @@ import {
   type RecordingSummary,
   type SettingsDoc,
   type TrackKey,
+  type ValidationIssue,
 } from '@loom/format';
 import {
   BundleLock,
@@ -111,11 +112,40 @@ export class PathEscapeError extends Error {
   }
 }
 
+/**
+ * A batch was rejected because the document it produces is not a valid
+ * `EditDocument`.
+ *
+ * `isEditOp` is structural by design, so a shape-valid op can still compose an
+ * invalid document. Catching that here — before the journal, with a caller to
+ * return it to — is what stops it becoming a snapshot that throws forever from a
+ * background timer with nobody listening.
+ */
+export class InvalidEditError extends Error {
+  constructor(id: RecordingId, issues: readonly ValidationIssue[]) {
+    super(
+      `refusing to apply ops to ${id}: the resulting edit.json would be invalid: ` +
+        issues.map((i) => `${i.path}: ${i.message}`).join('; '),
+    );
+    this.name = 'InvalidEditError';
+  }
+}
+
 export class ProjectStore {
   private readonly options: Required<ProjectStoreOptions>;
   /** `id -> absolute bundle directory`, refreshed by every scan. */
   private readonly directoryById = new Map<RecordingId, string>();
   private readonly open = new Map<RecordingId, OpenProject>();
+  /**
+   * Opens that have started but not finished, so concurrent openers share one.
+   *
+   * Without it, two calls for a project that is not open yet both reach
+   * `BundleLock.acquire` and the loser fails against *our own* pid — the bundle
+   * lock is between processes, and this is one process. Both `project:open` and
+   * `project:applyOps` are `invoke` handlers a renderer can call twice without
+   * awaiting, so this window is reachable from outside main.
+   */
+  private readonly opening = new Map<RecordingId, Promise<OpenedBundle>>();
   private settings: SettingsDoc | null = null;
 
   constructor(options: ProjectStoreOptions) {
@@ -244,6 +274,18 @@ export class ProjectStore {
       };
     }
 
+    const inFlight = this.opening.get(id);
+    if (inFlight !== undefined) return inFlight;
+
+    const attempt = this.acquireAndRead(id).finally(() => {
+      this.opening.delete(id);
+    });
+    this.opening.set(id, attempt);
+    return attempt;
+  }
+
+  /** The body of {@link openProject}, run at most once per project at a time. */
+  private async acquireAndRead(id: RecordingId): Promise<OpenedBundle> {
     const dir = await this.directoryFor(id);
     const lock = await BundleLock.acquire(dir);
     try {
@@ -266,6 +308,7 @@ export class ProjectStore {
         snapshotTimer: null,
         chain: Promise.resolve(),
       });
+      reportJournalRecovery(id, opened);
       if (opened.replay.applied > 0) this.scheduleSnapshot(id);
       return opened;
     } catch (error) {
@@ -325,6 +368,15 @@ export class ProjectStore {
       // land, so a rejected batch never half-applies and never reaches the
       // journal.
       const next = applyOpsToDocument(open.edit, ops);
+
+      // And the *document* is validated here, not at snapshot time. `isEditOp` is
+      // structural, so ops that pass it can still compose an invalid document; if
+      // that only surfaced in `writeSnapshot` it would surface on a background
+      // timer, with no caller to reject, and `edit.json` would stay frozen while
+      // the journal grew without bound on every launch.
+      const validation = validateEditDocument(next);
+      if (!validation.ok) throw new InvalidEditError(open.id, validation.issues);
+
       const revision = await open.journal.append(ops, baseRevision);
       open.edit = next;
       open.snapshotPending = true;
@@ -544,4 +596,27 @@ function reportBackgroundFailure(what: string): (error: unknown) => void {
   return (error) => {
     console.error(`[ProjectStore] ${what} failed:`, error);
   };
+}
+
+/**
+ * Say what replaying the journal actually recovered, and what it could not.
+ *
+ * `readBundle` has always computed this; nothing read it, so a torn append, a
+ * corrupt line, or a replay that stopped at a gap in the log — the cases where the
+ * user silently loses the tail of their edits — left no trace anywhere.
+ */
+function reportJournalRecovery(id: RecordingId, opened: OpenedBundle): void {
+  if (opened.journalTorn) {
+    console.warn(`[ProjectStore] ${id}: journal ended mid-line; the partial append was discarded`);
+  }
+  for (const problem of opened.journalProblems) {
+    console.warn(`[ProjectStore] ${id}: unreadable journal line — ${problem}`);
+  }
+  const stopped = opened.replay.stoppedAt;
+  if (stopped !== null) {
+    console.warn(
+      `[ProjectStore] ${id}: replay stopped at revision ${String(stopped.revision)}: ` +
+        `${stopped.reason}. Edits after that point were not restored.`,
+    );
+  }
 }
