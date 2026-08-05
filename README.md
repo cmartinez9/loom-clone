@@ -5,8 +5,9 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 1 of 14: the capture spine**, plus the phase 5 cursor and click sampler,
-built early and out of order because it is self-contained.
+**Phase 1 of 14: the capture spine**, plus the phase 5 cursor and click sampler and
+phase 6's decode path and WebGL2 compositor, built early and out of order because they
+are self-contained.
 
 What runs today: the app launches, records the screen, and lists the recordings it
 finds under `~/Movies/Loom Clone` — revealing them in Finder or moving them to the
@@ -24,6 +25,11 @@ time.
 
 The native input sampler is complete alongside it, but nothing starts it yet, because
 the permission flow that turns it on is phase 2.
+
+Phase 6's one decode path and WebGL2 compositor — the pair preview and export will
+share — are complete alongside it too, built ahead of the capture spine against
+synthetic fixtures and held to a 16 ms frame budget on a 4K fixture at a 1440p viewport
+by a gate that runs in `npm test`. No shipping window drives the preview loop yet.
 
 ## Requirements
 
