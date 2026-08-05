@@ -5,8 +5,13 @@
  * Pure draw calls."* No framework, no DOM beyond the GL context, no I/O — §1.3
  * again: *"`edl` and `compositor` being framework-free is what lets a headless test
  * render frame 1,234 of a fixture project and compare it byte-for-byte against the
- * exporter's frame 1,234."* That test is phase 8's gate (§4.5); this package is
- * built as though it already exists.
+ * exporter's frame 1,234."* That test is §4.5's, and `test/phase11-golden.test.ts`
+ * is it for the annotation passes: 24 timestamps through the shipping `PreviewLoop`
+ * and through a fixed-timestamp export loop, max per-pixel delta 0.
+ *
+ * One subpath breaks the purity rule on purpose and says why in its own docblock:
+ * `@loom/compositor/raster` rasterises glyphs into a `TextAtlas` and needs a canvas
+ * to do it. Same bargain as `@loom/format/fs`.
  */
 
 export { Compositor, type CompositorFrames, type CompositorOptions } from './compositor.ts';

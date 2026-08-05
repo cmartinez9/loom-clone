@@ -322,9 +322,10 @@ export class AnnotationPass {
           case 'mask':
             this.#drawShape(context, map, geometry, style, KIND_RECT, style.fill, [0, 0, 0, 0]);
             break;
+          // A highlight *is* a rectangle; what makes it a highlighter rather than a
+          // box is its defaults — a translucent fill and no outline — and those live
+          // in `readAnnotationStyle`, where every default this build has is stated.
           case 'highlight':
-            this.#drawShape(context, map, geometry, style, KIND_RECT, style.fill, style.stroke);
-            break;
           case 'rect':
             this.#drawShape(context, map, geometry, style, KIND_RECT, style.fill, style.stroke);
             break;
@@ -642,6 +643,7 @@ export class AnnotationPass {
     gl.bindFramebuffer(gl.FRAMEBUFFER, context.target.framebuffer);
     gl.viewport(0, 0, context.outputSize[0], context.outputSize[1]);
     gl.drawArrays(gl.TRIANGLES, 0, layout.vertexCount);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
   }
 

@@ -21,6 +21,7 @@ import {
   AnnotationError,
   ANNOTATION_KINDS,
   compile,
+  EditHistory,
   isAnnotationKind,
   isPrivacyKind,
   newAnnotationGeometry,
@@ -115,6 +116,26 @@ describe('annotations are spans in the existing model', () => {
     expect(geometry.x1).toBeCloseTo(0.4, 10);
     readAnnotationGeometry(resolve(compiled, 4).annotations[0]!, 'arrow', geometry);
     expect(geometry.x1).toBeCloseTo(0.6, 10);
+  });
+});
+
+describe('an annotation is edited through the ops that already existed', () => {
+  it('adds and undoes through EditHistory, with no phase-11 op vocabulary', () => {
+    // The payoff of §3.3's one primitive: `span.set` / `span.remove` and their
+    // inverses landed with phase 7, so an annotation is journalled, revisioned and
+    // undoable on exactly the path a zoom keyframe takes. Nothing here is new code.
+    const base = documentWith([annotationTrack({ id: 't', spans: [] })]);
+    const history = new EditHistory(base);
+    history.apply([
+      { op: 'span.set', trackId: 't', span: boxSpan('a1', 'ellipse') },
+      { op: 'span.set', trackId: 't', span: boxSpan('a2', 'blur') },
+    ]);
+    expect(resolvedAt(history.document.tracks, 5).map((a) => a.type)).toEqual(['ellipse', 'blur']);
+
+    history.undo();
+    expect(resolvedAt(history.document.tracks, 5)).toHaveLength(0);
+    history.redo();
+    expect(resolvedAt(history.document.tracks, 5).map((a) => a.id)).toEqual(['a1', 'a2']);
   });
 });
 

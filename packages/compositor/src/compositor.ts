@@ -19,11 +19,12 @@
  * *full* 4K when paused, which is what makes pixel equality with the exporter
  * checkable at all.
  *
- * Phase 6 draws the screen track and nothing else. The passes that follow — bubble
- * (phase 7), cursor (5), annotations and blur/mask (11) — attach to the same FBO in
- * the same `render()` call. Handing this class a `webcam` or `cursor` today throws
- * rather than being quietly ignored, because "the webcam did not appear" is a bug
- * report nobody enjoys receiving.
+ * Phase 6 drew the screen track and nothing else. The passes that follow attach to
+ * the same FBO in the same `render()` call: phase 11's annotations are here
+ * (`AnnotationPass`), and the bubble (7) and cursor (5) are not yet. Handing this
+ * class a `webcam` or `cursor` today throws rather than being quietly ignored,
+ * because "the webcam did not appear" is a bug report nobody enjoys receiving — and
+ * a `text` annotation with no atlas throws for the same reason, one layer along.
  *
  * ## The two rules this class exists to keep
  *

@@ -39,10 +39,13 @@
  *    closes it.
  *  - **`prime()` is cancelable.** Scrubbing just calls `seek`, which primes at the
  *    new time; `SourceReader` aborts the old read and abandons the old seek.
- *  - **Expensive optional passes are skipped while scrubbing.** There are none yet
- *    (blur and motion blur are phases 11 and 13), but {@link PreviewLoop.scrubbing}
- *    is the flag they will read, and §4.3 is explicit that it must stay a
- *    *scheduling* difference and never a *state* difference.
+ *  - **Expensive optional passes are skipped while scrubbing.** None are, and the
+ *    blur is a deliberate refusal rather than an oversight: §4.5 permits *"preview
+ *    may skip blur passes while scrubbing"*, but a redaction is the one pass whose
+ *    absence teaches the user their blur is somewhere it is not, and it costs two
+ *    full-target draws per region against a 16.67 ms frame. {@link PreviewLoop.scrubbing}
+ *    remains the flag a future pass would read — motion blur is phase 13 — and §4.3
+ *    is explicit that it must stay a *scheduling* difference and never a *state* one.
  */
 
 import type { CompositorFrames, TextAtlas } from '@loom/compositor';
