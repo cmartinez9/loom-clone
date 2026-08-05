@@ -198,6 +198,13 @@ rewriting a growing JSON once a second for the length of the recording.
   hold instead, because the frame it would keep belongs to the ring and the seek closes
   it. The target is filled with the background at construction and on `resize`, which is
   where the first composite gets its background from.
+- **The `VideoFrame` → texture upload is the whole frame budget, off hardware decode.**
+  ANGLE binds an IOSurface for free (§12.4, 0.000 ms) only when the decoder is the
+  hardware one; on any VM — so on CI — frames are CPU-backed and the same
+  `texImage2D` converts and uploads 30 MB, measured at 4.8 ms of a 16.7 ms budget
+  while the draw and the blit cost 0.01 ms. `Compositor.render` therefore uploads once
+  per frame _of the recording_, not once per composite, and `texSubImage2D` into a
+  pre-sized texture is 2.6× slower, not faster — it misses Chromium's fast path.
 - **The phase 6 gate is `npm test`, in a real Electron renderer.** `test/gate/` builds
   a harness with esbuild, launches Electron, encodes a 4K VFR fixture with
   `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame

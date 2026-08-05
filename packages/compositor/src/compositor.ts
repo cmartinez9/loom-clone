@@ -36,6 +36,12 @@
  * resolution source texture** (§4.3). Downscaling the source would make zoomed
  * preview soft and unlike the export. So the screen texture is always allocated at
  * the frame's own size and the zoom is a change of sample rect, never of texture.
+ *
+ * A third, quieter one falls out of those: the source texture is uploaded once per
+ * *frame of the recording*, not once per composite. `render` still draws on every
+ * call — state changes between two composites of the same frame, and phase 7's zoom
+ * will change it every tick — but it does not re-upload pixels the texture already
+ * holds. See the comment on the upload; it is where the budget actually goes.
  */
 
 import { contentRect, rectToNdc, sourceSampleRect } from './geometry.ts';
@@ -99,6 +105,15 @@ export class Compositor {
   readonly #sourceScratch = new Float32Array(4);
   /** One row, for the readback flip. Sized on first use and reused after that. */
   #rowScratch = new Uint8Array(0);
+  /**
+   * The frame whose pixels are already in {@link #screenTexture}.
+   *
+   * Identity witness, not ownership: it is only ever compared with `!==`, never
+   * closed here and never sampled from — `FrameRing` remains the single owner of
+   * every `VideoFrame` (§10.2), and the texture keeps its own copy of the pixels
+   * once the upload has happened, so the ring is free to close the frame.
+   */
+  #uploaded: VideoFrame | null = null;
   #frames = 0;
   #disposed = false;
 
@@ -256,9 +271,23 @@ export class Compositor {
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.#screenTexture);
-    // The canonical zero-copy path on macOS: §12.4 measured VideoFrame → texture
-    // at 0.000 ms because ANGLE binds the frame's IOSurface rather than copying.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, screen);
+    // §12.4 measured VideoFrame → texture at 0.000 ms because ANGLE binds the
+    // frame's IOSurface rather than copying — but that is the *hardware* decode
+    // path. Where the platform has no 4K hardware H.264 decoder, which is every VM
+    // and so every CI runner, the frames are CPU-backed: the same call converts and
+    // uploads 30 MB and is then the whole frame budget. Measured by the phase-6
+    // gate at 0.3 ms typical on an M5 Pro and 4.8 ms on a paravirtual GPU, against
+    // 16.7 ms for everything; the draw and the blit are 0.01 ms beside it.
+    //
+    // So a frame already in the texture is not uploaded again. `frameAt` is
+    // hold-last-frame (§4.2) over a source measured at 1.4 fps idle and 29.4 fps
+    // under animation, so most ticks of a 60 Hz loop want the frame the previous
+    // tick uploaded — 86% of them in that gate — and a redundant upload costs
+    // exactly what a real one does.
+    if (screen !== this.#uploaded) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, screen);
+      this.#uploaded = screen;
+    }
 
     const source = sourceSampleRect(state.zoom);
     const content = rectToNdc(
@@ -358,6 +387,7 @@ export class Compositor {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#uploaded = null;
     const gl = this.gl;
     this.gpuTimer.dispose();
     deleteRenderTarget(gl, this.#target);
