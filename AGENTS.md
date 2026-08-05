@@ -256,119 +256,40 @@ a gap lives in `recording.json`, never in the container.
   number is painted into every frame and read back out of the framebuffer, so a fast
   blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
   passes, and judges the 16 ms budget on **the single worst frame, with no allowance**.
-  **What this gate claims, and on what hardware.** CI verifies **correctness and
+  **What it claims, and on what hardware.** CI verifies **correctness and
   regression-detection**; it does **not** certify the frame budget. The budget is
-  certified on target hardware, where it holds with roughly 50× margin — 0.20–0.30 ms
-  per frame against 16.67 ms. The reason is structural, not a matter of runner speed:
-  loom-clone ships on macOS 14+ Macs, every one of which has a hardware H.264 decoder,
-  and ANGLE-Metal binds a hardware-decoded frame's IOSurface rather than copying it
-  (§12.4, 0.000 ms). GitHub's macos-14 runner has no hardware decoder at all, so its
-  frames are CPU-backed and every composite carries a ~30 MB `texImage2D` — gpu 3.309 ms
-  against 0.312 ms, play p99 5.00 ms against 0.20–0.40 ms, an order of magnitude on both.
-  **The runner is a different workload, roughly 25× heavier per frame, that no user of
-  this app will ever run**, so how often it trips a 16.67 ms budget says nothing about
-  the product. Four separate levers failed to reproduce that workload locally
-  (`disable-accelerated-video-decode`; `prefer-software` decode plus a software-preferring
-  fixture encoder; `disable-gpu-memory-buffer-video-frames`; `use-angle swiftshader`,
-  which overshot to 42.7 ms and broke the readback), so do not go looking for a fifth.
-  **Two measured facts decide whether §8's absolute number is asserted for a phase**, and
-  `assertsAbsoluteBudget` in `test/gate/budget-control.ts` is the pair of them. Where both
-  answer yes the four §8 assertions run exactly as written; where either does not, the
-  compositor is held to the tracking bound instead and the figures are reported. First,
-  **does a frame here mean what §8 means** — a hardware-backed decoder for the fixture
-  (`VideoDecoder.isConfigSupported` with `prefer-hardware`, never the renderer device
-  string) **and** a per-frame GPU composite inside a tenth of §8's whole frame, 1.67 ms.
-  The tenth is derived from §8's own number rather than placed between the two machines,
-  and both facts are required together: `hardwareDecode` is a platform property the
-  compositor cannot move, which is what stops a GPU-side regression inflating the reading
-  that would excuse it. Second, **would this host give any program a whole frame** — a
-  fixed span of pure arithmetic with none of the compositor's code in it, spun **in the
-  same frames**, where **clearing the budget means landing inside it and nothing short**
-  (`CLEARS_BUDGET = 1`; a margin of 0.8 once let a control reading 14.50 ms defer a phase
-  in which an injected 20.20 ms frame was excused, and made every clean run on an M5 Pro
-  defer).
-  **The deferred branch has two doors, and they do not carry the same bound.** Where the
-  _control_ missed the budget, the compositor is held to `TRACKS_CONTROL` × the worst spin
-  that host recorded — relief by construction, since such a control read past 16.67 ms and
-  1.5× of it is past 25 ms. Where the _host_ is simply not this product's machine, the
-  control beside it was healthy and 1.5 × 8.40 ms is 12.60 ms — **below** §8 — so that
-  ceiling is not asked at all; asking it would turn a fixed 16.67 ms bar into a moving
-  12.60–15.15 ms one on the branch whose whole purpose is not failing a host for being a
-  different machine. That door carries its own single-frame bound instead: §8's frame
-  **scaled by the per-frame work this host was measured doing**,
-  `16.67 × (median GPU composite / 1.67)`, which is 33.1 ms on the runner. It is
-  dimensional scaling by a measured quantity rather than one of the arbitrary multipliers
-  this gate has rejected three times, and it is computed at judgement time, never pinned.
-  The divisor is fixed, but the **numerator is measured on the compositor under test**, so
-  a GPU-side regression lifts this envelope ten times faster than it lifts the frame the
-  envelope judges: **the share beside it is what catches that class, and must never be
-  dropped on the strength of this bound**. A CPU-side regression — the one this gate is
-  judged on — leaves the GPU median where it was and is caught by both. At extreme ratios
-  (swiftshader's 42.7 ms earns 427 ms) the envelope degrades to no practical effect, which
-  is a graceful floor and not a bug: such a host was never going to say anything about §8.
-  Both doors keep the over-budget **share**, a plain `>` against the host's own, floored at
-  what the control could resolve: N spins report in steps of `1/N`, so a finer frame share
-  cannot be told from a quantised zero and is reported INCONCLUSIVE rather than failed.
-  **That floor is computed from the spin count at judgement time and must never be pinned
-  to a number** — it is a property of the sample size, and the moment it is written down it
-  becomes an over-budget tolerance. It is also inert on the ceiling's door: a control that
-  missed the budget has `spinShare >= 1/N` already, so nothing that beats `spinShare` can be
-  under the floor.
-  **What the representativeness door does and does not claim.** It detects regressions by
-  **rate**, and bounds single frames only by that scaled envelope. **It does not certify
-  §8.** The documented regression — 20 ms on one composite in thirty, patched into the
-  shipping `Compositor.render` — goes red on **both** branches: strict, on §8's own
-  assertion; deferred, on the share, ~3.3% of frames against a host that missed none of its
-  own spins, five times the floor. CI run 31039796990 sits the other side of it — 1 frame of
-  380, 0.263%, against a 154-spin control resolving 0.649%, and 17.20 ms inside the 33.1 ms
-  envelope — so it is reported inconclusive, which is the outcome this shape exists to
-  produce. The **slow-compositor control is asserted unconditionally** and must never be
-  made conditional: it is what proves the rate bound still detects a compositor slow on
-  every frame. The one
-  surviving gap is the **middle band**: the ceiling is a multiple of a number measured on
-  the thread the compositor saturates, so it rises with the regression it judges, and under
-  sustained load the host's own over-budget share runs ahead of the regression's (22% of
-  spins against 4% of frames) so the share cannot close it either. **Do not close it with a
-  factor on the share** — that is the ceiling's own circularity one level up. It is only
-  reachable on a host already saturated enough to defer §8, and the correct fix is matching
-  the control's _exposure_ to the frame's own cost instead of fixing it at half a budget:
-  filed as `loom-gate-exposure-matched-control`.
-  **A non-representative host cannot be simulated on Apple Silicon past the decode probe.**
-  `--disable-accelerated-video-decode` does flip `hardwareDecode` to `no`, and the GPU
-  composite stays at 0.313 ms regardless, because ANGLE-Metal binds decoded frames as
-  IOSurfaces whatever the decode preference — which is exactly why the conjunction is the
-  right shape and why that run is still held strictly. To exercise the other branch
-  end to end, override the reported `gpuCost` medians in the harness for one run.
-  **Three instrument fixes, each of which produced numbers that looked like results.** A
-  measurement from an instrument since proven unreliable cannot justify weakening an
-  acceptance criterion — fix the instrument, re-measure, then decide. A lost WebGL context
-  returned stale pixels, and the 19 ms frame it reported bought a p99 and a
-  one-in-a-hundred allowance that had to be taken back. **The gate's own readback was the
-  largest cost inside the window it was measuring**: a whole 1440p frame is 14.7 MB out of
-  the GPU plus an in-place flip, measured at 20.8–97.8 ms where every real frame cost
-  0.2–0.5 ms, done eighteen times inside the measured windows — both readers now read a
-  slice, one row for the frame code and 8×8 px for the settle probe, and anything added to
-  those windows has to be cheap or it is not measuring the preview any more. And **the
-  warmup ends at the first composited picture, not after `WARMUP_FRAMES`**: the one-time
-  cost it exists to hold is the first 4K `texImage2D`, which arrives when the decoder
-  delivers rather than on a frame number, and a fixed count raced it — one commit billed
-  the same single composite to warmup on the run that passed and to scrub frame 5 on the
-  run that failed.
-  **The control is paced by the wall clock, from the end of one spin to the start of the
-  next.** Per frame is a bug — half a budget per frame is a whole thread on a 120 Hz panel,
-  and the version that did it starved decode until every scrub target timed out. Timed from
-  a spin's _start_ the interval is `spinDuration + frameGap`, so a stretched spin collapses
-  back into per-frame pacing by a feedback loop that loads hardest exactly the saturated
-  hosts the control exists to characterise; from the end, the demand falls as the host
-  dilates. That pacing quantises to `framesPerSpin`, which is where **every count the gate
-  asserts about the control comes from** — 3 frames a spin at 60 Hz, 6 at 120, 11 at 240.
-  Both the floors and the ratio cap are read off the **fastest** panel, because that is
-  where a spin covers the most frames and a phase therefore yields the fewest spins;
-  reading the floors off the slowest panel computed the largest floor instead, which is the
-  inverted derivation this gate has now corrected twice. Derive them from `framesPerSpin`
-  rather than restating them. `test/budget-control.test.ts` pins the pacing with an
-  injected clock and spin, the representativeness policy, and that a real regression fails
-  on both branches.
+  certified on **target hardware**, where it holds with roughly **50× margin** —
+  0.20–0.30 ms per frame against 16.67 ms. The reason is structural, not runner speed:
+  every Mac this ships to has a hardware H.264 decoder and ANGLE-Metal binds the decoded
+  frame's IOSurface rather than copying it (§12.4, 0.000 ms), while a virtualised runner
+  has no hardware decoder at all and every composite there carries a ~30 MB CPU-backed
+  `texImage2D`. That is a **different workload, roughly 25× heavier per frame, that no
+  user of this app will ever run** — not a slower version of the product's frame — so how
+  often it trips 16.67 ms says nothing about the compositor.
+  **`FRAME_BUDGET_MS` and §8's four assertions are untouched, and strict on any host that
+  can represent the product** — which is every machine a contributor runs `npm test` on. A
+  phase is refused them only where the host structurally cannot: no hardware-backed decode
+  **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch is not
+  a pass. It detects regressions by **rate** — the compositor may miss the budget no
+  oftener than the host missed it in the same frames — and bounds single frames only by
+  §8's frame scaled by the per-frame work this host was measured doing.
+  **The derivations are not repeated here.** `test/gate/budget-control.ts`'s module
+  docblock and its per-constant comments own them: the deferred branch's two doors and why
+  they carry different bounds, the scaled envelope and the regression class it cannot
+  catch, the spin-resolution floor that must never be pinned to a number, the end-stamped
+  control pacing every asserted sample count is read off, and why none of these is a
+  threshold tuned to a run. Read it before touching any of them;
+  `test/budget-control.test.ts` pins the policy — including that a real regression fails on
+  both branches — and `test/phase6-gate.test.ts` judges the run.
+  **Two facts no file owns.** The deferred branch **cannot be exercised end to end on
+  Apple Silicon**: `--disable-accelerated-video-decode` flips the decode probe, but
+  ANGLE-Metal binds decoded frames as IOSurfaces whatever the decode preference, and four
+  levers up to `use-angle swiftshader` failed to reproduce the runner's frame — do not go
+  looking for a fifth; override the harness's reported `gpuCost` medians for one run
+  instead. And the surviving gap under sustained load, where the tracking ceiling rises
+  with the regression it judges and the host's own over-budget share outruns the
+  regression's, is filed as `loom-gate-exposure-matched-control` — **do not close it with a
+  factor on the share**, which is that same circularity one level up.
   **Load this gate's box with `scripts/gate-load.mjs` and never with an ad-hoc
   `while :; do :; done &`.** Every reading taken under load needs the box saturated on
   purpose, and the ad-hoc version of that once left 42 orphaned spinners pinning this
