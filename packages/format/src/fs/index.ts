@@ -23,6 +23,8 @@ export {
   type LoadedDocument,
 } from './documents.ts';
 
+export { EventLogWriter } from './event-log.ts';
+
 export {
   JournalWriter,
   journalHeaderLine,

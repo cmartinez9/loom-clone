@@ -26,7 +26,7 @@ Section references in source comments (`§2.7`, `§7.1`) point at the architectu
 ## Commands
 
 ```bash
-npm run build       # esbuild main + preload, vite renderer -> dist/
+npm run build       # esbuild main + preload, vite renderer, clang the sampler -> dist/
 npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
@@ -37,6 +37,8 @@ node scripts/seed-fixtures.mjs <root>            # example recordings to look at
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 node scripts/smoke-capture.mjs --synthetic       # ...with a canvas in place of the screen
+node packages/sampler/native/build.mjs --force   # rebuild only the native sampler
+./dist/native/loom-input-sampler probe           # what input capture can do right now
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
 ```
 
@@ -52,6 +54,10 @@ packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it w
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
+packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
+                   `native/` is an Objective-C CLI built by one `clang` call into
+                   `dist/native/`; the TypeScript half parses its NDJSON and has no
+                   filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    loom:// protocol, IPC.
 apps/renderer/     renderer windows. Library, recorder HUD and the hidden capture
@@ -96,7 +102,10 @@ until export. Every file carries `"schema": "<family>/<n>"` on line one and ever
 runs **parse → migrate → validate**; an unknown or future schema is refused, never
 guessed at — except `edit.journal.ndjson`, which degrades instead: its entries are
 withheld and the file is preserved aside, but the recording still opens from its
-`edit.json`, because an unreadable header must not brick a recording.
+`edit.json`, because an unreadable header must not brick a recording. The `events/`
+logs carry no schema line at all: §2.5 specifies their exact contents, they are
+streams of one event shape rather than documents, and `recording.json` is what
+versions them.
 Writes go through `writeAtomic` (temp file, `fsync`, `rename`, then
 `fsync` the directory — the last step is the one people leave out). Edits are appended
 to `edit.journal.ndjson` as one op per line and snapshotted into `edit.json` on a
@@ -135,6 +144,19 @@ rewriting a growing JSON once a second for the length of the recording.
   part, on purpose: they share no revision, write a different file, and must not be
   able to queue behind a snapshot's recursive bundle-size walk — anything queued in
   memory is exactly what a crash costs.
+- **Stop the sampler, then close the project — in that order.** `ProjectStore`'s
+  event-log and cursor-bitmap writes require the project to be open and throw
+  `UnknownRecordingError` otherwise; they never open a bundle on the caller's behalf,
+  because they are driven from the sampler's timers rather than from a user action.
+  Closing first therefore turns a straggling write into a loud, typed refusal rather
+  than a silent re-open that re-takes the bundle `.lock` and holds a closed recording
+  for the rest of the session. `applyOps` is the deliberate exception and still opens
+  a closed project: it is a renderer-driven user action, not a background timer.
+- **A spawned helper is not asar-aware.** Electron patches `fs` to read through
+  `app.asar`; `child_process.spawn` hands the literal path to `uv_spawn`, which does
+  not. Anything executable resolved under `dist/` goes through
+  `unpackedHelperPath()`, or a packaged build reports the binary missing when it
+  shipped correctly.
 - **A crash test that does not kill production code proves nothing.** Phase 0 shipped
   one that killed a copy of `writeAtomic`. Both gates now kill the real path, both
   have a control that must fail, and `npm run verify:mutation` breaks the writer on
@@ -148,7 +170,18 @@ rewriting a growing JSON once a second for the length of the recording.
   so it cannot pass vacuously.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
-  trap 6). See the carried-forward obligations below.
+  trap 6). The one way to shed that inheritance in a test is
+  `loom-input-sampler spawn-disclaimed`, which makes the child answer for its own code
+  identity — that is how the phase-5 gate exercises "Accessibility revoked" on a
+  machine whose terminal is trusted. See also the carried-forward obligations below.
+- **A permission that fails silently must be reported, never inferred.** Clicks need
+  Accessibility, and without it `CGEventTapCreate` has been seen both to return NULL
+  and to return a port that reports success and never fires — so the sampler gates on
+  `AXIsProcessTrusted()` _and_ `CGEventTapIsEnabled`, watches for
+  `kCGEventTapDisabledBy*`, and re-checks at 1 Hz. Downstream, "no clicks happened"
+  and "the tap was dead" are kept apart by `capability.count` being `null` rather than
+  `0`, and by `clicks.ndjson` existing only once the tap is live. Phase 10's auto-zoom
+  is the consumer that breaks silently if either collapses.
 
 ## Carried forward to phase 2: three things no dev run has verified
 

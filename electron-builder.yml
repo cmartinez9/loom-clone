@@ -24,6 +24,18 @@ files:
 
 asar: true
 
+# `dist/native/loom-input-sampler` is a Mach-O executable the main process spawns
+# (phase 5). A binary inside the asar archive cannot be `exec`'d, so it is unpacked
+# into `app.asar.unpacked/`, where the signer can reach it. `spawn` is not asar-aware
+# — it hands the literal path to `uv_spawn` — so the path is rewritten by
+# `unpackedHelperPath()`; `__dirname/../native` alone would point inside the archive
+# and the spawn would fail. Its Accessibility grant is inherited from the app bundle:
+# macOS attributes a TCC request to the *responsible* process, which for a child of
+# Loom Clone is Loom Clone. That is exactly why the helper does not need — and must
+# not have — a TCC identity of its own.
+asarUnpack:
+  - dist/native/**
+
 mac:
   category: public.app-category.video
   # Captain decision 7 (`data/loom-scope/decision-macos-floor.md`). Below 14 the

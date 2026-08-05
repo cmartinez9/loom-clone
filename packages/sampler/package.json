@@ -1,0 +1,19 @@
+{
+  "name": "@loom/sampler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The 120 Hz cursor sampler, the CGEventTap click capture, and cursor bitmaps. Main-process only.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build:native": "node native/build.mjs"
+  },
+  "dependencies": {
+    "@loom/format": "0.1.0"
+  }
+}

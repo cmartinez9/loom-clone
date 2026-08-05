@@ -56,6 +56,24 @@ export const BUNDLE = {
   stripDir: 'thumbs/strip',
 } as const;
 
+/**
+ * The three append-only NDJSON logs under `events/` (§2.5).
+ *
+ * `clicks` is separate from `cursor` on purpose and it is the reason phase 5 exists:
+ * clicks need the Accessibility permission and position does not, so "we have
+ * positions but not clicks" is a first-class, representable state rather than
+ * something a reader has to infer.
+ */
+export type EventLogKind = 'cursor' | 'clicks' | 'drawing';
+
+export const EVENT_LOG_KINDS: readonly EventLogKind[] = ['cursor', 'clicks', 'drawing'];
+
+export const EVENT_LOG_PATH = {
+  cursor: BUNDLE.cursorLog,
+  clicks: BUNDLE.clickLog,
+  drawing: BUNDLE.drawingLog,
+} as const satisfies Record<EventLogKind, string>;
+
 /** Directories created when a bundle is created, in creation order. */
 export const BUNDLE_DIRECTORIES: readonly string[] = [
   BUNDLE.mediaDir,

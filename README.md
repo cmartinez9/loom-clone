@@ -5,7 +5,8 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 1 of 14: the capture spine.**
+**Phase 1 of 14: the capture spine**, plus the phase 5 cursor and click sampler,
+built early and out of order because it is self-contained.
 
 What runs today: the app launches, records the screen, and lists the recordings it
 finds under `~/Movies/Loom Clone` — revealing them in Finder or moving them to the
@@ -21,9 +22,15 @@ at 96.4–99.4% across three kill points — and `npm run verify:mutation` prove
 gate itself by breaking the writer five ways and requiring the test to fail each
 time.
 
+The native input sampler is complete alongside it, but nothing starts it yet, because
+the permission flow that turns it on is phase 2.
+
 ## Requirements
 
 macOS 14 or later. There is no Windows or Linux build and none is planned.
+
+Building and testing also need the Xcode Command Line Tools (`xcode-select --install`):
+the input sampler is an Objective-C helper compiled by one `clang` call.
 
 ## Getting started
 
@@ -56,17 +63,8 @@ carried forward to phase 2's signed-bundle gate; `AGENTS.md` records them.
 
 ## How it is put together
 
-```
-packages/format/   the .loomrec on-disk format — schemas, migrations, atomic writes,
-                   the edit journal
-packages/mux/      the fragmented-MP4 writer and the scanner crash recovery reads
-packages/ipc/      the typed main <-> renderer contract
-packages/design/   "Pressroom" — tokens, type, icons, self-hosted fonts
-apps/main/         Electron main: windows, ProjectStore, RecorderSession, loom://, IPC
-apps/renderer/     renderer windows — library, recorder HUD, hidden capture page
-```
-
-`AGENTS.md` carries the rules that hold this together and points at the design
+`AGENTS.md` § Layout is the module map — what each package owns and where a new one
+goes. It also carries the rules that hold this together and points at the design
 documents that settle them.
 
 ## Design

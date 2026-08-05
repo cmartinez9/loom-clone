@@ -27,17 +27,22 @@ import { mkdir, realpath, rm, stat } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   BUNDLE,
+  EVENT_LOG_PATH,
   applyOps as applyOpsToDocument,
+  cursorImagePath,
   isSafeBundleRelativePath,
   mediaIndexPath,
   mediaPartPath,
   newSettingsDoc,
   ulid,
+  validateCursorIndexDoc,
   validateEditDocument,
   validateProjectDoc,
   validateSettingsDoc,
+  type CursorIndexDoc,
   type EditDocument,
   type EditOp,
+  type EventLogKind,
   type PartIndex,
   type ProjectDoc,
   type ProjectState,
@@ -52,6 +57,7 @@ import {
 } from '@loom/format';
 import {
   BundleLock,
+  EventLogWriter,
   JournalWriter,
   createBundle,
   directorySize,
@@ -59,6 +65,7 @@ import {
   loadDocument,
   readBundle,
   sweepTempArtifacts,
+  writeAtomic,
   writeJsonAtomic,
   type BundlePaths,
   type OpenedBundle,
@@ -93,6 +100,15 @@ interface OpenProject {
   project: ProjectDoc;
   recording: RecordingDoc | null;
   edit: EditDocument;
+  /**
+   * Open append handles on `events/*.ndjson`, created lazily.
+   *
+   * Held for the life of the open project rather than reopened per append: at 120 Hz
+   * the cursor log is appended ten times a second, and an `open`/`close` per batch
+   * would make the ordering guarantee a property of the filesystem instead of the
+   * handle — the same argument as the journal's.
+   */
+  eventLogs: Map<EventLogKind, EventLogWriter>;
   /** Set while the in-memory `edit` is ahead of the `edit.json` on disk. */
   snapshotPending: boolean;
   syncTimer: NodeJS.Timeout | null;
@@ -359,6 +375,7 @@ export class ProjectStore {
         project: opened.project,
         recording: opened.recording,
         edit: opened.edit,
+        eventLogs: new Map(),
         // Replayed ops are in memory but not yet in the snapshot on disk.
         snapshotPending: opened.replay.applied > 0,
         syncTimer: null,
@@ -683,6 +700,122 @@ export class ProjectStore {
     });
   }
 
+  // -------------------------------------------------------------- event logs
+
+  /**
+   * The three append-only NDJSON logs under `events/` (§2.5), routed through the same
+   * per-project queue as every other write.
+   *
+   * They are here rather than in `@loom/sampler` for one reason: the sampler spawns a
+   * child process and produces tens of thousands of lines a minute, and letting it
+   * open its own file handle would make it a second writer. Report §0, rule 2 says
+   * there is one, and this class is it.
+   *
+   * `createEventLog` and `appendEventLog` are separate calls because the difference
+   * between an absent `clicks.ndjson` and an empty one is load-bearing: absent means
+   * clicks were never captured, empty means they were captured and none happened.
+   * Creating a log is therefore an assertion the caller makes deliberately, never a
+   * side effect of wanting to maybe write to one.
+   *
+   * **Ordering contract: stop the sampler, then close the project.** Every method in
+   * this section requires the project to be open and throws `UnknownRecordingError`
+   * otherwise, exactly as `writeRecordingDoc` and `setState` do. They are driven from
+   * the sampler's timers rather than from a user action, so a write can still be in
+   * flight when a caller decides it is finished; re-opening the bundle on its behalf
+   * would silently re-take the `.lock` of a recording the user closed and hold it for
+   * the rest of the session. A late write is therefore a loud, typed refusal — never
+   * a re-open, and never a silent drop of cursor data the user believes was captured.
+   */
+  async createEventLog(id: RecordingId, log: EventLogKind): Promise<void> {
+    const open = this.requireOpen(id);
+    await this.enqueue(open, () => this.eventLog(open, log).create());
+  }
+
+  /**
+   * Append newline-terminated NDJSON. Creates the log if it does not exist yet.
+   *
+   * Throws `UnknownRecordingError` if the project is not open — see the ordering
+   * contract on {@link createEventLog}.
+   */
+  async appendEventLog(id: RecordingId, log: EventLogKind, ndjson: string): Promise<void> {
+    const open = this.requireOpen(id);
+    await this.enqueue(open, () => this.eventLog(open, log).append(ndjson));
+  }
+
+  /**
+   * `fsync` an event log. §2.5's cadence is one second; the caller owns the timer.
+   *
+   * Throws `UnknownRecordingError` if the project is not open — see the ordering
+   * contract on {@link createEventLog}.
+   */
+  async syncEventLog(id: RecordingId, log: EventLogKind): Promise<void> {
+    const open = this.requireOpen(id);
+    await this.enqueue(open, () => this.eventLog(open, log).sync());
+  }
+
+  /** Lines appended to an event log this session, or `null` if it was never opened. */
+  eventLogLineCount(id: RecordingId, log: EventLogKind): number | null {
+    return this.open.get(id)?.eventLogs.get(log)?.lineCount ?? null;
+  }
+
+  /**
+   * Store a cursor bitmap at `cursors/<sha256>.png` (§2.5).
+   *
+   * Content-addressed, so an identical cursor is stored once and a re-write is a
+   * no-op worth skipping — but it is written anyway rather than stat'd first, because
+   * `writeAtomic` is a rename and the cost is a few kilobytes per distinct shape.
+   *
+   * Throws `UnknownRecordingError` if the project is not open — see the ordering
+   * contract on {@link createEventLog}.
+   */
+  async writeCursorImage(id: RecordingId, sha256: string, png: Uint8Array): Promise<void> {
+    const open = this.requireOpen(id);
+    // `cursorImagePath` rejects anything that is not a lowercase hex sha256, which is
+    // what keeps an id from the child process out of a path.
+    const relative = cursorImagePath(sha256);
+    await this.enqueue(open, () => writeAtomic(join(open.paths.dir, relative), png));
+  }
+
+  /**
+   * Replace `cursors/index.json`, validated first like every other document.
+   *
+   * Throws `UnknownRecordingError` if the project is not open — see the ordering
+   * contract on {@link createEventLog}.
+   */
+  async writeCursorIndex(id: RecordingId, doc: CursorIndexDoc): Promise<void> {
+    const open = this.requireOpen(id);
+    const result = validateCursorIndexDoc(doc);
+    if (!result.ok) {
+      throw new Error(
+        `refusing to write an invalid cursors/index.json for ${id}: ` +
+          result.issues.map((issue) => `${issue.path}: ${issue.message}`).join('; '),
+      );
+    }
+    await this.enqueue(open, () => writeJsonAtomic(join(open.paths.dir, BUNDLE.cursorIndex), doc));
+  }
+
+  private eventLog(open: OpenProject, log: EventLogKind): EventLogWriter {
+    let writer = open.eventLogs.get(log);
+    if (writer === undefined) {
+      writer = new EventLogWriter(join(open.paths.dir, EVENT_LOG_PATH[log]));
+      open.eventLogs.set(log, writer);
+    }
+    return writer;
+  }
+
+  /**
+   * The open project, or a refusal.
+   *
+   * Synchronous on purpose as well as strict: the caller reaches `enqueue` in the same
+   * turn, so a `close` cannot land between the check and the write landing on the
+   * project's queue.
+   */
+  private requireOpen(id: RecordingId): OpenProject {
+    const open = this.open.get(id);
+    if (open === undefined) throw new UnknownRecordingError(id);
+    return open;
+  }
+
   /**
    * Move a project through the lifecycle enum of §2.2.
    *
@@ -727,6 +860,11 @@ export class ProjectStore {
         await this.writeSnapshot(open);
         await open.journal.truncate();
       } finally {
+        // Event logs close first and unconditionally: they hold un-`fsync`'d cursor
+        // samples, and the lock must not be released while a handle on a file inside
+        // the bundle is still open.
+        for (const writer of open.eventLogs.values()) await writer.close();
+        open.eventLogs.clear();
         await open.journal.close();
         await open.lock.release();
       }
