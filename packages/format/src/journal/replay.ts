@@ -12,11 +12,13 @@
  *    A journal is a write-ahead log; a hole in it means the tail is not trustworthy,
  *    and applying past a hole would silently reorder a user's edits.
  *
- * The schema rule of §2.7 holds here as it does for every other file in a bundle:
- * *"**Never** silently accept an unknown schema — refuse to open and say so."* A
- * journal whose header names a version this build does not understand yields no
- * entries at all, because replaying its lines under v1 assumptions is exactly the
- * guessing the rule forbids.
+ * §2.7's *"**Never** silently accept an unknown schema"* holds here too: a journal
+ * whose header names a version this build does not understand yields no entries at
+ * all, because replaying its lines under v1 assumptions is exactly the guessing the
+ * rule forbids. Where the journal differs from every other file in a bundle is what
+ * the caller does with that: `readBundle` reports it as `journalRejected` and opens
+ * from `edit.json` alone rather than refusing, because a header this build cannot
+ * read must not make a recording permanently unopenable.
  */
 
 import { migrateDocument, type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';

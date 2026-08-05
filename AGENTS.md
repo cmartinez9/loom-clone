@@ -83,7 +83,10 @@ timestamped artifacts (`media/`, `events/`, `cursors/`, `thumbs/`) plus a separa
 versioned `edit.json` describing how to compose them. Nothing is baked into pixels
 until export. Every file carries `"schema": "<family>/<n>"` on line one and every read
 runs **parse → migrate → validate**; an unknown or future schema is refused, never
-guessed at. Writes go through `writeAtomic` (temp file, `fsync`, `rename`, then
+guessed at — except `edit.journal.ndjson`, which degrades instead: its entries are
+withheld and the file is preserved aside, but the recording still opens from its
+`edit.json`, because an unreadable header must not brick a recording.
+Writes go through `writeAtomic` (temp file, `fsync`, `rename`, then
 `fsync` the directory — the last step is the one people leave out). Edits are appended
 to `edit.journal.ndjson` as one op per line and snapshotted into `edit.json` on a
 debounce, so an editor crash costs at most 250 ms.
