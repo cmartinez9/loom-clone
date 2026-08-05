@@ -106,9 +106,15 @@ const PLAY_FRAME_FLOOR = 60;
  * them is assumed.
  *
  * A spin covers `framesPerSpin(hz)` frames, which *rises* with the refresh rate — 3
- * frames at 60 Hz, 6 at 120, 11 at 240 — so the two guards below take opposite ends of
- * that range. The floors have to survive the panel that produces the fewest spins per
- * frame, and the ratio the one that produces the most.
+ * frames at 60 Hz, 6 at 120, 11 at 240 — so the two guards below read opposite ends of
+ * that range, because they ask opposite questions of it. The **ratio cap** asks how
+ * many frames one control sample may stand for, and so takes the largest that number
+ * ever gets: the **fastest** panel's 11, since anything smaller fails a healthy run on
+ * a panel the gate does not get to choose. The **floors** convert the frame floors
+ * above into spins, and so take the **slowest** panel's 3 — where a spin covers the
+ * fewest frames, and a phase that measured only the floor's worth of them therefore has
+ * the most spins to show for it. That asymmetry is the point: the floors are the tight
+ * half of the pair and the ratio the loose one.
  */
 const SLOWEST_PANEL_HZ = 60;
 const FASTEST_PANEL_HZ = 240;
