@@ -36,6 +36,7 @@ npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
+node scripts/smoke-capture.mjs --synthetic       # ...with a canvas in place of the screen
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
 ```
 
@@ -147,7 +148,32 @@ rewriting a growing JSON once a second for the length of the recording.
   so it cannot pass vacuously.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
-  trap 6).
+  trap 6). See the carried-forward obligations below.
+
+## Carried forward to phase 2: three things no dev run has verified
+
+Phase 1 shipped with these **unverified**, not verified-and-passing. They are
+obligations on phase 2's signed-bundle gate, and until that gate runs, no report may
+describe them as working:
+
+1. **`desktopCapturer` screen enumeration.**
+2. **`setDisplayMediaRequestHandler`'s frame authorisation** — that the real handler
+   hands a source to the capture page and refuses every other frame.
+3. **`setContentProtection(true)` actually keeping the recorder HUD out of captured
+   frames.** `windows.test.ts` asserts the flag is set on the role; nothing has
+   watched the pixels.
+
+Why they are open: a machine that has not granted Screen Recording to the *terminal*
+cannot run the leg that would prove any of them, and granting it to a dev binary
+proves the wrong thing anyway, because a dev build inherits the terminal's TCC (§7,
+trap 6) — a pass there would not predict a packaged build.
+
+What *is* covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
+replaces only `navigator.mediaDevices.getDisplayMedia`, in the real capture page, and
+drives the shipped `MediaStreamTrackProcessor` → `VideoEncoder` → encoded-chunk IPC →
+`ProjectStore` → fragmented MP4 → finalize path end to end. Without `--synthetic` the
+script refuses to start when the grant is missing and names what to grant, rather than
+failing three layers down in `desktopCapturer` with "Failed to get sources".
 
 ## Maintaining this file
 

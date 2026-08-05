@@ -47,6 +47,13 @@ To check that screen capture really works on this machine, end to end:
 npm run build && node scripts/smoke-capture.mjs
 ```
 
+That needs Screen Recording granted to your terminal, and stops with instructions if
+it is missing. Adding `--synthetic` puts a canvas where the display source would be
+and runs everything below it for real, so it works without the grant — at the cost of
+covering neither `desktopCapturer`, nor the `getDisplayMedia` authorisation, nor
+`setContentProtection`. Those three remain unverified in a dev environment and are
+carried forward to phase 2's signed-bundle gate; `AGENTS.md` records them.
+
 ## How it is put together
 
 ```

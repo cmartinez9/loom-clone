@@ -1,17 +1,28 @@
 /**
- * Record the screen for real, once, and say what came out.
+ * Record once through the real capture page, and say what came out.
  *
- *   npm run build && node scripts/smoke-capture.mjs [--seconds 4]
+ *   npm run build && node scripts/smoke-capture.mjs [--seconds 4] [--synthetic]
  *
  * The automated gate replays encoded frames from a fixture, because a CI runner has
  * no display, no GPU and no Screen Recording grant. That covers everything from the
- * IPC boundary down. This covers the part above it: `getDisplayMedia` →
- * `MediaStreamTrackProcessor` → `VideoEncoder` → IPC, driven by the same
- * `RecorderSession` the app runs, on a real machine.
+ * IPC boundary down. This covers the part above it: `MediaStreamTrackProcessor` →
+ * `VideoEncoder` → IPC, driven by the same `RecorderSession` the app runs, on a real
+ * machine.
  *
- * It needs a display and Screen Recording granted to whatever runs it — in
- * development that is inherited from the terminal, which is also why it is not a
- * substitute for phase 2's signed-bundle gate (research report §7, trap 6).
+ * ## Which mode to run, and what each one is worth
+ *
+ * Default — the real screen. Needs a display and Screen Recording granted to
+ * whatever runs it; in development that is inherited from the terminal, which is
+ * also why it is not a substitute for phase 2's signed-bundle gate (research report
+ * §7, trap 6). Without the grant it stops before it records anything and says so.
+ *
+ * `--synthetic` — a canvas stream in place of the display source, and nothing else
+ * changed. It runs where the grant is absent, and exercises the whole renderer path
+ * for real, but it deliberately does **not** exercise `desktopCapturer` enumeration,
+ * `setDisplayMediaRequestHandler`'s frame authorisation, or `setContentProtection`
+ * keeping the HUD out of the frames. Those are carried forward as phase 2
+ * signed-bundle obligations; see `AGENTS.md`. Do not report a synthetic run as
+ * proof of them.
  */
 
 import { build } from 'esbuild';
@@ -24,6 +35,9 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = join(root, 'dist');
 
+/** The child's "Screen Recording is not granted" exit code. It prints its own advice. */
+const EXIT_NO_SCREEN_PERMISSION = 3;
+
 function arg(name, fallback) {
   const at = process.argv.indexOf(`--${name}`);
   return at < 0 ? fallback : process.argv[at + 1];
@@ -31,6 +45,7 @@ function arg(name, fallback) {
 
 const seconds = arg('seconds', '4');
 const keep = process.argv.includes('--keep');
+const synthetic = process.argv.includes('--synthetic');
 
 if (!existsSync(join(dist, 'renderer', 'capture.html'))) {
   console.error('dist/renderer/capture.html is missing. Run `npm run build` first.');
@@ -41,7 +56,15 @@ const scratch = mkdtempSync(join(tmpdir(), 'loom-smoke-'));
 const entry = join(scratch, 'smoke-main.cjs');
 const recordingsRoot = join(scratch, 'recordings');
 
+// `process.exit` skips a `finally`, so the scratch directory used to outlive every
+// failing run. Every exit path here returns a code instead.
 try {
+  process.exitCode = await run();
+} finally {
+  if (!keep) rmSync(scratch, { recursive: true, force: true });
+}
+
+async function run() {
   await build({
     entryPoints: [join(root, 'apps/main/test/helpers/smoke-capture-main.ts')],
     outfile: entry,
@@ -56,14 +79,27 @@ try {
   const electron = join(root, 'node_modules/.bin/electron');
   const result = spawnSync(
     electron,
-    [entry, '--root', recordingsRoot, '--dist', dist, '--seconds', seconds],
+    [
+      entry,
+      '--root',
+      recordingsRoot,
+      '--dist',
+      dist,
+      '--seconds',
+      seconds,
+      ...(synthetic ? ['--synthetic'] : []),
+    ],
     { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'inherit'] },
   );
+
+  // The child has already explained this one on stderr, in more detail than we
+  // could from here. Adding a second opinion would only bury it.
+  if (result.status === EXIT_NO_SCREEN_PERMISSION) return EXIT_NO_SCREEN_PERMISSION;
 
   const line = (result.stdout ?? '').trim().split('\n').filter(Boolean).at(-1);
   if (result.status !== 0 || line === undefined) {
     console.error(`the smoke capture did not complete (exit ${String(result.status)}).`);
-    process.exit(1);
+    return 1;
   }
 
   const report = JSON.parse(line);
@@ -76,11 +112,7 @@ try {
 
   if (problems.length > 0) {
     console.error(`\ncapture problems:\n  ${problems.join('\n  ')}`);
-    console.error(
-      '\nIf frames are missing, check that Screen Recording is granted to the terminal ' +
-        'running this (System Settings > Privacy & Security > Screen & System Audio Recording).',
-    );
-    process.exit(1);
+    return 1;
   }
 
   // The same independent playability check the gate uses.
@@ -93,7 +125,7 @@ try {
     );
     if (probe.status !== 0) {
       console.error(`AVFoundation could not read ${media}`);
-      process.exit(1);
+      return 1;
     }
     console.log('AVFoundation read the recording back.');
   }
@@ -103,7 +135,13 @@ try {
       `(${report.observedFps.toFixed(1)} fps observed, ${report.droppedFrames} dropped) ` +
       `at ${report.size?.join('x') ?? '?'} as ${report.codec ?? '?'}`,
   );
+  if (report.source === 'synthetic') {
+    console.log(
+      'Source: SYNTHETIC. The renderer path above is real; the display source was a\n' +
+        'canvas. desktopCapturer enumeration, setDisplayMediaRequestHandler and\n' +
+        'setContentProtection are NOT covered by this run.',
+    );
+  }
   if (keep) console.log(`kept: ${report.path}`);
-} finally {
-  if (!keep) rmSync(scratch, { recursive: true, force: true });
+  return 0;
 }
