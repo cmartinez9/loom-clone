@@ -219,6 +219,89 @@ export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
 };
 
 /**
+ * Longest microphone or camera device id a renderer may name.
+ *
+ * A `deviceId` from `enumerateDevices` is a 64-character hash. The bound is here
+ * because the value is handed straight back to the capture page as a constraint,
+ * and an unbounded string from a renderer is a payload rather than a device.
+ */
+const MAX_DEVICE_ID_LENGTH = 200;
+
+/**
+ * The shape check every `CaptureOptions` message from a renderer goes through.
+ *
+ * Our own code sends these, which is exactly why they are checked: the renderer is
+ * the process most likely to be compromised, and it is the one that must never be
+ * able to name a path, an unbounded allocation, or a track it is not recording.
+ *
+ * It lives beside {@link DEFAULT_CAPTURE_OPTIONS} rather than in whichever handler
+ * happened to need it first, because there is more than one handler taking this
+ * shape — `recorder.start` and `recorder.preflight` — and a second, laxer reading of
+ * the same message is how a sanitizer gets quietly bypassed. Every field it does not
+ * recognise falls through to the defaults, which is what decides the capture.
+ */
+export function requestedCaptureOptions(raw: unknown): Partial<CaptureOptions> {
+  if (raw === null || typeof raw !== 'object') return {};
+  const input = raw as Record<string, unknown>;
+  const out: Partial<CaptureOptions> = {};
+  if (typeof input['displayId'] === 'number' && Number.isInteger(input['displayId'])) {
+    out.displayId = input['displayId'];
+  }
+  if (typeof input['fps'] === 'number' && input['fps'] > 0 && input['fps'] <= 120) {
+    out.fps = Math.round(input['fps']);
+  }
+  const max = input['maxDimension'];
+  if (typeof max === 'number' && max >= 320 && max <= 7680) out.maxDimension = Math.round(max);
+  const bitrate = input['bitrate'];
+  if (typeof bitrate === 'number' && bitrate >= 100_000 && bitrate <= 200_000_000) {
+    out.bitrate = Math.round(bitrate);
+  }
+  // Strict booleans, not truthiness: a renderer that sends `0` or `''` for
+  // `systemAudio` is malformed, and reading it as "off" would answer a question it
+  // did not ask. An absent or out-of-range field falls through to
+  // `DEFAULT_CAPTURE_OPTIONS`, which is what decides whether a microphone opens.
+  if (typeof input['systemAudio'] === 'boolean') out.systemAudio = input['systemAudio'];
+  if (typeof input['micVoiceProcessing'] === 'boolean') {
+    out.micVoiceProcessing = input['micVoiceProcessing'];
+  }
+  const mic = input['micDeviceId'];
+  if (mic === null) out.micDeviceId = null;
+  else if (typeof mic === 'string' && mic.length > 0 && mic.length <= MAX_DEVICE_ID_LENGTH) {
+    out.micDeviceId = mic;
+  }
+  const audioBitrate = input['audioBitrate'];
+  if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
+    out.audioBitrate = Math.round(audioBitrate);
+  }
+  const webcam = input['webcamDeviceId'];
+  if (webcam === null) out.webcamDeviceId = null;
+  else if (
+    typeof webcam === 'string' &&
+    webcam.length > 0 &&
+    webcam.length <= MAX_DEVICE_ID_LENGTH
+  ) {
+    out.webcamDeviceId = webcam;
+  }
+  const webcamFps = input['webcamFps'];
+  if (typeof webcamFps === 'number' && webcamFps > 0 && webcamFps <= 120) {
+    out.webcamFps = Math.round(webcamFps);
+  }
+  const webcamMax = input['webcamMaxDimension'];
+  if (typeof webcamMax === 'number' && webcamMax >= 160 && webcamMax <= 7680) {
+    out.webcamMaxDimension = Math.round(webcamMax);
+  }
+  const webcamBitrate = input['webcamBitrate'];
+  if (
+    typeof webcamBitrate === 'number' &&
+    webcamBitrate >= 100_000 &&
+    webcamBitrate <= 200_000_000
+  ) {
+    out.webcamBitrate = Math.round(webcamBitrate);
+  }
+  return out;
+}
+
+/**
  * The constraints the system-audio track is captured with. **Research trap 3.**
  *
  * Left at their defaults, macOS hands back a *mono* loopback track with echo

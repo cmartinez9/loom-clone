@@ -59,14 +59,20 @@ export interface AccessibilityDetail {
    */
   tapLive: boolean | null;
   /**
-   * `true` once this app has sent the user to the Accessibility pane in this
-   * process's lifetime.
+   * `true` while this app has sent the user to the Accessibility pane and does not
+   * yet know what came of it.
    *
    * This is the half of the restart problem phase 5 explicitly left to phase 2. From
    * inside the sampler, "the user just switched us on in System Settings but
    * `AXIsProcessTrusted()` has not caught up" is indistinguishable from "never
    * granted". Only the side that opened the pane knows the difference is worth
    * offering a relaunch over.
+   *
+   * It is deliberately *not* "has ever asked". The ask outlives the process that
+   * made it — that is the whole reason it is on disk — but a relaunch that comes back
+   * with `axTrusted` still `false` has answered it, and the prober spends it there.
+   * Left standing, this field turns {@link AccessibilityConclusion} into
+   * `relaunch-to-find-out` on every launch for the rest of the install.
    */
   settingsOpened: boolean;
 }

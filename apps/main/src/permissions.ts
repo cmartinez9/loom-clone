@@ -30,6 +30,7 @@ import { app, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  requestedCaptureOptions,
   type CaptureOptions,
   type PreflightReport,
 } from '@loom/ipc';
@@ -161,6 +162,11 @@ export class PermissionManager {
    * window that comes back knows why it came back.
    */
   private accessibilityAsked = false;
+  /**
+   * Set once this process has spent the persisted ask on its own launch, so the
+   * clear is attempted once rather than on every probe while the write is in flight.
+   */
+  private accessibilityAskAnswered = false;
   private last: PermissionReport | null = null;
   /**
    * Settings writes started by this class, serialized.
@@ -194,7 +200,7 @@ export class PermissionManager {
     const accessibility: AccessibilityDetail = {
       axTrusted,
       tapLive: await this.probeTap(axTrusted),
-      settingsOpened: this.accessibilityEverAsked(),
+      settingsOpened: this.accessibilityEverAsked(axTrusted),
     };
 
     const report: PermissionReport = {
@@ -226,16 +232,54 @@ export class PermissionManager {
   }
 
   /**
-   * Whether this app has ever pointed the user at the Accessibility pane — in this
-   * session, or in one before it.
+   * Whether this app has pointed the user at the Accessibility pane and is still
+   * waiting to find out what came of it.
    *
    * Read on every probe rather than latched once. `settings.json` is loaded
    * asynchronously at launch, so anything that reads it at construction time is
    * reading the fresh-install default, and the relaunch offer this field exists to
    * survive is exactly what would be lost.
+   *
+   * **The persisted ask survives exactly one relaunch, because one relaunch is what
+   * it exists to answer.** If it came from a process that is not this one, then a
+   * relaunch has already happened — and an `axTrusted` of `false` here *is* the
+   * answer: the grant was not given. Spending the timestamp at that point is what
+   * stops {@link concludeAccessibility} returning `relaunch-to-find-out` on every
+   * launch for the rest of the install, which offers a Relaunch button that cannot
+   * change anything and holds the setup window's refusal card permanently open. What
+   * the user gets back is the ordinary `not-granted` row, with its Allow button.
+   *
+   * Within the session that asked, nothing changes: `accessibilityAsked` short-
+   * circuits this, the conclusion stays `relaunch-to-find-out`, and the relaunch it
+   * offers is still the right next step.
    */
-  private accessibilityEverAsked(): boolean {
-    return this.accessibilityAsked || this.options.store.setup.accessibilityOpenedAt !== null;
+  private accessibilityEverAsked(axTrusted: boolean): boolean {
+    if (this.accessibilityAsked) return true;
+    if (this.accessibilityAskAnswered) return false;
+    if (this.options.store.setup.accessibilityOpenedAt === null) return false;
+    // Granted is not an answer that needs spending: the conclusion no longer reads
+    // this field, and a grant revoked later comes back through the branch below.
+    if (axTrusted) return true;
+    this.forgetAccessibilityAsked();
+    return false;
+  }
+
+  /**
+   * Drop the persisted ask, because the relaunch it was waiting for has happened.
+   *
+   * Chained onto {@link pending} like the write that made it, so the two cannot
+   * cross: an "Allow" pressed moments later must land *after* this clear, not be
+   * erased by it.
+   */
+  private forgetAccessibilityAsked(): void {
+    this.accessibilityAskAnswered = true;
+    this.pending = this.pending
+      .then(() => this.options.store.updateSetup({ accessibilityOpenedAt: null }))
+      .catch((error: unknown) => {
+        // Costs one more launch showing the stale relaunch offer, nothing else. The
+        // next launch tries again.
+        console.error('[permissions] could not clear the accessibility ask:', error);
+      });
   }
 
   /**
@@ -381,6 +425,7 @@ export class PermissionManager {
    */
   private rememberAccessibilityAsked(): void {
     this.accessibilityAsked = true;
+    this.accessibilityAskAnswered = false;
     const at = new Date().toISOString();
     this.pending = this.pending
       .then(() => this.options.store.updateSetup({ accessibilityOpenedAt: at }))
@@ -482,8 +527,10 @@ export class PermissionManager {
     ipcMain.handle(
       CHANNEL.recorderPreflight,
       (_event: IpcMainInvokeEvent, raw: unknown): Promise<PreflightReport> => {
-        const requested = typeof raw === 'object' && raw !== null ? raw : {};
-        return this.preflight({ ...DEFAULT_CAPTURE_OPTIONS, ...requested });
+        // The same sanitizer `recorder.start` runs, and for the same reason: this is
+        // a message from a renderer, and phases 3 and 4 make these fields load-bearing
+        // here. Two readings of one message is how the checked one gets bypassed.
+        return this.preflight({ ...DEFAULT_CAPTURE_OPTIONS, ...requestedCaptureOptions(raw) });
       },
     );
 

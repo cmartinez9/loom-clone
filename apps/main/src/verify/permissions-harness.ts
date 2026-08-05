@@ -281,7 +281,19 @@ async function checkFrameAuthorisation(windows: WindowRegistry): Promise<CheckRe
   // A window that is emphatically not the capture page. The library is a real,
   // registered window with the real preload — the most credible impostor there is.
   const window = windows.show('library');
-  await whenReady(window);
+  try {
+    await whenReady(window);
+  } catch (error) {
+    return {
+      id,
+      title,
+      obligation,
+      status: 'blocked',
+      detail:
+        `The library window never loaded: ${message(error)}. Nothing was asked of ` +
+        '`getDisplayMedia`, so this says nothing about the handler.',
+    };
+  }
 
   let outcome: { ok: boolean; error: string };
   try {
@@ -370,7 +382,20 @@ async function checkContentProtection(windows: WindowRegistry): Promise<CheckRes
   // The real HUD, with the real role, so the flag under test is the shipped one.
   const hud = windows.show('recorder-hud');
   hud.setBounds(protectedBounds);
-  await whenReady(hud);
+  try {
+    await whenReady(hud);
+  } catch (error) {
+    return {
+      id,
+      title,
+      obligation,
+      status: 'blocked',
+      detail:
+        `The recorder HUD never loaded: ${message(error)}. A window that did not paint is ` +
+        'absent from a capture whether or not content protection works, so there is nothing ' +
+        'here to conclude from.',
+    };
+  }
   await paintMarker(hud);
 
   // The control: identical in every respect except the flag.
@@ -385,7 +410,19 @@ async function checkContentProtection(windows: WindowRegistry): Promise<CheckRes
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
   });
   try {
-    await control.loadURL(appUrl('recorder.html'));
+    try {
+      await control.loadURL(appUrl('recorder.html'));
+    } catch (error) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          `The control window never loaded: ${message(error)}. Without a control that shows ` +
+          'the marker, an absence of it in the protected window is not evidence of anything.',
+      };
+    }
     control.showInactive();
     await paintMarker(control);
     await delay(700);
@@ -690,13 +727,60 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * A backstop for the load that neither finishes nor fails, not a performance bound:
+ * every window here loads a local `loom://` page, and the margin over that is
+ * enormous.
+ */
+const WINDOW_LOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * Wait for a window to finish loading, or say why it never will.
+ *
+ * Resolving only on `did-finish-load` is a hang waiting for a bad `loom://app` path
+ * or a protocol handler that threw: the check awaits forever, `runVerification` never
+ * returns, no report is printed and `app.exit()` is never reached — and the runner,
+ * blocked on `open --wait-apps`, hangs with it. A gate whose whole value is naming
+ * precisely what is blocking it must not have silence as a failure mode, so both
+ * other outcomes become a thrown reason, which the caller reports as `blocked`.
+ */
 async function whenReady(window: BrowserWindow): Promise<void> {
-  if (!window.webContents.isLoading()) return;
-  await new Promise<void>((resolve) => {
-    window.webContents.once('did-finish-load', () => {
-      resolve();
+  const contents = window.webContents;
+  if (!contents.isLoading()) return;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `still loading after ${String(WINDOW_LOAD_TIMEOUT_MS)} ms — it neither finished ` +
+              'nor reported a failure',
+          ),
+        );
+      }, WINDOW_LOAD_TIMEOUT_MS);
+      contents.once('did-finish-load', () => {
+        resolve();
+      });
+      contents.once(
+        'did-fail-load',
+        (
+          _event,
+          errorCode: number,
+          errorDescription: string,
+          url: string,
+          isMainFrame: boolean,
+        ) => {
+          // A subframe that fails is not this page failing to load, and none of these
+          // pages has one; rejecting on it would report the wrong thing.
+          if (!isMainFrame) return;
+          reject(new Error(`failed to load ${url}: ${errorDescription} (${String(errorCode)})`));
+        },
+      );
     });
-  });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function message(error: unknown): string {

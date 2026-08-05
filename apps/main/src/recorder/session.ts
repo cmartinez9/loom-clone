@@ -45,6 +45,7 @@ import {
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  requestedCaptureOptions,
   type AudioTrackFacts,
   type AudioTrackReport,
   type AudioTrackSettings,
@@ -139,11 +140,13 @@ const MAX_PLAUSIBLE_TRACK_OFFSET_SEC = 1;
 const MAX_REPORTED_GAPS = 1024;
 
 /**
- * Longest microphone device id a renderer may name.
+ * Longest device id a renderer may name in a track's facts.
  *
  * A `deviceId` from `enumerateDevices` is a 64-character hash. The bound is here
- * because the value is handed straight back to the capture page as a constraint,
- * and an unbounded string from a renderer is a payload rather than a device.
+ * because the value is written into `recording.json` as the device a part came from,
+ * and an unbounded string from a renderer is a payload rather than a device. The
+ * same bound guards the ids a renderer *asks* for; that copy lives beside
+ * `requestedCaptureOptions` in `@loom/ipc`.
  */
 const MAX_DEVICE_ID_LENGTH = 200;
 
@@ -312,7 +315,7 @@ export class RecorderSession {
 
     ipcMain.handle(CHANNEL.recorderStart, async (event, raw: unknown) => {
       this.requireRecorderWindow(event);
-      const id = await this.enqueue(() => this.start(captureOptions(raw)));
+      const id = await this.enqueue(() => this.start(requestedCaptureOptions(raw)));
       return { recordingId: id };
     });
 
@@ -1691,67 +1694,12 @@ function videoTrack(active: Active, track: VideoTrackKey): ActiveVideo {
  * Our own code sends these, which is exactly why they are checked: the renderer is
  * the process most likely to be compromised, and it is the one that must never be
  * able to name a path, an unbounded allocation, or a track it is not recording.
+ *
+ * `CaptureOptions` is checked by `requestedCaptureOptions` in `@loom/ipc` rather than
+ * here: `recorder.start` is not the only handler taking that shape —
+ * `recorder.preflight` takes it too — and one sanitizer beside the contract is the
+ * only arrangement in which a second handler cannot quietly read the message laxly.
  */
-function captureOptions(raw: unknown): Partial<CaptureOptions> {
-  if (raw === null || typeof raw !== 'object') return {};
-  const input = raw as Record<string, unknown>;
-  const out: Partial<CaptureOptions> = {};
-  if (typeof input['displayId'] === 'number' && Number.isInteger(input['displayId'])) {
-    out.displayId = input['displayId'];
-  }
-  if (typeof input['fps'] === 'number' && input['fps'] > 0 && input['fps'] <= 120) {
-    out.fps = Math.round(input['fps']);
-  }
-  const max = input['maxDimension'];
-  if (typeof max === 'number' && max >= 320 && max <= 7680) out.maxDimension = Math.round(max);
-  const bitrate = input['bitrate'];
-  if (typeof bitrate === 'number' && bitrate >= 100_000 && bitrate <= 200_000_000) {
-    out.bitrate = Math.round(bitrate);
-  }
-  // Strict booleans, not truthiness: a renderer that sends `0` or `''` for
-  // `systemAudio` is malformed, and reading it as "off" would answer a question it
-  // did not ask. An absent or out-of-range field falls through to
-  // `DEFAULT_CAPTURE_OPTIONS`, which is what decides whether a microphone opens.
-  if (typeof input['systemAudio'] === 'boolean') out.systemAudio = input['systemAudio'];
-  if (typeof input['micVoiceProcessing'] === 'boolean') {
-    out.micVoiceProcessing = input['micVoiceProcessing'];
-  }
-  const mic = input['micDeviceId'];
-  if (mic === null) out.micDeviceId = null;
-  else if (typeof mic === 'string' && mic.length > 0 && mic.length <= MAX_DEVICE_ID_LENGTH) {
-    out.micDeviceId = mic;
-  }
-  const audioBitrate = input['audioBitrate'];
-  if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
-    out.audioBitrate = Math.round(audioBitrate);
-  }
-  const webcam = input['webcamDeviceId'];
-  if (webcam === null) out.webcamDeviceId = null;
-  else if (
-    typeof webcam === 'string' &&
-    webcam.length > 0 &&
-    webcam.length <= MAX_DEVICE_ID_LENGTH
-  ) {
-    out.webcamDeviceId = webcam;
-  }
-  const webcamFps = input['webcamFps'];
-  if (typeof webcamFps === 'number' && webcamFps > 0 && webcamFps <= 120) {
-    out.webcamFps = Math.round(webcamFps);
-  }
-  const webcamMax = input['webcamMaxDimension'];
-  if (typeof webcamMax === 'number' && webcamMax >= 160 && webcamMax <= 7680) {
-    out.webcamMaxDimension = Math.round(webcamMax);
-  }
-  const webcamBitrate = input['webcamBitrate'];
-  if (
-    typeof webcamBitrate === 'number' &&
-    webcamBitrate >= 100_000 &&
-    webcamBitrate <= 200_000_000
-  ) {
-    out.webcamBitrate = Math.round(webcamBitrate);
-  }
-  return out;
-}
 
 /** A `PartEndReason`, or `undefined` when the value is not one. */
 function partEndReason(value: unknown): PartEndReason | undefined {

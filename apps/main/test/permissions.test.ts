@@ -265,21 +265,66 @@ describe('requesting', () => {
     expect(store.setup.accessibilityOpenedAt).not.toBeNull();
   });
 
-  it('remembers the ask across a relaunch, which is the whole point of persisting it', async () => {
+  it('offers the relaunch for the rest of the session that asked', async () => {
+    const manager = makeManager();
+    const report = await manager.request('accessibility');
+    expect(report.accessibility.settingsOpened).toBe(true);
+    // And still, several probes later: the question is open until a new process
+    // looks.
+    expect((await manager.probe()).accessibility.settingsOpened).toBe(true);
+  });
+
+  it('spends the persisted ask on the relaunch it was waiting for', async () => {
     await makeManager().request('accessibility');
 
     // The process that comes back, built the way `index.ts` builds one: a fresh store
     // over the same settings file, and — the part that matters — a manager
     // constructed *before* those settings have been read, because loading them is
-    // asynchronous and the manager is not. Reading `store.setup` at construction
-    // therefore reads the fresh-install default, and this launch shows the user
-    // "Allow" again instead of the relaunch they just performed.
+    // asynchronous and the manager is not. It has to read the persisted ask, which is
+    // the only reason there is anything here to spend.
+    const restarted = reopenStore();
+    const afterRestart = makeManager(null, restarted);
+    await restarted.loadSettings();
+
+    // The relaunch has happened and `axTrusted` is still false, so it has answered:
+    // the grant was not given. Left standing, the timestamp pins every future launch
+    // in `relaunch-to-find-out` — a Relaunch button that can never change anything,
+    // beside a refusal card that never closes.
+    const report = await afterRestart.probe();
+    expect(report.accessibility.settingsOpened).toBe(false);
+
+    await afterRestart.whenSettled();
+    expect(restarted.setup.accessibilityOpenedAt).toBeNull();
+    // On disk too, not just in the store this manager holds.
+    const reread = reopenStore();
+    await reread.loadSettings();
+    expect(reread.setup.accessibilityOpenedAt).toBeNull();
+  });
+
+  it('does not spend it when the relaunch came back with the grant', async () => {
+    await makeManager().request('accessibility');
+
+    harness.axTrusted = true;
     const restarted = reopenStore();
     const afterRestart = makeManager(null, restarted);
     await restarted.loadSettings();
 
     const report = await afterRestart.probe();
+    expect(report.accessibility.axTrusted).toBe(true);
+    await afterRestart.whenSettled();
+    expect(restarted.setup.accessibilityOpenedAt).not.toBeNull();
+  });
+
+  it('asking again after the ask was spent re-arms the relaunch offer', async () => {
+    await makeManager().request('accessibility');
+    const restarted = reopenStore();
+    const afterRestart = makeManager(null, restarted);
+    await restarted.loadSettings();
+    await afterRestart.probe();
+
+    const report = await afterRestart.request('accessibility');
     expect(report.accessibility.settingsOpened).toBe(true);
+    expect(restarted.setup.accessibilityOpenedAt).not.toBeNull();
   });
 });
 

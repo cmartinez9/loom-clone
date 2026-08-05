@@ -204,7 +204,15 @@ async function ensureIdentity(appPath, wantedId) {
  * the gate exists to catch. `--wait-apps` keeps `open` alive until the app exits, and
  * `--stdout`/`--stderr` route its output to files we then read, because a
  * LaunchServices-started app has no inherited stdio.
+ *
+ * `--wait-apps` waits for the app to exit and nothing bounds that, so a harness that
+ * never reaches `app.exit()` hangs this script too — a silent terminal in place of
+ * the diagnosis this tool exists to give. {@link LAUNCH_TIMEOUT_MS} bounds it. The
+ * whole run is a handful of window loads plus a ten-second click window; the margin
+ * is for a slow first launch and Gatekeeper, not for a check that is thinking.
  */
+const LAUNCH_TIMEOUT_MS = 4 * 60_000;
+
 async function launch(appPath) {
   const stdoutPath = join(root, '.verify-stdout.log');
   const stderrPath = join(root, '.verify-stderr.log');
@@ -212,6 +220,7 @@ async function launch(appPath) {
   await writeFile(stderrPath, '');
 
   console.log('  launching via LaunchServices (open -a)…\n');
+  let timedOut = false;
   const code = await new Promise((resolveCode) => {
     const child = spawn(
       '/usr/bin/open',
@@ -229,14 +238,24 @@ async function launch(appPath) {
       ],
       { stdio: 'inherit' },
     );
-    child.on('close', resolveCode);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Kills the waiting `open`, not the app: LaunchServices owns that process and
+      // this script never had it. Saying so is the point — a stuck app the developer
+      // cannot see is worse than one they have been told to quit.
+      child.kill('SIGTERM');
+    }, LAUNCH_TIMEOUT_MS);
+    child.on('close', (closeCode) => {
+      clearTimeout(timer);
+      resolveCode(closeCode);
+    });
   });
 
   const stdout = await readFile(stdoutPath, 'utf8').catch(() => '');
   const stderr = await readFile(stderrPath, 'utf8').catch(() => '');
   await rm(stdoutPath, { force: true });
   await rm(stderrPath, { force: true });
-  return { openExit: code, stdout, stderr };
+  return { openExit: code, stdout, stderr, timedOut };
 }
 
 function slice(stdout) {
@@ -301,11 +320,21 @@ async function main() {
 
   await ensureIdentity(appPath, wantedId);
 
-  const { stdout, stderr } = await launch(appPath);
+  const { stdout, stderr, timedOut } = await launch(appPath);
   // The app's own human-readable summary. Printed first, because it is the thing a
   // person actually wants to read.
   const human = stdout.split(BEGIN)[0]?.trimEnd() ?? '';
   if (human !== '') console.log(human);
+
+  if (timedOut) {
+    if (stderr !== '') console.error(stderr);
+    fail(
+      `the app did not exit within ${LAUNCH_TIMEOUT_MS / 1000}s and produced no report. ` +
+        'Everything it managed to print is above — the last check named there is the one ' +
+        `that did not come back.\n  Quit "Loom Clone" (it is still running) before ` +
+        're-running this.',
+    );
+  }
 
   const scratch = stdout
     .split('\n')

@@ -111,15 +111,21 @@ it is missing. It prints what each audio device claimed, what it actually ran at
 where each track started relative to the first frame. Adding `--synthetic` puts a
 canvas and an oscillator where the real sources would be and runs everything below
 them for real, so it works without the grant — at the cost of covering neither
-`desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`,
-nor whether macOS honours the constraints on a real loopback track. None of those can
-be settled by any dev run: in development macOS permissions are inherited from the
-terminal, so a pass there says nothing about the shipped app. They are answered from a
-signed bundle instead:
+`desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`.
+Those three cannot be settled by any dev run: in development macOS permissions are
+inherited from the terminal, so a pass there says nothing about the shipped app. They,
+and only they, are answered from a signed bundle instead:
 
 ```bash
 npm run verify:permissions   # package, sign under the frozen bundle id, run the checks
 ```
+
+That gate has **no audio checks at all**. Whether macOS honours the AEC/NS/AGC-off
+stereo constraints on a real loopback track, and where a real microphone's
+`startTimeSec` actually lands, are phase 3's obligations and both are still open. The
+thing that would answer them is `node scripts/smoke-capture.mjs` **without**
+`--synthetic`, on a machine that has been granted Screen Recording and Microphone —
+not `npm run verify:permissions`.
 
 `AGENTS.md` § Phase 2 gate status is the record of what that has closed and what is
 still waiting on a permission only System Settings can give.
