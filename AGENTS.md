@@ -276,7 +276,11 @@ a gap lives in `recording.json`, never in the container.
   and the decision taken was **not** to touch `FRAME_BUDGET_MS`, add a tolerance or
   switch to a percentile. `test/gate/budget-control.ts` measures what the host itself
   can sustain, in the same frames, and §8's bound is asserted exactly as written
-  wherever that control clears it. Two things keep it from being an escape hatch: on
+  wherever that control clears it. **Clearing it means landing inside the budget, and
+  nothing short of that** (`CLEARS_BUDGET = 1`): a margin — it was 0.8 — let a control
+  reading 14.50 ms, under §8's own number, defer a phase in which an injected 20.20 ms
+  frame was then excused, and made every phase of every clean run on an M5 Pro defer
+  when the compositor was compositing in 0.20 ms. Two things keep it from being an escape hatch: on
   the deferred branch the compositor is still held to the ceiling the control just
   measured, and the harness runs the shipping `PreviewLoop` over a deliberately-slowed
   compositor in the same run, which the gate requires to fail. **A control paced per

@@ -399,7 +399,7 @@ describe('phase 6 gate: 4K scrub and play', () => {
       };
       if (environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)) {
         // The host held the budget through this phase too, so the ceiling its control
-        // earned is at most `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 20 ms
+        // earned is at most `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 25 ms
         // against 66.67 ms of injected burn. The deferred branch's bound is therefore
         // proved here as well, and not only §8's absolute one.
         expect(() => expectTracksControl(slowEvidence), detail).toThrow(

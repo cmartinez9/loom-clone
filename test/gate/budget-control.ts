@@ -26,10 +26,11 @@
  * second apart are not two readings of one machine, and a host that stalls is not
  * stalling a moment later. Then:
  *
- * - **The control holds the budget, with room to spare** → this host can do this, so
- *   the bound is the compositor's and §8 is asserted exactly as it stands.
- * - **The control does not** → the shortfall is *reported*, with the measured figure,
- *   rather than failed on.
+ * - **The control holds the budget** → this host can do this, so the bound is the
+ *   compositor's and §8 is asserted exactly as it stands.
+ * - **The control does not** — it stretched half a frame of arithmetic past a whole
+ *   frame → the shortfall is *reported*, with the measured figure, rather than failed
+ *   on.
  *
  * The second branch is deliberately not an escape hatch. The compositor is never
  * excused from compositing: it must still hold the ceiling the control just measured
@@ -94,18 +95,31 @@ export const CONTROL_PERIOD_MS = FRAME_BUDGET_MS * 2;
  * How far under the budget the control has to land before the budget is the
  * compositor's to meet.
  *
- * The control and the frame are two different workloads sampled in the same frames,
- * not two readings of one quantity, so a control that clears the budget by a hair has
- * not shown the host can hold it: it has shown a host already inflating half a frame
- * of arithmetic by most of a frame. At 0.8 the control may read up to 13.33 ms — a 60%
- * inflation of its 8.33 ms target — before §8's number stops being asserted. A host
- * that genuinely holds the budget clears that by more than 4 ms; this machine's
- * control lands within a fraction of a millisecond of its target.
+ * **One.** The only thing that defers §8's number is a host that has *actually
+ * exceeded* it — that stretched half a frame of arithmetic past a whole frame, and so
+ * cannot promise 16.67 ms to anybody. Anything short of that has not demonstrated it
+ * cannot hold the budget, and does not get to speak for the compositor.
+ *
+ * This was 0.8 for a margin's sake — the control and the frame are two workloads
+ * sampled in the same frames rather than two readings of one quantity, so a control
+ * clearing the budget by a hair is not the same as a host holding it — and the margin
+ * cost more than it bought. It let a control reading 14.50 ms, 2.17 ms *under* §8's
+ * number, route a phase to the deferred branch, where a real 20.20 ms frame from a
+ * regression patched into `Compositor.render` was judged against 21.75 ms and excused.
+ * On this machine, where the compositor composites in 0.20 ms, every phase of every
+ * clean run deferred: the six controls read 17.30 to 34.40 ms against a 13.33 ms bar,
+ * so the absolute pair the gate exists to assert never ran. At 1 those same readings
+ * still defer, honestly, because they are over the budget itself.
+ *
+ * The margin is not lost, only moved to where it cannot excuse a frame: on the
+ * deferred branch {@link TRACKS_CONTROL} is what allows for the two workloads being
+ * sampled separately.
  *
  * This is not a relaxation of the bound. It decides *whose* bound it is, and on the
- * clearing side the bound is asserted exactly as written.
+ * clearing side — now every host that holds the budget at all — the bound is asserted
+ * exactly as written.
  */
-export const CLEARS_BUDGET = 0.8;
+export const CLEARS_BUDGET = 1;
 
 /**
  * How closely the compositor must track a ceiling the host has just shown it cannot
@@ -115,8 +129,8 @@ export const CLEARS_BUDGET = 0.8;
  * a stall lands in one or the other, so the worst frame may legitimately land above
  * the worst spin. Its job is to catch a compositor that is far worse than the host it
  * is running on, which is the compositor's fault however slow that host is — the
- * 66.67 ms deliberately-slowed path in the harness clears this by 3×, on any control
- * reading that could have excused it.
+ * 66.67 ms deliberately-slowed path in the harness clears this by more than 2.5×, on
+ * any control reading that could have excused it.
  */
 export const TRACKS_CONTROL = 1.5;
 
@@ -128,8 +142,8 @@ export const TRACKS_CONTROL = 1.5;
  * line but that it fails whichever branch of the judgement above the host puts it on —
  * §8's absolute number on any host at all, and additionally {@link TRACKS_CONTROL}'s
  * ceiling wherever the phase's own control cleared the budget, since the most such a
- * control can earn is `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` and this clears
- * that by more than three times.
+ * control can earn is `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 25 ms — and
+ * this clears that by more than two and a half times.
  *
  * It lives here, beside the two constants it has to stay in that relation to, rather
  * than in the harness that burns it: the relation is what `test/phase6-gate.test.ts`'s

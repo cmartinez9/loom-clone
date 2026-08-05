@@ -51,8 +51,8 @@ function control(overrides: Partial<ControlPhase> = {}): ControlPhase {
 const HEALTHY = control();
 /** A host that stalled: the same arithmetic, stretched past a whole frame. */
 const STALLED = control({ maxMs: 74.2, overBudget: 2 });
-/** A host that only just clears the budget — which is not the same as holding it. */
-const MARGINAL = control({ maxMs: 15.9 });
+/** A host that only just missed the budget — this machine's smallest real reading. */
+const JUST_OVER = control({ maxMs: 17.3, overBudget: 1 });
 
 function evidence(measured: Partial<BudgetEvidence['measured']>, c: ControlPhase): BudgetEvidence {
   return {
@@ -88,13 +88,18 @@ describe('the frame budget is enforced against a measured environment', () => {
     expect(measured.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
   });
 
-  it('does not treat a control that barely clears the budget as holding it', () => {
-    // Two different workloads sampled in the same frames are not two readings of one
-    // quantity. A host already inflating 8.33 ms of arithmetic to 15.9 ms has not
-    // shown it can promise 16.67 ms to a frame.
-    expect(MARGINAL.maxMs).toBeLessThan(FRAME_BUDGET_MS);
-    expect(environmentSustainsBudget(MARGINAL, FRAME_BUDGET_MS)).toBe(false);
-    expect(MARGINAL.maxMs).toBeGreaterThan(FRAME_BUDGET_MS * CLEARS_BUDGET);
+  it('defers only on a host that actually exceeded the budget', () => {
+    // The line is §8's own number and nothing short of it. A host that kept half a
+    // budget of arithmetic inside a whole budget — even by a hair, even at 15.9 ms —
+    // has not demonstrated it cannot hold the budget, so the bound stays the
+    // compositor's; one that stretched the same arithmetic to 17.3 ms has.
+    expect(CLEARS_BUDGET).toBe(1);
+    expect(environmentSustainsBudget(control({ maxMs: 15.9 }), FRAME_BUDGET_MS)).toBe(true);
+    expect(environmentSustainsBudget(control({ maxMs: FRAME_BUDGET_MS }), FRAME_BUDGET_MS)).toBe(
+      true,
+    );
+    expect(JUST_OVER.maxMs).toBeGreaterThan(FRAME_BUDGET_MS);
+    expect(environmentSustainsBudget(JUST_OVER, FRAME_BUDGET_MS)).toBe(false);
   });
 
   it.each([
@@ -135,7 +140,7 @@ describe('the frame budget is enforced against a measured environment', () => {
     expect(environmentSustainsBudget(HEALTHY, FRAME_BUDGET_MS)).toBe(true);
 
     // And a host that does not still holds the compositor to the ceiling it earned.
-    for (const host of [MARGINAL, STALLED, control({ maxMs: 40, overBudget: 4 })]) {
+    for (const host of [JUST_OVER, STALLED, control({ maxMs: 40, overBudget: 4 })]) {
       const stallMs = host.maxMs - host.targetMs;
       expect(() =>
         expectTracksControl(evidence({ maxMs: SLOWED_MS + stallMs, overBudget: 24 }, host)),
@@ -181,13 +186,47 @@ describe('the frame budget is enforced against a measured environment', () => {
 
     // And on the branch where the throw *is* required — the slow phase's own control
     // cleared the budget — no reading can lift the ceiling that far: the most one can
-    // earn there is 20 ms, against 66.67 ms of burn.
+    // earn there is 25 ms, against 66.67 ms of burn.
     const clearing = control({ maxMs: FRAME_BUDGET_MS * CLEARS_BUDGET });
     expect(environmentSustainsBudget(clearing, FRAME_BUDGET_MS)).toBe(true);
     expect(FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL).toBeLessThan(SLOWED_MS);
     expect(() =>
       expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, clearing)),
     ).toThrow(/cannot hold this machine's own ceiling/);
+  });
+
+  /**
+   * The case that set {@link CLEARS_BUDGET} to 1.
+   *
+   * Measured, not hypothesised: a regression patched into the real `Compositor.render`
+   * — 20 ms on one frame in thirty — put a 20.20 ms frame in the scrub phase beside a
+   * control that had done its 8.33 ms of arithmetic in 14.50 ms at worst. That is a
+   * host inside the budget and a compositor outside it, which is the one shape this
+   * whole file exists to fail on, and at 0.8 it was excused: the phase routed to the
+   * deferred branch on a control 2.17 ms *under* §8's number, and the frame was judged
+   * against 14.50 × 1.5 = 21.75 ms instead. Only the play phase caught the mutation.
+   *
+   * A host that keeps half a budget of arithmetic inside a whole budget has not
+   * demonstrated it cannot hold the budget, so it does not get to speak for the
+   * compositor.
+   */
+  it('CONTROL: a host inside the budget does not excuse a frame outside it', () => {
+    const host = control({ count: 27, maxMs: 14.5, maxAt: 21, meanMs: 9.11 });
+    const { measured } = evidence({ count: 117, maxMs: 20.2, maxAt: 86, overBudget: 1 }, host);
+
+    expect(host.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+    expect(environmentSustainsBudget(host, FRAME_BUDGET_MS)).toBe(true);
+    // So the gate asserts §8's pair — and these are the two assertions it makes there,
+    // verbatim. Both must fail on that frame; the tracking ceiling never gets a say.
+    expect(() => {
+      expect(measured.overBudget).toBe(0);
+    }).toThrow();
+    expect(() => {
+      expect(measured.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+    }).toThrow();
+    // What excused it before: the ceiling the deferred branch would have earned sat
+    // above the offending frame, so that branch had nothing to say about it either.
+    expect(measured.maxMs).toBeLessThan(host.maxMs * TRACKS_CONTROL);
   });
 
   it('CONTROL: a control that measured nothing enforces the bound rather than lifting it', () => {
