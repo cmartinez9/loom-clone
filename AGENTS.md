@@ -228,12 +228,12 @@ rewriting a growing JSON once a second for the length of the recording.
   instead (an exporter would otherwise encode fabricated frames), the gate harness
   aborts the run at the first sign of it, and `test/phase6-gate.test.ts` re-launches
   **only** for that — never for a run that measured and came out over budget. Both
-  halves are pinned by tests rather than by comment: `packages/compositor/test/
-context-loss.test.ts` (with a control proving the fake really does model the silent
-  no-op) and `test/relaunch-policy.test.ts`, which enumerates every bad-run shape and
-  requires that none of them earns a second launch. A retry around an acceptance gate
-  is how a real defect gets to look like weather; it stays defensible only while it
-  stays this narrow.
+  halves are pinned by tests rather than by comment:
+  `packages/compositor/test/context-loss.test.ts` (with a control proving the fake
+  really does model the silent no-op) and `test/relaunch-policy.test.ts`, which
+  enumerates every bad-run shape and requires that none of them earns a second launch.
+  A retry around an acceptance gate is how a real defect gets to look like weather;
+  it stays defensible only while it stays this narrow.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
