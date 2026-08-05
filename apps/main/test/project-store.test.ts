@@ -66,8 +66,11 @@ describe('settings', () => {
   it('creates settings.json on first run', async () => {
     await withStore(async ({ store, root }) => {
       const settings = await store.loadSettings();
-      expect(settings.schema).toBe('loom.settings/1');
+      expect(settings.schema).toBe('loom.settings/2');
       expect(settings.recordingsRoot).toBe(root);
+      // A fresh install has never been asked for anything, so first-run setup is
+      // owed. `index.ts` reads exactly this to decide which window opens.
+      expect(settings.setup).toEqual({ completedAt: null, accessibilityOpenedAt: null });
     });
   });
 
@@ -85,7 +88,7 @@ describe('settings', () => {
       const settings = await store.loadSettings();
       expect(settings.recordingsRoot).toBe(join(base, 'recordings'));
       expect(JSON.parse(await readFile(settingsPath, 'utf8'))).toMatchObject({
-        schema: 'loom.settings/1',
+        schema: 'loom.settings/2',
       });
     } finally {
       await rm(base, { recursive: true, force: true });

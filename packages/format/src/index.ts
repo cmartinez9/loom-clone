@@ -95,7 +95,7 @@ export type {
 } from './types/edit.ts';
 
 export type { CursorImage, CursorIndexDoc, FrameIndexDoc } from './types/sidecar.ts';
-export type { SettingsDoc } from './types/settings.ts';
+export type { SettingsDoc, SetupState } from './types/settings.ts';
 export type { RecordingSummary } from './types/summary.ts';
 
 export type {

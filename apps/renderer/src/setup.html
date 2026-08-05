@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Same strict CSP as every other window. Note there is still no `connect-src` to
+      the network: the screen that asks for four permissions is the last place an
+      app should be allowed to phone home from, and the promise it makes at the top
+      ("Nothing leaves this Mac") is enforced here rather than asserted.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self';
+               font-src 'self';
+               img-src 'self' data: loom:;
+               media-src loom:;
+               connect-src 'self' loom:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Welcome</title>
+    <script type="module" src="./setup/main.ts"></script>
+  </head>
+  <body>
+    <div class="titlebar"></div>
+
+    <main class="sheet">
+      <header class="hero">
+        <span class="stamp"><span data-ic="lock" data-sz="13"></span> Nothing leaves this Mac</span>
+        <h1 class="t-d2">Four things, then you can record.</h1>
+        <p class="lede">
+          There is no account, no server and no upload path in this app — the export button writes a
+          file, copies it to your clipboard and opens Finder. macOS still has to hear each of these
+          from you directly, so here is what each one is for.
+        </p>
+      </header>
+
+      <!--
+        One row per permission, built from `@loom/permissions` rather than written
+        here: the copy is data, so the recorder's degraded-mode banner and the
+        main-process log say the same sentences. See `packages/permissions/src/kinds.ts`.
+      -->
+      <ul class="perms" id="perms" aria-live="polite"></ul>
+
+      <!--
+        The refusal path. Hidden until something is actually refused, because a
+        permanent "here is what to do if this goes wrong" panel reads as an app that
+        expects to go wrong.
+      -->
+      <section class="card" id="blocked-card" hidden>
+        <div class="card-h">
+          <span class="t-label" id="blocked-title">If a permission is refused</span>
+        </div>
+        <div class="card-b">
+          <div class="blocked">
+            <span class="ico" data-ic="alert" data-sz="17"></span>
+            <p id="blocked-text"></p>
+          </div>
+          <ol class="steps" id="blocked-steps"></ol>
+          <div class="card-actions">
+            <button class="btn btn-primary" id="open-settings" type="button">
+              <span data-ic="gear" data-sz="15"></span>
+              Open System Settings
+            </button>
+            <button class="btn" id="relaunch" type="button">
+              <span data-ic="restart" data-sz="15"></span>
+              Relaunch
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!--
+        Shown only in a build whose permission answers cannot be trusted — a dev
+        binary, or a packaged app launched from a shell. It is a developer-facing
+        warning on a user-facing screen on purpose: the alternative is a green tick
+        that means nothing, which is the exact failure the phase 2 gate exists to
+        prevent (research report §7, trap 6).
+      -->
+      <section class="untrusted" id="untrusted" hidden>
+        <span class="ico" data-ic="alert" data-sz="16"></span>
+        <p id="untrusted-text"></p>
+      </section>
+
+      <footer class="foot">
+        <span class="note">
+          You can change any of these later in System Settings › Privacy &amp; Security.
+        </span>
+        <button class="btn btn-rec" id="continue" type="button">Continue</button>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -8,9 +8,9 @@
  * identical to production.
  *
  * One entry per window in the §1.2 table. Phase 0 shipped `library.html`; phase 1
- * adds the recorder HUD and the hidden capture page. `countdown.html`,
- * `overlay.html`, `editor.html` and `export.html` arrive with the phases that
- * have something to put in them.
+ * adds the recorder HUD and the hidden capture page; phase 2 adds first run.
+ * `countdown.html`, `overlay.html`, `editor.html` and `export.html` arrive with the
+ * phases that have something to put in them.
  */
 
 import { defineConfig } from 'vite';
@@ -35,6 +35,7 @@ export default defineConfig({
     sourcemap: true,
     rollupOptions: {
       input: {
+        setup: resolve(root, 'setup.html'),
         library: resolve(root, 'library.html'),
         recorder: resolve(root, 'recorder.html'),
         capture: resolve(root, 'capture.html'),

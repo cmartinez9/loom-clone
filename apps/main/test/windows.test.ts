@@ -121,6 +121,10 @@ beforeEach(() => {
 
 /** The §1.2 table, restated here so a change to the source has to be deliberate. */
 const EXPECTED_PROTECTION: Record<WindowRole, boolean> = {
+  // First run happens before any recording can, so there is nothing for it to be
+  // hidden from — and a protected window is one a screenshot of a bug report cannot
+  // show, which is the wrong trade for the screen that explains four permissions.
+  setup: false,
   library: false,
   'recorder-hud': true,
   countdown: true,

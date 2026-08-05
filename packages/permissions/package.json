@@ -1,0 +1,13 @@
+{
+  "name": "@loom/permissions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The macOS TCC model: what each grant is for, what breaks without it, and how to tell whether it is really there. PURE — no electron, no node, no DOM.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  }
+}

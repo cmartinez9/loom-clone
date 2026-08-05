@@ -32,6 +32,7 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture and the timeline model 19 ways; each must fail a gate
+npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -58,6 +59,10 @@ packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it w
                    like `@loom/format/fs`, has exactly one caller.
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
+packages/permissions/  the four macOS grants: what each is for, what breaks without it,
+                   which System Settings pane turns it on, and whether an answer can be
+                   believed at all. PURE. `apps/main/src/permissions.ts` is the only
+                   file in the repo that calls `systemPreferences`.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
 packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
@@ -158,6 +163,10 @@ debounce, so an editor crash costs at most 250 ms.
 
 Time is **seconds, float**, everywhere except the frame index sidecar. Media tracks
 are lists of parts (`screen.000.mp4`) from day one, never a single file.
+
+`loom.settings` is at **version 2** — phase 2 added first-run state — so the migration
+registry has a real step in it and `loadAndUpgradeDocument` is exercised on every
+launch. Adding a version is the three steps in `packages/format/src/schema.ts`.
 
 ## Capture, in one paragraph
 
@@ -509,11 +518,6 @@ may describe them as working:
    how long `getUserMedia` refuses a device that has just re-enumerated, and whether
    the same `deviceId` really comes back.
 
-Why they are open: a machine that has not granted Screen Recording to the _terminal_
-cannot run the leg that would prove any of them, and granting it to a dev binary
-proves the wrong thing anyway, because a dev build inherits the terminal's TCC (§7,
-trap 6) — a pass there would not predict a packaged build.
-
 What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
 replaces only the _source acquisition_ — `getDisplayMedia` and `getUserMedia` — in the
 real capture page, and drives the shipped `MediaStreamTrackProcessor` →
@@ -523,6 +527,81 @@ M4A → finalize path end to end, on Chromium's real capture clocks. Without
 grant, rather than failing three layers down in `desktopCapturer` with "Failed to get
 sources". Run it after any change to capture: it is the only thing that watches the
 two clocks, and it is what caught both of phase 3's real bugs.
+
+## Permissions and first run, in one paragraph
+
+The four grants the app asks for — Screen Recording, Camera, Microphone,
+Accessibility — are modelled in `packages/permissions` (pure: what each is for, what
+breaks without it, which System Settings pane turns it on) and probed in
+`apps/main/src/permissions.ts`, **the only file in the repo that calls
+`systemPreferences`**. The captain settled the flow
+(`data/loom-scope/decision-accessibility-clicks.md`): ask up front, all four together,
+explain each, and a user who declines the three optional ones still gets a working
+recorder. Accessibility is read from `AXIsProcessTrusted()`
+(`isTrustedAccessibilityClient(false)` — **`false`, or a status check becomes a dialog**)
+and cross-checked against a live event tap via `@loom/sampler`'s `probeInput`; TCC's
+word alone renders as _granted · unverified_, never as a tick, because the click API
+succeeds without the permission and then silently delivers nothing.
+
+**The rule that makes any of this worth reading: a `granted` only counts if macOS was
+talking about _us_.** A dev binary inherits its launching terminal's grants (research
+§7, trap 6 — measured again on this machine: an unpackaged run reports
+`screen/camera/microphone = granted` with `ppid` of a shell). So every
+`PermissionReport` carries `provenance`, `isTrustworthy()` is the one place that rule
+lives, and `sealReport()` in `apps/main/src/verify/checks.ts` rewrites every `pass` to
+`untrusted` when it fails. Nothing downstream can opt out.
+
+## Phase 2 gate status — two obligations closed, three checks open on a grant
+
+`npm run verify:permissions` packages the app, gives it the frozen identity, launches
+it through LaunchServices and runs the checks from inside the real bundle. Last run
+(2026-08-05, ad-hoc signed, `packaged: true`, `responsibleForSelf: true`):
+
+| Check                  | Status      | What it means                                                                                                                                                               |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`      | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                    |
+| `frame-authorisation`  | **pass**    | Closes phase 1's obligation. A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC. |
+| `screen-enumeration`   | **blocked** | `getSources` throws "Failed to get sources". Needs Screen Recording.                                                                                                        |
+| `content-protection`   | **blocked** | No pixels to look at without Screen Recording.                                                                                                                              |
+| `accessibility-clicks` | **blocked** | The sampler is wired (`probeInput` for the tap state, `observeClicks` for rate). Needs the Accessibility grant.                                                             |
+
+**Do not describe the three blocked rows as working.** What is known about
+`content-protection` is that the harness itself is correct: run against a dev binary
+whose terminal holds the grant, the control window showed the marker across 99.3% of
+its rectangle and the protected HUD across 0.0%. That result is `untrusted` by
+construction and is evidence about the _test_, not about the flag.
+
+All three are blocked on the same thing: a grant. To close them, switch "Loom Clone"
+on under **Screen & System Audio Recording** and **Accessibility** in System Settings ›
+Privacy & Security, then re-run. There is no programmatic way to
+grant a TCC permission and nothing in this repo pretends otherwise.
+
+## Sharp edges — permissions
+
+- **`npm run package` does not sign this app.** With no Developer ID, electron-builder
+  skips signing and leaves Electron's own linker-signed stub: `Identifier=Electron`,
+  Info.plist _not bound_. macOS would file every grant under "Electron" — the identity
+  churn `identity.ts` exists to prevent, arriving through the back door.
+  `scripts/verify-permissions.mjs` ad-hoc signs with the frozen identifier and
+  entitlements (research §5.3, note 4) and refuses to run if the identifier is wrong.
+- **`open -a`, never the executable.** Running `Loom Clone.app/Contents/MacOS/…` from a
+  shell makes the _shell_ the responsible process, which is the lie the gate is about.
+  The harness independently checks `process.ppid === 1`.
+- **A captured pixel is in the display's colour space, not sRGB.** The content-protection
+  marker is painted sRGB `#FF00FF` and comes back near `(232, 51, 245)` on this
+  Display-P3 machine. A tight per-channel match reported 0% _inside the control_ on the
+  first run — which is exactly what the control is for. Match the shape of the colour,
+  not its coordinates.
+- **Refusing a `getDisplayMedia` request logs an `UnhandledPromiseRejectionWarning`**
+  ("Video was requested, but no video stream was provided") from Electron's own
+  internals, on every refusal. It is the normal, correct path for an unauthorised
+  window — not a bug in `provideSource`.
+- **Every settings write from `PermissionManager` is chained**, and `relaunch()` waits
+  for it. "Open System Settings" and "Relaunch" are adjacent buttons; a quit that beat
+  the `accessibilityOpenedAt` write would come back having forgotten it ever asked.
+- **`apps/main` still has no filesystem.** The harness prints its JSON report between
+  markers on stdout and the runner script saves it, rather than punching the first hole
+  in the `node:fs` restriction for a test.
 
 ## Maintaining this file
 

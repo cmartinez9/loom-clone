@@ -63,3 +63,8 @@ release/
 
 # Screenshots from scripts/screenshot.cjs
 shots/
+
+# The signed-bundle permission report (scripts/verify-permissions.mjs). A machine
+# and a moment in time, not a fact about the code — the obligations it closes are
+# recorded in AGENTS.md instead.
+verify-permissions.json

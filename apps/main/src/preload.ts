@@ -33,10 +33,14 @@ import {
   type LoomApi,
   type MetaMsg,
   type PartEndMsg,
+  type PermissionKind,
+  type PermissionReport,
+  type PreflightReport,
   type RecorderStatus,
   type RecordingDoc,
   type RecordingId,
   type RecordingSummary,
+  type SetupState,
   type TrackKey,
   type Unsubscribe,
 } from '@loom/ipc';
@@ -82,6 +86,34 @@ const api: LoomApi = {
       ipcRenderer.invoke(CHANNEL.libraryDelete, id) as Promise<void>,
   },
 
+  /**
+   * The permission surface. Note `openSettings` takes a {@link PermissionKind} and
+   * not a URL: `shell.openExternal` hands whatever it is given to the OS handler for
+   * that scheme, so the string that gets opened is chosen in main from a closed
+   * table, never named by a renderer.
+   */
+  permissions: {
+    probe: (): Promise<PermissionReport> =>
+      ipcRenderer.invoke(CHANNEL.permissionsProbe) as Promise<PermissionReport>,
+    request: (kind: PermissionKind): Promise<PermissionReport> =>
+      ipcRenderer.invoke(CHANNEL.permissionsRequest, kind) as Promise<PermissionReport>,
+    openSettings: (kind: PermissionKind): void => {
+      ipcRenderer.send(CHANNEL.permissionsOpenSettings, kind);
+    },
+    relaunch: (): void => {
+      ipcRenderer.send(CHANNEL.permissionsRelaunch);
+    },
+    onChange: (callback: (report: PermissionReport) => void): Unsubscribe =>
+      subscribe(CHANNEL.permissionsChanged, (payload) => {
+        callback(payload as PermissionReport);
+      }),
+  },
+
+  setup: {
+    state: (): Promise<SetupState> => ipcRenderer.invoke(CHANNEL.setupState) as Promise<SetupState>,
+    complete: (): Promise<void> => ipcRenderer.invoke(CHANNEL.setupComplete) as Promise<void>,
+  },
+
   project: {
     open: (id: RecordingId): Promise<{ recording: RecordingDoc | null; edit: EditDocument }> =>
       ipcRenderer.invoke(CHANNEL.projectOpen, id) as Promise<{
@@ -98,6 +130,8 @@ const api: LoomApi = {
     open: (): void => {
       ipcRenderer.send(CHANNEL.recorderOpen);
     },
+    preflight: (options?: Partial<CaptureOptions>): Promise<PreflightReport> =>
+      ipcRenderer.invoke(CHANNEL.recorderPreflight, options ?? {}) as Promise<PreflightReport>,
     start: (options?: Partial<CaptureOptions>): Promise<{ recordingId: RecordingId }> =>
       ipcRenderer.invoke(CHANNEL.recorderStart, options ?? {}) as Promise<{
         recordingId: RecordingId;

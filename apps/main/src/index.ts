@@ -18,9 +18,13 @@
  */
 
 import { app, BrowserWindow, shell } from 'electron';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CHANNEL, type PermissionReport } from '@loom/ipc';
+import { probeInput } from '@loom/sampler';
 import { DEFAULT_RECORDINGS_SUBPATH, LOOM_BUNDLE_ID, LOOM_PRODUCT_NAME } from './identity.ts';
+import { helperPathFor } from './input-sampler.ts';
+import { PermissionManager } from './permissions.ts';
 import { ProjectStore } from './project-store.ts';
 import { installLoomProtocol, registerLoomScheme } from './protocol.ts';
 import { registerIpc, unregisterIpc } from './ipc.ts';
@@ -44,9 +48,37 @@ const distRoot = join(__dirname, '..');
 const preloadPath = join(distRoot, 'preload', 'index.cjs');
 const rendererRoot = join(distRoot, 'renderer');
 
+/**
+ * Markers the runner script slices the machine-readable report out of stdout with.
+ * Exported so the script and this file cannot disagree about them.
+ */
+export const VERIFY_JSON_BEGIN = '---loom-verify-json-begin---';
+export const VERIFY_JSON_END = '---loom-verify-json-end---';
+export const VERIFY_SCRATCH_MARK = '---loom-verify-scratch:';
+
+/**
+ * `--verify-permissions` runs the phase 2 gate instead of the app.
+ *
+ * It has to be *this* bundle, because macOS keys every grant on the bundle
+ * identifier — a separate test binary would have different permissions and prove
+ * nothing about the shipped app (`identity.ts`). So the harness ships inside the
+ * app, behind a flag, and `scripts/verify-permissions.mjs` is what invokes it.
+ *
+ * A verification run must not touch the user's recordings or settings, so it gets
+ * its own temporary root: it opens windows, paints them and captures the screen, and
+ * none of that belongs in somebody's library. The runner script removes the scratch
+ * directory afterwards — main has no filesystem to remove it with.
+ */
+const verifying = process.argv.includes('--verify-permissions');
+const verifyScratch = join(tmpdir(), `loom-verify-${String(process.pid)}`);
+
 const store = new ProjectStore({
-  recordingsRoot: join(homedir(), ...DEFAULT_RECORDINGS_SUBPATH),
-  settingsPath: join(app.getPath('userData'), 'settings.json'),
+  recordingsRoot: verifying
+    ? join(verifyScratch, 'recordings')
+    : join(homedir(), ...DEFAULT_RECORDINGS_SUBPATH),
+  settingsPath: verifying
+    ? join(verifyScratch, 'settings.json')
+    : join(app.getPath('userData'), 'settings.json'),
   appVersion: app.getVersion(),
   // The one platform capability the store needs. Injected so the store itself
   // stays plain Node and unit-testable.
@@ -64,6 +96,44 @@ const recorder = new RecorderSession({
   // version, which nobody can act on.
   osVersion: process.getSystemVersion(),
 });
+
+const permissions = new PermissionManager({
+  store,
+  // Phase 5's `probeInput`, which is the whole of the wiring. It runs the native
+  // helper once, with no side effects and no prompt, and reports whether a real
+  // `CGEventTap` can be built — the half of the Accessibility answer that
+  // `AXIsProcessTrusted()` cannot give, because the tap API succeeds without the
+  // permission and then delivers nothing.
+  //
+  // The helper path is passed rather than left to the package's default: only
+  // `dist/` knows its own layout, and inside a packaged app the binary lives in
+  // `app.asar.unpacked/` (`input-sampler.ts`).
+  clickTapProbe: () => probeInput({ helperPath: helperPathFor(distRoot) }),
+  relaunchApp: relaunchGracefully,
+  broadcast: (report: PermissionReport) => {
+    for (const window of windows.all()) {
+      window.webContents.send(CHANNEL.permissionsChanged, report);
+    }
+  },
+  onSetupComplete: () => {
+    windows.show('library');
+    windows.get('setup')?.close();
+  },
+});
+
+/**
+ * Quit and come back, through the same shutdown the user quitting gets.
+ *
+ * An Accessibility grant does not reach a running process, so a relaunch is part of
+ * the permission flow rather than an edge case — which makes it exactly the kind of
+ * quit that must not skip flushing journals and releasing bundle locks.
+ * `app.relaunch()` only schedules the restart; `app.quit()` runs `before-quit`
+ * below, which stops producers before it closes anything.
+ */
+function relaunchGracefully(): void {
+  app.relaunch();
+  app.quit();
+}
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -84,7 +154,20 @@ async function main(): Promise<void> {
   installLoomProtocol({ store, rendererRoot });
   registerIpc({ store, appVersion: app.getVersion() });
   windows.installHudNoticeFit();
+  permissions.install();
   recorder.install();
+
+  // macOS never tells an app that a grant was given: the user leaves for System
+  // Settings, flips a switch and comes back. Regaining focus is the closest thing to
+  // an event there is, and this is what turns it into one.
+  app.on('browser-window-focus', () => {
+    void permissions.refresh();
+  });
+
+  if (verifying) {
+    await runVerifyMode();
+    return;
+  }
 
   // Before any window can ask for a recording: a bundle still saying
   // `state: "recording"` means we crashed mid-capture, and it is repaired to the
@@ -94,12 +177,123 @@ async function main(): Promise<void> {
     console.error('[main] crash recovery failed:', error);
   });
 
-  windows.show('library');
+  // First run gets the setup window instead of the library. The captain's decision
+  // (`data/loom-scope/decision-accessibility-clicks.md`) is "ask up front": all four
+  // permissions, explained, as one deliberate onboarding step, before the first
+  // recording rather than in the middle of it.
+  windows.show(store.setup.completedAt === null ? 'setup' : 'library');
 
-  // macOS: clicking the dock icon with no windows open reopens the library.
+  // macOS: clicking the dock icon with no windows open reopens where we left off.
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) windows.show('library');
+    if (BrowserWindow.getAllWindows().length > 0) return;
+    windows.show(store.setup.completedAt === null ? 'setup' : 'library');
   });
+}
+
+/**
+ * Run the phase 2 gate and quit.
+ *
+ * Crash recovery is skipped and no window is shown by the normal path: the harness
+ * opens exactly the windows it needs.
+ *
+ * The report is **printed, not written**. `apps/main` has no filesystem — `node:fs`
+ * is import-restricted to `ProjectStore` (§0, rule 1) — and a verification harness is
+ * not a good enough reason to punch the first hole in that. So the JSON goes to
+ * stdout between markers and `scripts/verify-permissions.mjs` saves it, which also
+ * makes the report readable when nobody asked for a file.
+ *
+ * The exit code is the verdict, so a shell or CI can act on it without parsing
+ * anything: `1` for a real failure, `2` for a run that could not establish what it
+ * set out to (a missing grant, a dev binary), `0` only for a genuine, trustworthy
+ * pass.
+ */
+/**
+ * Run a real sampler for a while and report every click it saw, with the instant this
+ * process received it.
+ *
+ * This is the fourth carried-forward obligation's measuring instrument — the captain's
+ * Accessibility decision closes with *"Post-grant event rate and latency are
+ * unmeasured. Validate during the build."*
+ *
+ * The sink is in memory rather than `ProjectStoreEventSink`: a verification run has no
+ * recording to write into, and the point is to observe arrival timing, not to keep the
+ * events. Everything above the sink — the helper, the tap, the batching — is the
+ * shipped path, so what is measured is what a recording would get.
+ *
+ * `receivedMs` is stamped in `append`, which is the earliest this process can see a
+ * click, and the sampler batches on §2.5's 100 ms cadence — so inter-arrival timing is
+ * quantised to that and the report says "inter-arrival", never "input latency". A
+ * true end-to-end latency needs the helper's own clock compared against a synthesised
+ * event, which is `packages/sampler/test/rate-control.ts`'s territory, not this
+ * harness's.
+ */
+async function observeClicks(durationMs: number): Promise<{ tSec: number; receivedMs: number }[]> {
+  const { InputSampler } = await import('@loom/sampler');
+  const clicks: { tSec: number; receivedMs: number }[] = [];
+
+  const sampler = new InputSampler({
+    sink: {
+      create: () => Promise.resolve(),
+      append: (log, ndjson) => {
+        if (log !== 'clicks') return Promise.resolve();
+        const at = performance.now();
+        for (const line of ndjson.split('\n')) {
+          if (line === '') continue;
+          try {
+            clicks.push({ tSec: (JSON.parse(line) as { t: number }).t, receivedMs: at });
+          } catch {
+            // A line this process cannot parse is a sampler bug, and the sampler's own
+            // tests are where it belongs. Here it must not abort the measurement.
+          }
+        }
+        return Promise.resolve();
+      },
+      sync: () => Promise.resolve(),
+      writeCursorImage: () => Promise.resolve(),
+      writeCursorIndex: () => Promise.resolve(),
+    },
+    // No recording, so no `recording.json` clock to share an origin with. `t` is
+    // therefore seconds since the sampler started, which is all this needs — the
+    // rate comes from `receivedMs`.
+    t0Us: 0,
+    clicks: true,
+    helperPath: helperPathFor(distRoot),
+  });
+
+  await sampler.start();
+  try {
+    await new Promise((resolve) => setTimeout(resolve, durationMs));
+  } finally {
+    // Stop the producer before anything else, per the ordering contract: the sampler
+    // writes from its own timers, and a stop that has not resolved is a stop that is
+    // still appending.
+    await sampler.stop();
+  }
+  return clicks;
+}
+
+async function runVerifyMode(): Promise<void> {
+  const { runVerification, formatReport } = await import('./verify/permissions-harness.ts');
+  let code = 1;
+  try {
+    const report = await runVerification({
+      permissions,
+      windows,
+      appVersion: app.getVersion(),
+      clickStream: observeClicks,
+    });
+    console.log(formatReport(report));
+    console.log(VERIFY_JSON_BEGIN);
+    console.log(JSON.stringify(report));
+    console.log(VERIFY_JSON_END);
+    code = report.outcome === 'verified' ? 0 : report.outcome === 'failed' ? 1 : 2;
+  } catch (error) {
+    console.error('[verify] the harness itself failed:', error);
+  } finally {
+    windows.closeAll();
+    console.log(`${VERIFY_SCRATCH_MARK}${verifyScratch}`);
+    app.exit(code);
+  }
 }
 
 // macOS keeps the app running with no windows; that is the platform convention and

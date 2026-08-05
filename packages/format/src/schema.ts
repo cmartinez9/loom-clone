@@ -47,7 +47,8 @@ export const CURRENT_VERSION = {
   'loom.journal': 1,
   'loom.index': 1,
   'loom.cursors': 1,
-  'loom.settings': 1,
+  // 2 adds `setup` — the first-run state phase 2 needs (`types/settings.ts`).
+  'loom.settings': 2,
 } as const satisfies Record<SchemaFamily, number>;
 
 /** `"loom.edit/1"` — the literal string stored in the file. */

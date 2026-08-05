@@ -70,5 +70,11 @@ export function newCursorIndexDoc(): CursorIndexDoc {
 }
 
 export function newSettingsDoc(recordingsRoot: string): SettingsDoc {
-  return { schema: currentSchemaId('loom.settings'), recordingsRoot };
+  return {
+    schema: currentSchemaId('loom.settings'),
+    recordingsRoot,
+    // A fresh install has never been asked, so first-run setup is owed. This is the
+    // only place that decides a new user sees it.
+    setup: { completedAt: null, accessibilityOpenedAt: null },
+  };
 }

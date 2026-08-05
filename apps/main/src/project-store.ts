@@ -56,6 +56,7 @@ import {
   type RecordingId,
   type RecordingSummary,
   type SettingsDoc,
+  type SetupState,
   type TrackKey,
   type ValidationIssue,
   type VideoPart,
@@ -68,7 +69,7 @@ import {
   createBundle,
   directorySize,
   listBundles,
-  loadDocument,
+  loadAndUpgradeDocument,
   readBundle,
   sweepTempArtifacts,
   writeAtomic,
@@ -268,7 +269,12 @@ export class ProjectStore {
    */
   async loadSettings(): Promise<SettingsDoc> {
     try {
-      const { doc } = await loadDocument(
+      // `loadAndUpgrade`, not `load`: settings is written by this class and phase 2
+      // moved the family to version 2, so a returning user's file is genuinely
+      // stale. Upgrading it here writes the new document once and leaves
+      // `settings.json.v1.bak` beside it (§2.7), rather than re-running the chain on
+      // every launch and never actually fixing the file.
+      const { doc } = await loadAndUpgradeDocument(
         this.options.settingsPath,
         'loom.settings',
         validateSettingsDoc,
@@ -282,6 +288,34 @@ export class ProjectStore {
       this.settings = doc;
       return doc;
     }
+  }
+
+  /**
+   * First-run state, or the fresh-install default if settings have not been loaded.
+   *
+   * Never `null`: "we have not read settings yet" and "the user has not finished
+   * setup" are the same answer to every caller — show the setup window — and giving
+   * them two representations only creates a branch that can be got wrong.
+   */
+  get setup(): SetupState {
+    return this.settings?.setup ?? { completedAt: null, accessibilityOpenedAt: null };
+  }
+
+  /**
+   * Record a change to first-run state.
+   *
+   * Goes through the store because main is the only writer (§0, rule 1) — the setup
+   * window proposes "I am done" and this is what persists it. Merged rather than
+   * replaced so a caller marking setup complete cannot silently drop the
+   * Accessibility timestamp that survives the relaunch it is about.
+   */
+  async updateSetup(patch: Partial<SetupState>): Promise<SetupState> {
+    const current = this.settings ?? newSettingsDoc(this.options.recordingsRoot);
+    const next: SettingsDoc = { ...current, setup: { ...current.setup, ...patch } };
+    await mkdir(dirname(this.options.settingsPath), { recursive: true });
+    await writeJsonAtomic(this.options.settingsPath, next);
+    this.settings = next;
+    return next.setup;
   }
 
   // ------------------------------------------------------------------- library

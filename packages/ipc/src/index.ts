@@ -35,11 +35,14 @@
  * Phase 0 shipped `library` and `project`. Phase 1 adds `recorder` — `start`,
  * `stop` and `onStatus`, with the `CaptureOptions` and `RecorderStatus` the screen
  * spine actually needs, plus an `open` the §1.4 sketch has no name for: the library
- * asks for the HUD, and the HUD owns the recording (§1.2). `devices` and `preflight`
- * belong to phase 2 (permissions and first run) and `export` to phase 8; both stay
- * absent rather than stubbed, because a guessed shape that thirteen workers compile
- * against is worse than no shape. Adding a namespace is three lines here, one handler
- * in main, and one line in the preload.
+ * asks for the HUD, and the HUD owns the recording (§1.2). Phase 2 adds
+ * `recorder.preflight` under the name §1.4 gives it, plus two namespaces the sketch
+ * has no name for — `permissions` and `setup` — because "ask for four grants up
+ * front, explain each, and relaunch for Accessibility" is a conversation with the
+ * user, not a property of a capture. `devices` belongs to phase 3/4 and `export` to
+ * phase 8; both stay absent rather than stubbed, because a guessed shape that
+ * thirteen workers compile against is worse than no shape. Adding a namespace is
+ * three lines here, one handler in main, and one line in the preload.
  *
  * ## What must never cross
  *
@@ -59,9 +62,11 @@ import type {
   RecordingDoc,
   RecordingId,
   RecordingSummary,
+  SetupState,
   TrackKey,
   VideoTrackKey,
 } from '@loom/format';
+import type { PermissionKind, PermissionReport } from '@loom/permissions';
 
 export type {
   AudioCaptureSummary,
@@ -69,9 +74,12 @@ export type {
   EditDocument,
   EditOp,
   PartEndReason,
+  PermissionKind,
+  PermissionReport,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
+  SetupState,
   TrackKey,
   VideoTrackKey,
 };
@@ -421,9 +429,45 @@ export interface RecoveryReport {
   error: string | null;
 }
 
+/**
+ * What `recorder.preflight` answers: not "may I record" as a boolean, but the two
+ * lists a person can act on.
+ *
+ * Returned as data rather than thrown, per this file's rule 3. A start that fails
+ * with `Error: NotAllowedError` tells the user nothing; "Screen Recording was
+ * refused, here is the pane that turns it on" tells them everything.
+ */
+export interface PreflightReport {
+  report: PermissionReport;
+  /** `true` when `recorder.start` would actually produce frames right now. */
+  ready: boolean;
+  /**
+   * Required grants that are missing. Non-empty means `ready` is false.
+   * Only ever `['screen']` — it is the one permission this app cannot work without.
+   */
+  blocking: PermissionKind[];
+  /**
+   * Optional grants that are missing: features this recording will not have.
+   *
+   * Surfaced so the recorder can say so *before* the recording rather than let the
+   * user discover in the editor that auto-zoom had nothing to work from. The
+   * captain's decision requires the app to keep working here, not to stay quiet.
+   */
+  degraded: PermissionKind[];
+}
+
 export interface RecorderApi {
   /** Show the recorder HUD. Fire-and-forget, like `library.reveal`. */
   open(): void;
+  /**
+   * Check the permissions a capture needs, without starting one.
+   *
+   * §1.4 names this. It takes the options because what a capture needs depends on
+   * what it captures — phase 1 asks only for the screen; a capture with a camera
+   * and a mic (phases 3 and 4) will need those grants too, and they belong in the
+   * same answer rather than in three separate round trips.
+   */
+  preflight(options?: Partial<CaptureOptions>): Promise<PreflightReport>;
   start(options?: Partial<CaptureOptions>): Promise<{ recordingId: RecordingId }>;
   stop(): Promise<void>;
   onStatus(callback: (status: RecorderStatus) => void): Unsubscribe;
@@ -442,6 +486,70 @@ export interface RecorderApi {
    * because the window is main's. A number, not a boolean, for the same reason.
    */
   noticeHeight(px: number): void;
+}
+
+// ------------------------------------------------------------- permissions
+
+/**
+ * The four macOS grants, driven from the first-run window. Phase 2.
+ *
+ * The model — what each is for, what breaks without it, which System Settings pane
+ * turns it on — is `@loom/permissions`, which both sides import. What crosses here
+ * is only the *answers*, so the copy cannot differ between the window that shows it
+ * and the main process that logs it.
+ */
+export interface PermissionsApi {
+  /** What macOS currently says, plus whether it is talking about us. */
+  probe(): Promise<PermissionReport>;
+  /**
+   * Ask for one permission and return the report afterwards.
+   *
+   * "Ask" means three different things and the renderer does not need to know
+   * which: Camera and Microphone get a real system prompt, Screen Recording has no
+   * request API and prompts on first capture, and Accessibility has neither — the
+   * best any app can do is open the pane. Main picks the right one from
+   * `PERMISSIONS[kind].requestMode`; a caller just says which permission it wants.
+   */
+  request(kind: PermissionKind): Promise<PermissionReport>;
+  /**
+   * Open the System Settings pane for one permission.
+   *
+   * Takes a {@link PermissionKind}, never a URL. `shell.openExternal` hands whatever
+   * it is given to the OS handler for that scheme, so the renderer names a
+   * permission and main looks up the one string it is allowed to open.
+   */
+  openSettings(kind: PermissionKind): void;
+  /**
+   * Quit and come back.
+   *
+   * The only way an Accessibility grant reaches this app: the permission does not
+   * apply to a running process. Send-only, because a call that never returns is not
+   * a promise anyone should be awaiting.
+   */
+  relaunch(): void;
+  /**
+   * Fires when the app regains focus and a status has changed.
+   *
+   * macOS does not notify an app that a grant was given; the user switches to
+   * System Settings, flips a switch, and comes back. Re-probing on focus is what
+   * turns that into an event, and it is why the setup window updates itself instead
+   * of needing a "check again" button.
+   */
+  onChange(callback: (report: PermissionReport) => void): Unsubscribe;
+}
+
+// ------------------------------------------------------------------- setup
+
+export interface SetupApi {
+  state(): Promise<SetupState>;
+  /**
+   * Mark first-run setup finished and hand over to the library.
+   *
+   * Finished, not satisfied: the captain's decision is explicit that declining the
+   * three optional grants must still leave a working recorder, so this records that
+   * the user was asked and answered — whatever they answered.
+   */
+  complete(): Promise<void>;
 }
 
 // ---------------------------------------------------------------- capture
@@ -556,8 +664,10 @@ export interface AppApi {
 export interface LoomApi {
   app: AppApi;
   library: LibraryApi;
+  permissions: PermissionsApi;
   project: ProjectApi;
   recorder: RecorderApi;
+  setup: SetupApi;
   capture: CaptureApi;
 }
 
@@ -589,8 +699,21 @@ export const CHANNEL = {
   projectApplyOps: 'loom.project.applyOps',
   projectMediaUrl: 'loom.project.mediaUrl',
 
+  permissionsProbe: 'loom.permissions.probe',
+  permissionsRequest: 'loom.permissions.request',
+  /** send-only */
+  permissionsOpenSettings: 'loom.permissions.openSettings',
+  /** send-only — a relaunch has no return trip */
+  permissionsRelaunch: 'loom.permissions.relaunch',
+  /** event: main -> renderer, on focus after a status changed */
+  permissionsChanged: 'loom.permissions.changed',
+
+  setupState: 'loom.setup.state',
+  setupComplete: 'loom.setup.complete',
+
   /** send-only */
   recorderOpen: 'loom.recorder.open',
+  recorderPreflight: 'loom.recorder.preflight',
   recorderStart: 'loom.recorder.start',
   recorderStop: 'loom.recorder.stop',
   /** send-only, the HUD -> main. How tall its notice shelf is right now. */
@@ -620,16 +743,23 @@ export const INVOKE_CHANNELS: readonly ChannelName[] = [
   CHANNEL.appInfo,
   CHANNEL.libraryList,
   CHANNEL.libraryDelete,
+  CHANNEL.permissionsProbe,
+  CHANNEL.permissionsRequest,
   CHANNEL.projectOpen,
   CHANNEL.projectApplyOps,
   CHANNEL.projectMediaUrl,
+  CHANNEL.recorderPreflight,
   CHANNEL.recorderStart,
   CHANNEL.recorderStop,
+  CHANNEL.setupState,
+  CHANNEL.setupComplete,
 ];
 
 export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.appRevealRoot,
   CHANNEL.libraryReveal,
+  CHANNEL.permissionsOpenSettings,
+  CHANNEL.permissionsRelaunch,
   CHANNEL.recorderOpen,
   CHANNEL.recorderNoticeHeight,
   CHANNEL.captureMeta,
@@ -642,6 +772,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
 
 /** Main -> renderer pushes. A renderer subscribes; it never sends on these. */
 export const EVENT_CHANNELS: readonly ChannelName[] = [
+  CHANNEL.permissionsChanged,
   CHANNEL.recorderStatus,
   CHANNEL.captureCommand,
 ];
