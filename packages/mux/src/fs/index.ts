@@ -15,4 +15,16 @@ export {
   type MediaPartWriterOptions,
 } from './media-part-writer.ts';
 
-export { UnrecoverablePartError, recoverMediaPart, type RecoveredPart } from './recover.ts';
+export {
+  AudioPartWriter,
+  type AudioPartWriterOptions,
+  type FinalizedAudioPart,
+} from './audio-part-writer.ts';
+
+export {
+  UnrecoverablePartError,
+  recoverAudioPart,
+  recoverMediaPart,
+  type RecoveredAudioPart,
+  type RecoveredPart,
+} from './recover.ts';

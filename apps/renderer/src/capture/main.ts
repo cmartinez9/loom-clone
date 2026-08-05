@@ -25,7 +25,18 @@
  *    every iteration, so the *first* leak is loud rather than the hundredth.
  */
 
-import type { CaptureEndReason, CaptureOptions } from '@loom/ipc';
+import { LOOPBACK_AUDIO_CONSTRAINTS, type CaptureEndReason, type CaptureOptions } from '@loom/ipc';
+import { TrackEpochEstimator } from '@loom/format';
+import {
+  loopbackFacts,
+  micConstraints,
+  micFacts,
+  reportOf,
+  startAudioCapture,
+  stopAudioCapture,
+  type AudioCapture,
+  type AudioSink,
+} from './audio.ts';
 
 /**
  * Codec strings to try, highest level first.
@@ -70,13 +81,52 @@ interface Session {
    */
   lastFrameUs: number | null;
   lastFrameAtMs: number;
+  /**
+   * Relates the video clock to the one the audio tracks are observed on.
+   *
+   * Chromium timestamps captured audio and captured video against different
+   * epochs, so `startTimeSec` — an audio track's offset from the first screen
+   * frame — cannot be a subtraction of the two without this. See
+   * `TrackEpochEstimator`.
+   */
+  epoch: TrackEpochEstimator;
   /** Set once, by whichever of stop/track-end/error happens first. */
   ending: CaptureEndReason | null;
   endMessage: string | null;
+  /**
+   * The microphone and the system-audio loopback, when they were asked for and
+   * could be started. A track that could not be captured is absent from this list
+   * and named in `endMessage`; it never fails the recording (§7.3).
+   */
+  audio: AudioCapture[];
 }
 
 let session: Session | null = null;
 let starting = false;
+
+/**
+ * Audio failures are reported, not thrown.
+ *
+ * The user pressed record to record their screen. A microphone that is not
+ * permitted, a machine with no AAC encoder, a loopback track macOS declined to
+ * hand over — each of those costs a track, and none of them is a reason to lose
+ * the recording.
+ */
+const audioSink: AudioSink = {
+  meta: (message) => {
+    window.loom.capture.meta(message);
+  },
+  chunk: (message) => {
+    window.loom.capture.chunk(message);
+  },
+  unavailable: (track, reason) => {
+    console.error(`[capture] no ${track} track: ${reason}`);
+    if (session !== null) {
+      session.endMessage =
+        session.endMessage === null ? reason : `${session.endMessage}; ${reason}`;
+    }
+  },
+};
 
 window.loom.capture.onCommand((command) => {
   if (command.kind === 'start') {
@@ -99,8 +149,11 @@ async function begin(options: CaptureOptions): Promise<void> {
         width: { max: options.maxDimension },
         height: { max: options.maxDimension },
       },
-      // Audio is phase 3. `audio: 'loopback'` is what will go here.
-      audio: false,
+      // Research trap 3, and the whole of why this object is a constant: the
+      // default loopback track is mono with echo cancellation, noise suppression
+      // and gain control switched on. Main answers the request with
+      // `audio: 'loopback'`; these are the constraints that track is held to.
+      audio: options.systemAudio ? { ...LOOPBACK_AUDIO_CONSTRAINTS } : false,
     });
 
     const track = stream.getVideoTracks()[0];
@@ -126,8 +179,10 @@ async function begin(options: CaptureOptions): Promise<void> {
       metaSent: false,
       lastFrameUs: null,
       lastFrameAtMs: 0,
+      epoch: new TrackEpochEstimator(),
       ending: null,
       endMessage: null,
+      audio: [],
     };
 
     // The screen source ending on its own is not a normal stop — a revoked Screen
@@ -136,6 +191,11 @@ async function begin(options: CaptureOptions): Promise<void> {
     track.addEventListener('ended', () => {
       void end('source-ended', 'the screen source stopped');
     });
+
+    // Audio is started before the video pump, so both tracks begin as close
+    // together as the platform allows; whatever offset remains is measured and
+    // recorded as `startTimeSec` rather than assumed away (§5.4 mechanism 2).
+    session.audio = await startAudio(stream, options);
 
     starting = false;
     await pump(session, options);
@@ -146,6 +206,60 @@ async function begin(options: CaptureOptions): Promise<void> {
     if (current !== null) await release(current);
     window.loom.capture.failed(describe(error));
   }
+}
+
+/**
+ * Start whichever audio tracks were asked for, and lose none of the recording if
+ * one of them cannot start.
+ *
+ * The system track rides on the display stream — it is the same `getDisplayMedia`
+ * call, answered by main with `audio: 'loopback'` — so it is not stopped
+ * separately. The microphone is its own stream and its own device permission, and
+ * is the one most likely to be refused.
+ */
+async function startAudio(display: MediaStream, options: CaptureOptions): Promise<AudioCapture[]> {
+  const captures: AudioCapture[] = [];
+
+  if (options.systemAudio) {
+    const loopback = display.getAudioTracks()[0];
+    if (loopback === undefined) {
+      audioSink.unavailable('system', 'macOS handed back no system-audio track');
+    } else {
+      const capture = await startAudioCapture(
+        'system',
+        loopback,
+        loopbackFacts(loopback),
+        null,
+        options,
+        audioSink,
+      );
+      if (capture !== null) captures.push(capture);
+    }
+  }
+
+  if (options.micDeviceId !== null) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(options) });
+      const mic = stream.getAudioTracks()[0];
+      if (mic === undefined) throw new Error('the microphone stream carried no audio track');
+      const capture = await startAudioCapture(
+        'mic',
+        mic,
+        micFacts(mic),
+        stream,
+        options,
+        audioSink,
+      );
+      if (capture === null) for (const track of stream.getTracks()) track.stop();
+      else captures.push(capture);
+    } catch (error) {
+      // Microphone permission is phase 2's to ask for. Until it has been granted
+      // this is the ordinary case, and it costs a track, not a recording.
+      audioSink.unavailable('mic', `the microphone could not be opened: ${describe(error)}`);
+    }
+  }
+
+  return captures;
 }
 
 /**
@@ -182,6 +296,10 @@ async function pump(current: Session, options: CaptureOptions): Promise<void> {
         current.framesDropped += 1;
         continue;
       }
+
+      // A frame carries no duration of its own, so its end is its timestamp: it
+      // exists the instant it is captured.
+      current.epoch.observe(value.timestamp, performance.now() * 1000);
 
       const keyFrame = value.timestamp - lastKeyframeUs >= KEYFRAME_INTERVAL_US;
       if (keyFrame) lastKeyframeUs = value.timestamp;
@@ -302,6 +420,9 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
     await current.reader.cancel().catch(() => undefined);
     current.track.stop();
     if (current.encoder.state === 'configured') await current.encoder.flush();
+    // Audio flushes alongside, not after: each encoder holds buffers of its own,
+    // and they are audio the capture already succeeded at.
+    await Promise.all(current.audio.map((capture) => stopAudioCapture(capture)));
   } catch (error) {
     current.endMessage ??= describe(error);
   } finally {
@@ -314,7 +435,11 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
     endedAtUs: stoppedAtUs(current),
     framesEncoded: current.framesEncoded,
     framesDropped: current.framesDropped,
+    epochOffsetUs: current.epoch.offsetUs,
     ...(current.endMessage === null ? {} : { message: current.endMessage }),
+    // One entry per audio track that produced anything — the measurements only
+    // this process ever had (§5.5). Main writes them; it cannot recompute them.
+    ...(current.audio.length === 0 ? {} : { audio: current.audio.map(reportOf) }),
   });
 }
 
@@ -325,6 +450,9 @@ async function release(current: Session): Promise<void> {
     // A closed encoder is the goal; a failure to close one is not worth reporting
     // over whatever caused us to be here.
   }
+  await Promise.all(current.audio.map((capture) => stopAudioCapture(capture))).catch(
+    () => undefined,
+  );
   for (const track of current.stream.getTracks()) track.stop();
   await current.reader.cancel().catch(() => undefined);
 }

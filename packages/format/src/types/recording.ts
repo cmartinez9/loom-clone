@@ -84,19 +84,45 @@ export interface VideoPart extends PartBase {
 /**
  * Where audio was actually missing. Reproduce a gap as silence of *exactly* that
  * length; concatenating around it is how drift is born (§2.3).
+ *
+ * The media file has no hole in it — a container cannot store samples that were
+ * never produced — so a gap exists only here. `audioRuns()` in `sync/align.ts` is
+ * the supported way to read one; nothing else should be doing this arithmetic.
  */
 export interface AudioGap {
+  /**
+   * When the device stopped producing, **on the recording clock** — the same
+   * domain as `startTimeSec`, not an offset into the part.
+   */
   atSec: Seconds;
   durationSec: Seconds;
   cause: string;
 }
 
+/**
+ * One part of an audio track.
+ *
+ * Two fields inherited from {@link PartBase} mean something slightly different
+ * here than they do for video, and both are load-bearing for A/V sync:
+ *
+ * - **`startTimeSec` is the instant of the first captured sample, which is also
+ *   the first *decoded* one.** AAC puts a fixed number of priming samples in front
+ *   of the stream (2112 on this platform — 44 ms, twice this project's whole sync
+ *   budget); the container's edit list trims them, so the two are the same sample.
+ *   A reader that decodes raw chunks instead of handing the file to a demuxer has
+ *   to apply that trim itself — `parseAudioInitSegment` reports it.
+ * - **`durationSec` is the part's extent on the recording clock, gaps included**,
+ *   so `startTimeSec + durationSec` is when the part ended, uniformly with video.
+ *   The media in the file is `durationSec - Σ gaps` long.
+ */
 export interface AudioPart extends PartBase {
+  /** What the device claims. Written into the container's sample entry. */
   sampleRate: number;
   channels: number;
   /**
    * A "48 kHz" device is not 48000.000 Hz. At 48000.37 measured, a 30-minute
    * recording drifts 13.9 ms; at a plausible 50 ppm worst case, 90 ms (§5.5).
+   * Every sample-index-to-time mapping uses this rate, never `sampleRate`.
    */
   measuredSampleRate: number;
   gaps: AudioGap[];

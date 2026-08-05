@@ -30,6 +30,10 @@ const GATE = 'apps/main/test/capture-crash.test.ts';
 const MUX = 'packages/mux/test/media-part.test.ts';
 const WRITER = 'packages/mux/test/fragment-writer.test.ts';
 const LIFECYCLE = 'apps/main/test/capture-lifecycle.test.ts';
+/** The phase 3 gate: flash/tone sync at 1 minute and at 20 minutes. */
+const SYNC = 'apps/main/test/av-sync.test.ts';
+const SYNC_UNIT = 'packages/format/test/sync.test.ts';
+const AUDIO_MUX = 'packages/mux/test/audio-part.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -89,9 +93,45 @@ const MUTATIONS = [
       'recovery truncates a fragment that was mid-write. Leaving it welds the next ' +
       'write onto a partial box, so the damage outlives the crash that caused it.',
     file: 'packages/mux/src/fs/recover.ts',
-    find: '      await handle.truncate(at);',
-    replace: '      await handle.sync();',
+    find: '    await handle.truncate(endsAt);',
+    replace: '    await handle.sync();',
     mustFail: [MUX, LIFECYCLE],
+  },
+  {
+    name: 'audio-rate-taken-as-nominal',
+    breaks:
+      'measuredSampleRate is measured rather than assumed. A device that reports ' +
+      '48000 Hz does not run at 48000.000 Hz, and taking its word for it is the ' +
+      'drift architecture report §5.5 and §10.1 both name — invisible at one ' +
+      'minute, 60 ms at twenty.',
+    file: 'packages/format/src/sync/audio-meter.ts',
+    find: '    const measured = spanUs > 0 && measurable > 0 ? measurable / (spanUs / 1_000_000) : null;',
+    replace: '    const measured = null;',
+    mustFail: [SYNC, SYNC_UNIT],
+  },
+  {
+    name: 'encoder-priming-not-trimmed',
+    breaks:
+      "the edit list that trims the AAC encoder's 2112 priming samples. Two " +
+      'demuxers then give two different answers about where the audio starts, 44 ms ' +
+      'apart — twice the phase 3 sync budget. Not the sync gate: AVFoundation, which ' +
+      'is what decodes the tone there, applies the trim whether the file asks for it ' +
+      'or not. The audio-part test is where it shows, against both decoders.',
+    file: 'packages/mux/src/boxes.ts',
+    find: '    ...(delaySamples > 0 ? [editList(delaySamples)] : []),',
+    replace: '    ...[],',
+    mustFail: [AUDIO_MUX],
+  },
+  {
+    name: 'audio-gaps-closed-instead-of-reproduced',
+    breaks:
+      'a gap in the captured audio is reproduced as silence of exactly its length ' +
+      '(§5.4 mechanism 5). Closing it shortens the track by the gap and ' +
+      'desynchronises everything after it — permanently, and invisibly at first.',
+    file: 'packages/format/src/sync/align.ts',
+    find: '    startSec = gap.atSec + Math.max(0, gap.durationSec);',
+    replace: '    startSec = gap.atSec;',
+    mustFail: [SYNC, SYNC_UNIT],
   },
 ];
 

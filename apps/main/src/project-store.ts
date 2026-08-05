@@ -30,15 +30,20 @@ import {
   EVENT_LOG_PATH,
   applyOps as applyOpsToDocument,
   cursorImagePath,
+  isAudioTrack,
   isSafeBundleRelativePath,
   mediaIndexPath,
   mediaPartPath,
   newSettingsDoc,
+  totalGapSec,
   ulid,
   validateCursorIndexDoc,
   validateEditDocument,
   validateProjectDoc,
   validateSettingsDoc,
+  type AudioPart,
+  type AudioTrackDoc,
+  type AudioTrackKey,
   type CursorIndexDoc,
   type EditDocument,
   type EditOp,
@@ -72,8 +77,11 @@ import {
 } from '@loom/format/fs';
 import type { ColourDescription, EncodedSample } from '@loom/mux';
 import {
+  AudioPartWriter,
   MediaPartWriter,
+  recoverAudioPart,
   recoverMediaPart,
+  type FinalizedAudioPart,
   type FinalizedPart,
   type RecoveredPart,
 } from '@loom/mux/fs';
@@ -136,6 +144,18 @@ export interface MediaPartRequest {
   /** Requested capture rate, used only for the final sample's duration. */
   nominalFps: number;
   colour?: ColourDescription;
+}
+
+/** What an audio capture part needs before its first frame can be written. */
+export interface AudioPartRequest {
+  track: AudioTrackKey;
+  part: PartIndex;
+  /** The rate the device reported. Also the media timescale. */
+  sampleRate: number;
+  channels: number;
+  /** `AudioDecoderConfig.description` — the AudioSpecificConfig. */
+  audioSpecificConfig: Uint8Array;
+  bitrate?: number;
 }
 
 /** Bundle-relative paths of a part that is now open for writing. */
@@ -217,7 +237,7 @@ export class ProjectStore {
    * `MediaPartWriter` serializes its own appends, so ordering within a part still
    * holds.
    */
-  private readonly openMedia = new Map<string, MediaPartWriter>();
+  private readonly openMedia = new Map<string, MediaPartWriter | AudioPartWriter>();
   private settings: SettingsDoc | null = null;
 
   constructor(options: ProjectStoreOptions) {
@@ -497,6 +517,39 @@ export class ProjectStore {
   }
 
   /**
+   * Create `media/<track>.<part>.m4a` and write its initialisation segment.
+   *
+   * The audio counterpart of {@link beginMediaPart}, and separate from it because
+   * the two need different things: an audio part has a sample rate, a channel
+   * count and an AudioSpecificConfig, and no frame index — an AAC frame is a fixed
+   * 1024 samples, so "where is sample n" is arithmetic rather than a sidecar
+   * (§2.4 exists because a VFR video track cannot answer that).
+   */
+  async beginAudioPart(id: RecordingId, request: AudioPartRequest): Promise<{ file: string }> {
+    const open = this.open.get(id);
+    if (open === undefined) throw new UnknownRecordingError(id);
+    const key = mediaKey(id, request.track);
+    if (this.openMedia.has(key)) {
+      throw new Error(`${request.track} already has an open part for ${id}`);
+    }
+    // Typed as an audio track, and checked as one anyway: the value reaches here
+    // from a renderer message, and a video key would write AAC into a `.mp4`.
+    const track = request.track as TrackKey;
+    if (!isAudioTrack(track)) throw new Error(`${track} is not an audio track`);
+
+    const file = mediaPartPath(request.track, request.part);
+    const writer = await AudioPartWriter.create({
+      mediaPath: join(open.paths.dir, file),
+      sampleRate: request.sampleRate,
+      channels: request.channels,
+      audioSpecificConfig: request.audioSpecificConfig,
+      ...(request.bitrate === undefined ? {} : { bitrate: request.bitrate }),
+    });
+    this.openMedia.set(key, writer);
+    return { file };
+  }
+
+  /**
    * Append one encoded sample to an open part.
    *
    * Resolves once the bytes are with the kernel, which is the only thing that
@@ -530,8 +583,27 @@ export class ProjectStore {
     const key = mediaKey(id, track);
     const writer = this.openMedia.get(key);
     if (writer === undefined) throw new Error(`${track} has no open part for ${id}`);
+    if (!(writer instanceof MediaPartWriter)) throw new Error(`${track} is not a video track`);
     this.openMedia.delete(key);
     return writer.finalize(endTimestampUs);
+  }
+
+  /**
+   * Close an audio part.
+   *
+   * No end timestamp: a screen track needs one because it stops producing frames
+   * when the screen stops changing, so its last frame has to stand for the still
+   * screen that followed. Audio has no such silence — a device that is running
+   * produces samples whether or not anything is making a sound — so the part ends
+   * where its samples end.
+   */
+  async finalizeAudioPart(id: RecordingId, track: TrackKey): Promise<FinalizedAudioPart> {
+    const key = mediaKey(id, track);
+    const writer = this.openMedia.get(key);
+    if (writer === undefined) throw new Error(`${track} has no open part for ${id}`);
+    if (!(writer instanceof AudioPartWriter)) throw new Error(`${track} is not an audio track`);
+    this.openMedia.delete(key);
+    return writer.finalize();
   }
 
   /**
@@ -540,7 +612,10 @@ export class ProjectStore {
    * Used when capture fails or the app quits mid-recording: the bytes already
    * written stay, and the sidecar describes whatever the part actually contains.
    */
-  async abortMediaPart(id: RecordingId, track: TrackKey): Promise<FinalizedPart | null> {
+  async abortMediaPart(
+    id: RecordingId,
+    track: TrackKey,
+  ): Promise<FinalizedPart | FinalizedAudioPart | null> {
     const key = mediaKey(id, track);
     const writer = this.openMedia.get(key);
     if (writer === undefined) return null;
@@ -613,20 +688,29 @@ export class ProjectStore {
         );
       }
 
-      // Video tracks only: phase 1 captures the screen, phase 4 adds the webcam,
-      // and audio parts (phase 3) will need their own repair because an AAC
-      // stream is not a sequence of fragments.
       const screen = await repairVideoTrack(dir, recording.tracks.screen);
       const webcam = await repairVideoTrack(dir, recording.tracks.webcam);
+      // An audio part is the same file shape as a video one, so it is scanned the
+      // same way — but what comes back is smaller. `measuredSampleRate` and `gaps`
+      // were measured against the capture clock by the process that died (§5.5);
+      // they are not in the file and are not invented here. What *is* corrected is
+      // how much audio survived, because a recovered `recording.json` that still
+      // claims the provisional zero would misplace every sample after it.
+      const mic = await repairAudioTrack(dir, recording.tracks.mic);
+      const system = await repairAudioTrack(dir, recording.tracks.system);
       const repaired = [screen, webcam].filter((t) => t !== null);
 
       const frameCount = repaired.reduce((n, t) => n + t.frameCount, 0);
-      const truncatedBytes = repaired.reduce((n, t) => n + t.truncatedBytes, 0);
+      const truncatedBytes =
+        repaired.reduce((n, t) => n + t.truncatedBytes, 0) +
+        [mic, system].reduce((n, t) => n + (t?.truncatedBytes ?? 0), 0);
       // Every track is cut back to the shortest one: a half-written trailing
       // fragment on one track must not desynchronise the rest (§7.1, step 1).
-      // Phase 1 records one track, so this is that track's end.
-      const shortestEndSec =
-        repaired.length === 0 ? null : Math.min(...repaired.map((t) => t.endSec));
+      const ends = [
+        ...repaired.map((t) => t.endSec),
+        ...[mic, system].filter((t) => t !== null).map((t) => t.endSec),
+      ];
+      const shortestEndSec = ends.length === 0 ? null : Math.min(...ends);
 
       if (frameCount === 0) {
         return await this.failRecovery(id, name, 'no complete frame survived the crash');
@@ -634,13 +718,13 @@ export class ProjectStore {
 
       await this.writeRecordingDoc(id, {
         ...recording,
-        // A video track that recovered no part at all is dropped rather than left
+        // A track that recovered no part at all is dropped rather than left
         // pointing at a file with nothing in it — the format says a track has at
         // least one part, and an empty one would be a document that fails its own
         // validator on the next read.
         tracks: {
-          ...(recording.tracks.mic === undefined ? {} : { mic: recording.tracks.mic }),
-          ...(recording.tracks.system === undefined ? {} : { system: recording.tracks.system }),
+          ...(mic === null ? {} : { mic: mic.track }),
+          ...(system === null ? {} : { system: system.track }),
           ...(screen === null ? {} : { screen: screen.track }),
           ...(webcam === null ? {} : { webcam: webcam.track }),
         },
@@ -1056,6 +1140,57 @@ async function recoverPart(dir: string, part: VideoPart): Promise<RecoveredPart 
     console.warn(`[ProjectStore] ${part.file} could not be recovered:`, error);
     return null;
   }
+}
+
+interface RepairedAudioTrack {
+  track: AudioTrackDoc;
+  truncatedBytes: number;
+  /** Where this track ends on the recording clock, after repair. */
+  endSec: number;
+}
+
+/**
+ * Repair every part of one audio track, or return `null` if none survived.
+ *
+ * `durationSec` is rewritten from the samples that are actually in the file, plus
+ * the gaps the live session recorded: a part's extent on the recording clock is
+ * its media plus the time in which no samples existed (see `AudioPart`). The gaps
+ * themselves are kept as they were — a scanner cannot see a hole that was never
+ * written — and everything else the provisional document said is left alone.
+ */
+async function repairAudioTrack(
+  dir: string,
+  track: AudioTrackDoc | undefined,
+): Promise<RepairedAudioTrack | null> {
+  if (track === undefined) return null;
+  const parts: AudioPart[] = [];
+  let truncatedBytes = 0;
+  let endSec = 0;
+  for (const part of track.parts) {
+    let recovered;
+    try {
+      recovered = await recoverAudioPart(join(dir, part.file));
+    } catch (error) {
+      console.warn(`[ProjectStore] ${part.file} could not be recovered:`, error);
+      continue;
+    }
+    if (recovered.frameCount === 0) continue;
+    truncatedBytes += recovered.truncatedBytes;
+    const rate = part.measuredSampleRate > 0 ? part.measuredSampleRate : recovered.sampleRate;
+    const durationSec = recovered.sampleCount / rate + totalGapSec(part.gaps);
+    parts.push({
+      ...part,
+      codec: recovered.codec,
+      sampleRate: recovered.sampleRate,
+      channels: recovered.channels,
+      durationSec,
+      endedEarly: true,
+      endReason: 'crash',
+    });
+    endSec = part.startTimeSec + durationSec;
+  }
+  if (parts.length === 0) return null;
+  return { track: { ...track, parts }, truncatedBytes, endSec };
 }
 
 /** The part as the bytes on disk actually describe it, after recovery. */

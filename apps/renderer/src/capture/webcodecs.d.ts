@@ -11,6 +11,22 @@
  * cannot be typed into existence.
  */
 
+/**
+ * AAC options, which `lib.dom.d.ts` knows about for Opus and not for AAC.
+ *
+ * `format: 'aac'` is raw AAC frames plus an AudioSpecificConfig in
+ * `decoderConfig.description` — exactly what an MP4 `esds` wants. The alternative,
+ * `'adts'`, wraps every frame in a seven-byte header that would then have to be
+ * stripped before muxing.
+ */
+interface AacEncoderConfig {
+  format?: 'aac' | 'adts';
+}
+
+interface AudioEncoderConfig {
+  aac?: AacEncoderConfig;
+}
+
 interface MediaStreamTrackProcessorInit {
   track: MediaStreamTrack;
   /** Frames buffered before the source starts dropping them. */

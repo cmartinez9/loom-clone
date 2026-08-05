@@ -28,6 +28,15 @@ export type TrackKey = 'screen' | 'webcam' | 'mic' | 'system';
 
 export const TRACK_KEYS: readonly TrackKey[] = ['screen', 'webcam', 'mic', 'system'];
 
+/** The two tracks that carry sound, and therefore a measured sample rate and gaps. */
+export type AudioTrackKey = Extract<TrackKey, 'mic' | 'system'>;
+
+export const AUDIO_TRACK_KEYS: readonly AudioTrackKey[] = ['mic', 'system'];
+
+export function isAudioTrack(track: TrackKey): track is AudioTrackKey {
+  return track === 'mic' || track === 'system';
+}
+
 /** Zero-based index of a part within a track (`screen.000.mp4` is part 0). */
 export type PartIndex = number;
 

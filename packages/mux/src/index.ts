@@ -13,9 +13,12 @@
  */
 
 export {
+  AAC_ENCODER_DELAY_SAMPLES,
   MOVIE_TIMESCALE,
   SAMPLE_FLAGS_DELTA,
   SAMPLE_FLAGS_SYNC,
+  audioFtyp,
+  audioInitSegment,
   box,
   concat,
   fourcc,
@@ -23,10 +26,17 @@ export {
   ftyp,
   fullBox,
   initSegment,
+  type AudioInitSegmentSpec,
   type ColourDescription,
   type FragmentSpec,
   type InitSegmentSpec,
 } from './boxes.ts';
+
+export {
+  AAC_FRAME_SAMPLES,
+  AudioFragmentWriter,
+  type EmittedAudioFragment,
+} from './audio-fragment-writer.ts';
 
 export {
   FragmentWriter,
@@ -40,11 +50,16 @@ export {
 
 export {
   MAX_BOX_HEADER_BYTES,
+  MIN_BOX_HEADER_BYTES,
   Mp4ParseError,
+  codecStringFromAsc,
   codecStringFromAvcC,
+  parseAudioInitSegment,
+  parseAudioSpecificConfig,
   parseInitSegment,
   parseMoof,
   readBoxHeader,
+  type AudioInitSegmentFacts,
   type BoxHeader,
   type FragmentSample,
   type InitSegmentFacts,
