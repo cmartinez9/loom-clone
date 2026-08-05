@@ -14,8 +14,9 @@
  *    250 ms; the store owns the timer, this module owns the syscall.
  */
 
-import { open, readFile, rm, type FileHandle } from 'node:fs/promises';
-import { currentSchemaId } from '../schema.ts';
+import { open, readFile, rename, rm, type FileHandle } from 'node:fs/promises';
+import { currentSchemaId, parseSchemaId } from '../schema.ts';
+import { backupPath } from '../bundle/layout.ts';
 import { parseJournal, type JournalParseResult } from '../journal/replay.ts';
 import type { EditOp, JournalEntry } from '../journal/ops.ts';
 import { type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
@@ -30,6 +31,55 @@ export function journalHeaderLine(): string {
 
 function entryLine(entry: JournalEntry): string {
   return `${JSON.stringify(entry)}\n`;
+}
+
+/**
+ * Where a journal this build refuses to read is kept when it is replaced.
+ *
+ * Same convention as a migration's `edit.json.v1.bak` (§2.7, and
+ * `loadAndUpgradeDocument`): the original is renamed aside rather than overwritten,
+ * so the build that wrote it can still read its own bytes. A header with no
+ * parseable schema id has no version to name it by, so it gets the one name that
+ * is honest about that.
+ */
+function preservedPathFor(path: string, text: string): string {
+  const firstLine = text.split('\n', 1)[0] ?? '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(firstLine);
+  } catch {
+    return `${path}.unreadable.bak`;
+  }
+  const schema =
+    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parseSchemaId((parsed as Record<string, unknown>)['schema'])
+      : null;
+  return schema === null ? `${path}.unreadable.bak` : backupPath(path, schema.version);
+}
+
+async function preserveRejectedJournal(path: string): Promise<void> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  await rename(path, preservedPathFor(path, text));
+}
+
+export interface JournalOpenOptions {
+  /**
+   * Set when `readBundle` reported `journalRejected` for this file.
+   *
+   * The reader withheld every entry in it, so the writer must not append to it
+   * either: an op appended under a header this build rejects is an op the next read
+   * withholds too, which would leave a degraded-open project with no write-ahead log
+   * at all. The rejected bytes are preserved beside the bundle and a fresh journal
+   * at this build's version takes their place, so crash-safety is live from the
+   * first op rather than from the next snapshot.
+   */
+  headerRejected?: boolean;
 }
 
 /**
@@ -49,8 +99,9 @@ export class JournalWriter {
   }
 
   /**
-   * Open the journal for appending, writing the header if the file is new and
-   * repairing a torn tail if the last append did not finish.
+   * Open the journal for appending, writing the header if the file is new,
+   * repairing a torn tail if the last append did not finish, and replacing the file
+   * entirely — original preserved — if the reader rejected its schema header.
    *
    * The repair is what keeps property 2 above true across a crash. A killed writer
    * leaves a final line with no terminator; appending onto it would weld the next
@@ -60,8 +111,9 @@ export class JournalWriter {
    * boundary, and "a final chunk with no newline is a torn append" stays a rule
    * about one line rather than about two.
    */
-  async open(): Promise<void> {
+  async open(options: JournalOpenOptions = {}): Promise<void> {
     if (this.handle !== null) return;
+    if (options.headerRejected === true) await preserveRejectedJournal(this.path);
     // 'a' creates if missing and every write goes to the end, regardless of any
     // other handle's position.
     const handle = await open(this.path, 'a', 0o644);

@@ -23,7 +23,13 @@ export {
   type LoadedDocument,
 } from './documents.ts';
 
-export { JournalWriter, journalHeaderLine, readJournal, removeJournal } from './journal-file.ts';
+export {
+  JournalWriter,
+  journalHeaderLine,
+  readJournal,
+  removeJournal,
+  type JournalOpenOptions,
+} from './journal-file.ts';
 
 export { BundleLock, BundleLockedError, type LockInfo } from './lock.ts';
 

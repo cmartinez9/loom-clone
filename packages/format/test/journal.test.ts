@@ -336,6 +336,45 @@ describe('reopening a journal a crash left mid-append', () => {
     });
   });
 
+  it('preserves a journal whose header it refuses, and starts a fresh one', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      const original =
+        '{"schema":"loom.journal/99"}\n' +
+        '{"revision":11,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+      await writeFile(path, original);
+
+      const writer = new JournalWriter(path);
+      await writer.open({ headerRejected: true });
+      await writer.append([KEY_OP], 10);
+      await writer.close();
+
+      // The newer build's bytes survive under the same `.bak` convention a
+      // migration uses, rather than being appended to and then truncated away.
+      expect(await readFile(`${path}.v99.bak`, 'utf8')).toBe(original);
+
+      // And this build's write-ahead log is live from the very first op.
+      const parsed = await readJournal(path);
+      expect(parsed.headerRejected).toBe(false);
+      expect(parsed.header).toEqual({ schema: 'loom.journal/1' });
+      expect(parsed.entries.map((e) => e.revision)).toEqual([11]);
+    });
+  });
+
+  it('names the preserved file for a header carrying no version at all', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      await writeFile(path, 'not json at all\n');
+
+      const writer = new JournalWriter(path);
+      await writer.open({ headerRejected: true });
+      await writer.close();
+
+      expect(await readFile(`${path}.unreadable.bak`, 'utf8')).toBe('not json at all\n');
+      expect((await readJournal(path)).header).toEqual({ schema: 'loom.journal/1' });
+    });
+  });
+
   it('leaves a journal that already ends on a line boundary alone', async () => {
     await withTempDir(async (dir) => {
       const path = join(dir, 'edit.journal.ndjson');

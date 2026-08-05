@@ -293,7 +293,7 @@ export class ProjectStore {
       await sweepTempArtifacts(dir);
       const opened = await readBundle(dir, { upgrade: true });
       const journal = new JournalWriter(opened.paths.journal);
-      await journal.open();
+      await journal.open({ headerRejected: opened.journalRejected !== null });
 
       this.open.set(id, {
         id,

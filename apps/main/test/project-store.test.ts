@@ -315,6 +315,35 @@ describe('applying ops', () => {
     });
   });
 
+  it('preserves a rejected journal and writes new ops into a fresh one', async () => {
+    await withStore(async ({ store }) => {
+      const { id, paths } = await store.create('FromTheFuture');
+      const original =
+        '{"schema":"loom.journal/99"}\n' +
+        '{"revision":1,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+      await writeFile(paths.journal, original);
+      const preserved = `${paths.journal}.v99.bak`;
+
+      await store.openProject(id);
+      // Withheld means kept, not destroyed: the build that wrote those ops can
+      // still read them.
+      expect(await readFile(preserved, 'utf8')).toBe(original);
+
+      // The write-ahead log is live again from the first op — appending under the
+      // rejected header would mean the next read withheld this op too.
+      expect(await store.applyOps(id, [ADD_TRACK], 0)).toEqual({ revision: 1 });
+      const lines = (await readFile(paths.journal, 'utf8')).trimEnd().split('\n');
+      expect(JSON.parse(lines[0]!)).toEqual({ schema: 'loom.journal/1' });
+      expect(JSON.parse(lines[1]!)).toMatchObject({ revision: 1, op: { op: 'track.add' } });
+
+      // And the snapshot that truncates the journal does not touch what was kept.
+      await store.close(id);
+      expect(await readFile(preserved, 'utf8')).toBe(original);
+      expect((await readFile(paths.journal, 'utf8')).trimEnd().split('\n')).toHaveLength(1);
+      expect(JSON.parse(await readFile(paths.edit, 'utf8'))).toMatchObject({ revision: 1 });
+    });
+  });
+
   it('opens once when applyOps itself is what opens the project', async () => {
     await withStore(async ({ store }) => {
       const { id } = await store.create('RacedByApplyOps');
