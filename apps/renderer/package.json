@@ -1,0 +1,12 @@
+{
+  "name": "@loom/renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Renderer windows: library today; HUD, overlay and editor as later phases land.",
+  "dependencies": {
+    "@loom/design": "0.1.0",
+    "@loom/format": "0.1.0",
+    "@loom/ipc": "0.1.0"
+  }
+}

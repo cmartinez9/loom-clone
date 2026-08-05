@@ -1,0 +1,140 @@
+/* ============================================================
+   loom-clone — typographic foundation
+   Shared by both design directions.
+
+   All three faces are SIL Open Font License 1.1 — verified at
+   github.com/google/fonts/ofl/{instrumentserif,monasans,martianmono}/OFL.txt
+   OFL 1.1 permits embedding in desktop applications, commercial included.
+   Files are self-hosted in ./fonts (latin subset, woff2).
+   ============================================================ */
+
+/* Instrument Serif — display / voice.
+   Copyright 2022 The Instrument Serif Project Authors.
+   Single weight by design: it is a display face, not a text family. */
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("../fonts/instrument-serif-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("../fonts/instrument-serif-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+/* Mona Sans — UI workhorse. Variable: weight 200–900, width 75–125.
+   Copyright 2022 The Mona Sans Project Authors (GitHub), RFN "Mona". */
+@font-face {
+  font-family: "Mona Sans";
+  src: url("../fonts/mona-sans-normal.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Mona Sans";
+  src: url("../fonts/mona-sans-italic.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: italic;
+  font-display: block;
+}
+
+/* Martian Mono — numerals, timecode, durations. Variable: weight 100–800, width 75–112.5.
+   Copyright 2021 The Martian Mono Project Authors (Evil Martians). */
+@font-face {
+  font-family: "Martian Mono";
+  src: url("../fonts/martian-mono-normal.woff2") format("woff2");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-ui: "Mona Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-num: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* ---- Type scale ----------------------------------------------------
+     Display steps use a ~1.35 ratio; UI steps are hand-set at whole pixels
+     because a dense editor is built on the 1px grid, not on a ratio. */
+  --d1: 46px;   --d1-lh: 0.94;  --d1-ls: -0.022em;
+  --d2: 34px;   --d2-lh: 1.00;  --d2-ls: -0.018em;
+  --d3: 25px;   --d3-lh: 1.10;  --d3-ls: -0.012em;
+  --d4: 19px;   --d4-lh: 1.20;  --d4-ls: -0.008em;
+
+  --ui-lg:  15px; --ui-lg-lh: 20px;
+  --ui:     13px; --ui-lh:    18px;
+  --ui-sm:  12px; --ui-sm-lh: 16px;
+  --ui-xs:  11px; --ui-xs-lh: 14px;
+
+  --num-hero: 26px;
+  --num:      13px;
+  --num-sm:   11px;
+  --num-xs:   10px;
+
+  /* Optical weights. Mona Sans' variable axis lets us sit between the
+     usual 400/500 steps, which is how we get UI text that holds at 11px
+     without going bold and shouting. */
+  --w-text: 400;
+  --w-ui:   450;
+  --w-med:  530;
+  --w-bold: 650;
+}
+
+/* ---- Semantic type classes ---- */
+.t-d1, .t-d2, .t-d3, .t-d4 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-feature-settings: "liga" 1, "dlig" 1;
+}
+.t-d1 { font-size: var(--d1); line-height: var(--d1-lh); letter-spacing: var(--d1-ls); }
+.t-d2 { font-size: var(--d2); line-height: var(--d2-lh); letter-spacing: var(--d2-ls); }
+.t-d3 { font-size: var(--d3); line-height: var(--d3-lh); letter-spacing: var(--d3-ls); }
+.t-d4 { font-size: var(--d4); line-height: var(--d4-lh); letter-spacing: var(--d4-ls); }
+
+.t-ui   { font: var(--w-ui) var(--ui)/var(--ui-lh) var(--font-ui); }
+.t-ui-lg{ font: var(--w-ui) var(--ui-lg)/var(--ui-lg-lh) var(--font-ui); }
+.t-ui-sm{ font: var(--w-med) var(--ui-sm)/var(--ui-sm-lh) var(--font-ui); }
+
+/* Section labels: small, wide-tracked, uppercase — but set in Mona Sans at
+   width 112 so the tracking comes from the typeface's width axis rather than
+   from letter-spacing alone. Letter-spaced caps in a normal-width sans is the
+   tell of a generic design system; widening the actual glyphs is not. */
+.t-label {
+  font-family: var(--font-ui);
+  font-size: var(--ui-xs);
+  line-height: var(--ui-xs-lh);
+  font-weight: var(--w-bold);
+  font-stretch: 112%;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Numerals. Timecode is set condensed (width 78) so a dense ruler can carry
+   real timestamps instead of abbreviations. The hero timer runs at full width
+   because it is the one number the user reads from across the room. */
+.t-num {
+  font-family: var(--font-num);
+  font-size: var(--num);
+  font-weight: 450;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.t-num-sm { font-family: var(--font-num); font-size: var(--num-sm); font-weight: 500; font-stretch: 78%; font-variant-numeric: tabular-nums; }
+.t-num-xs { font-family: var(--font-num); font-size: var(--num-xs); font-weight: 500; font-stretch: 78%; font-variant-numeric: tabular-nums; }
+.t-num-hero {
+  font-family: var(--font-num);
+  font-size: var(--num-hero);
+  font-weight: 500;
+  font-stretch: 100%;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}

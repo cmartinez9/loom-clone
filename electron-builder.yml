@@ -1,0 +1,54 @@
+# Packaging. macOS only — captain decision 4, and there is no cross-platform
+# hedging anywhere in this repo.
+#
+# `appId` MUST stay `com.github.cmartinez9.loom-clone`. macOS TCC keys every
+# permission grant on it; changing it re-prompts for Screen Recording, Camera and
+# Microphone, silently produces black frames until they are granted again, and
+# requires a manual System Settings trip plus a relaunch for Accessibility
+# (research report §7, trap 7). `apps/main/src/identity.ts` is the single
+# declaration and `apps/main/test/identity.test.ts` fails the build if either
+# copy drifts.
+appId: com.github.cmartinez9.loom-clone
+productName: Loom Clone
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# Nothing is resolved from node_modules at runtime: esbuild and Vite bundle every
+# workspace package into dist/.
+files:
+  - dist/**/*
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.video
+  # Captain decision 7 (`data/loom-scope/decision-macos-floor.md`). Below 14 the
+  # app would have to ship a CoreAudio HAL plug-in, an admin password prompt and a
+  # coreaudiod restart to capture system audio.
+  minimumSystemVersion: '14.0'
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    LSMinimumSystemVersion: '14.0'
+    NSHighResolutionCapable: true
+    # TCC purpose strings. The app does not ask for any of these yet — capture is
+    # phase 1 and the first-run permission flow is phase 2, which owns the final
+    # copy. They are declared here from the first commit because a *missing*
+    # purpose string is not a prompt the user declines, it is an immediate crash.
+    NSCameraUsageDescription: >-
+      Loom Clone records your camera into the recording you are making. The video
+      stays on this Mac.
+    NSMicrophoneUsageDescription: >-
+      Loom Clone records your microphone into the recording you are making. The
+      audio stays on this Mac.

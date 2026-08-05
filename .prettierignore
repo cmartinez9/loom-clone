@@ -1,0 +1,8 @@
+dist/
+release/
+coverage/
+node_modules/
+packages/design/fonts/
+packages/design/css/tokens.css
+packages/design/css/type.css
+package-lock.json

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements the signed app is signed against. `electron-builder.yml` names this
+  file for both `entitlements` and `entitlementsInherit`, and `hardenedRuntime` is
+  on, so this is the whole set: declaring the file and not shipping it means
+  `npm run package` cannot sign at all.
+
+  The two device entitlements are here from phase 0 for the same reason the TCC
+  purpose strings are: capture is phase 1 and the permission flow is phase 2, but a
+  hardened build without them is *denied* camera and microphone at runtime with no
+  prompt the user can say yes to — the silent-permission-failure class this phase
+  exists to pre-empt (research report §7, trap 7).
+
+  The three `cs.` entitlements are what Electron itself needs under a hardened
+  runtime: V8 writes and executes JIT pages, and the Electron Framework is loaded
+  from inside the bundle.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+  </dict>
+</plist>

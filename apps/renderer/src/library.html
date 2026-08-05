@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Strict CSP. The origin is `loom://app`, so `'self'` is our own bundle; media
+      and images additionally come from `loom://recording`, which is a different
+      host and therefore a different origin. There is no `connect-src` to the
+      network at all: this app is local-only, and the CSP says so mechanically
+      rather than in a README.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self';
+               font-src 'self';
+               img-src 'self' data: loom:;
+               media-src loom:;
+               connect-src 'self' loom:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Recordings</title>
+    <script type="module" src="./library/main.ts"></script>
+  </head>
+  <body>
+    <div class="titlebar"></div>
+
+    <main class="sheet">
+      <header class="masthead">
+        <div class="kicker">
+          <span class="t-label">Library</span>
+          <span class="t-label kicker-dim">Local only · nothing leaves this machine</span>
+        </div>
+        <h1 class="t-d1">Recordings.</h1>
+        <p class="lede">
+          Every recording is a folder on your disk that you can open, move or back up yourself.
+          There is no account, no upload and no sync.
+        </p>
+        <dl class="facts" id="facts"></dl>
+      </header>
+
+      <div class="toolbar">
+        <button class="btn btn-sm" id="reveal-root" type="button">
+          <span data-ic="folder" data-sz="15"></span>
+          Open folder
+        </button>
+        <button class="btn btn-sm btn-ghost" id="refresh" type="button">
+          <span data-ic="restart" data-sz="15"></span>
+          Refresh
+        </button>
+      </div>
+
+      <ul class="rows" id="rows" aria-live="polite"></ul>
+    </main>
+  </body>
+</html>

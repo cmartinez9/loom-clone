@@ -1,0 +1,16 @@
+{
+  "name": "@loom/ipc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The typed main-renderer IPC contract. Shared by main, preload and every renderer.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@loom/format": "0.1.0"
+  }
+}
