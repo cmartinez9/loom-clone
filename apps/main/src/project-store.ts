@@ -271,6 +271,7 @@ export class ProjectStore {
         replay: { doc: existing.edit, applied: 0, skipped: 0, stoppedAt: null },
         journalTorn: false,
         journalProblems: [],
+        journalRejected: null,
       };
     }
 
@@ -329,6 +330,7 @@ export class ProjectStore {
         replay: { doc: open.edit, applied: 0, skipped: 0, stoppedAt: null },
         journalTorn: false,
         journalProblems: [],
+        journalRejected: null,
       };
     }
     return readBundle(await this.directoryFor(id), { upgrade: false });
@@ -606,6 +608,17 @@ function reportBackgroundFailure(what: string): (error: unknown) => void {
  * user silently loses the tail of their edits — left no trace anywhere.
  */
 function reportJournalRecovery(id: RecordingId, opened: OpenedBundle): void {
+  const rejected = opened.journalRejected;
+  if (rejected !== null) {
+    // The one recorded problem *is* this rejection, so reporting both would say
+    // the same thing twice.
+    console.warn(
+      `[ProjectStore] ${id}: the edit journal could not be read, so every entry in it ` +
+        `was withheld and the project was recovered to revision ` +
+        `${String(rejected.recoveredRevision)}. ${rejected.reason}`,
+    );
+    return;
+  }
   if (opened.journalTorn) {
     console.warn(`[ProjectStore] ${id}: journal ended mid-line; the partial append was discarded`);
   }

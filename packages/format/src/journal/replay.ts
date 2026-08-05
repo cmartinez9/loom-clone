@@ -76,6 +76,11 @@ export function parseJournal(
   const trailing = chunks.pop() ?? '';
   if (trailing.length > 0) result.torn = true;
 
+  // The header is the first line with anything on it, not line index 0. Keying it
+  // on the index would let a journal that starts with a stray newline skip the
+  // schema check entirely and replay its entries unverified.
+  let headerSeen = false;
+
   for (const [i, raw] of chunks.entries()) {
     const lineNo = i + 1;
     const line = raw.trim();
@@ -86,7 +91,7 @@ export function parseJournal(
       parsed = JSON.parse(line);
     } catch {
       result.problems.push({ line: lineNo, reason: 'not valid JSON' });
-      if (i === 0) {
+      if (!headerSeen) {
         // Without a readable header there is no schema, and no schema means no
         // basis for reading anything after it.
         result.headerRejected = true;
@@ -95,7 +100,8 @@ export function parseJournal(
       continue;
     }
 
-    if (i === 0) {
+    if (!headerSeen) {
+      headerSeen = true;
       try {
         const outcome = migrateDocument(registry, 'loom.journal', parsed);
         result.header = outcome.doc as unknown as JournalHeader;

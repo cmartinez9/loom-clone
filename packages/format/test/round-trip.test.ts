@@ -92,6 +92,30 @@ describe('bundle round trip', () => {
       expect(opened.replay.applied).toBe(0);
       expect(opened.journalTorn).toBe(false);
       expect(opened.journalProblems).toEqual([]);
+      expect(opened.journalRejected).toBeNull();
+    });
+  });
+
+  it('opens degraded, not never, when the journal schema is from the future', async () => {
+    await withTempDir(async (root) => {
+      const dir = await writeFixtureBundle(root);
+      const paths = bundlePaths(dir);
+      // A journal a newer build wrote. Its entries may mean anything, so none of
+      // them may be replayed — but refusing the bundle outright would make the
+      // user's footage permanently unopenable, which is the worse failure.
+      await writeFile(
+        paths.journal,
+        '{"schema":"loom.journal/99"}\n' +
+          `{"revision":${String(fixtureEdit().revision + 1)},` +
+          '"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n',
+      );
+
+      const opened = await readBundle(dir, { upgrade: false });
+
+      expect(opened.edit).toEqual(fixtureEdit());
+      expect(opened.replay.applied).toBe(0);
+      expect(opened.journalRejected?.recoveredRevision).toBe(fixtureEdit().revision);
+      expect(opened.journalRejected?.reason).toContain('refusing to open');
     });
   });
 

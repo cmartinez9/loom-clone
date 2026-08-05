@@ -267,4 +267,89 @@ describe('a journal torn by a crash', () => {
       expect(parsed.headerRejected).toBe(false);
     });
   });
+
+  it('checks the schema of the first line with anything on it, not line index 0', () => {
+    // A leading blank line must not carry the header past the schema check and let
+    // the entries below it replay unverified.
+    const text =
+      '\n' +
+      '{"schema":"loom.journal/99"}\n' +
+      '{"revision":48,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+    const parsed = parseJournal(text);
+    expect(parsed.headerRejected).toBe(true);
+    expect(parsed.entries).toEqual([]);
+  });
+
+  it('still reads a healthy journal that starts with a blank line', () => {
+    const text =
+      '\n' +
+      '{"schema":"loom.journal/1"}\n' +
+      '{"revision":48,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n';
+    const parsed = parseJournal(text);
+    expect(parsed.headerRejected).toBe(false);
+    expect(parsed.header).toEqual({ schema: 'loom.journal/1' });
+    expect(parsed.entries.map((e) => e.revision)).toEqual([48]);
+  });
+});
+
+describe('reopening a journal a crash left mid-append', () => {
+  it('repairs the torn tail so the next entry is not welded onto it', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      const first = new JournalWriter(path);
+      await first.open();
+      await first.append([KEY_OP, ADD_OP], 47);
+      await first.close();
+      await appendFile(path, '{"revision":50,"at":"2026-08-04T14:41:05.117Z","op":{"op":"key.se');
+
+      const second = new JournalWriter(path);
+      await second.open();
+      await second.append([KEY_OP], 49);
+      await second.close();
+
+      const parsed = await readJournal(path);
+      // Without the repair the new entry welds onto the torn one and both are
+      // discarded as a single unparseable line — losing an op that was fully and
+      // durably written.
+      expect(parsed.problems).toEqual([]);
+      expect(parsed.torn).toBe(false);
+      expect(parsed.entries.map((e) => e.revision)).toEqual([48, 49, 50]);
+    });
+  });
+
+  it('starts again from a header when the crash tore the header itself', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      await writeFile(path, '{"schema":"loom.jour');
+
+      const writer = new JournalWriter(path);
+      await writer.open();
+      await writer.append([KEY_OP], 0);
+      await writer.close();
+
+      const parsed = await readJournal(path);
+      // Welding onto the partial header would make line 1 unparseable, which now
+      // means `headerRejected` — a recording nothing could ever open again.
+      expect(parsed.headerRejected).toBe(false);
+      expect(parsed.header).toEqual({ schema: 'loom.journal/1' });
+      expect(parsed.entries.map((e) => e.revision)).toEqual([1]);
+    });
+  });
+
+  it('leaves a journal that already ends on a line boundary alone', async () => {
+    await withTempDir(async (dir) => {
+      const path = join(dir, 'edit.journal.ndjson');
+      const first = new JournalWriter(path);
+      await first.open();
+      await first.append([KEY_OP], 47);
+      await first.close();
+      const before = await readFile(path, 'utf8');
+
+      const second = new JournalWriter(path);
+      await second.open();
+      await second.close();
+
+      expect(await readFile(path, 'utf8')).toBe(before);
+    });
+  });
 });

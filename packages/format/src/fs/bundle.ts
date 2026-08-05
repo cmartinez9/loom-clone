@@ -20,7 +20,7 @@ import {
   validateProjectDoc,
   validateRecordingDoc,
 } from '../validate/documents.ts';
-import { MigrationError, type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
+import { type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
 import { replayJournal, type ReplayResult } from '../journal/replay.ts';
 import { loadAndUpgradeDocument, loadDocument } from './documents.ts';
 import { readJournal } from './journal-file.ts';
@@ -122,6 +122,17 @@ export interface OpenedBundle {
   journalTorn: boolean;
   /** Complete-but-unparseable journal lines. Empty in the healthy case. */
   journalProblems: readonly string[];
+  /**
+   * Set when the journal's schema header is not one this build understands.
+   *
+   * The bundle still opens, but **from `edit.json` alone**: every journal entry is
+   * withheld, because §2.7 forbids guessing at a schema and reading a newer build's
+   * ops under v1 assumptions is exactly that. Refusing the whole bundle would be
+   * worse — a crash inside the ~30-byte header write would make a recording
+   * permanently unopenable — so the damage and the revision the user was recovered
+   * to are reported here instead, for the app to say out loud.
+   */
+  journalRejected: { reason: string; recoveredRevision: number } | null;
 }
 
 /**
@@ -150,19 +161,10 @@ export async function readBundle(
 
   const snapshot = (await load(paths.edit, 'loom.edit', validateEditDocument, registry)).doc;
   const journal = await readJournal(paths.journal, registry);
-  // The journal is the one file whose schema check used to be advisory: its header
-  // problem was recorded and its entries replayed anyway. It refuses like every
-  // other document now — opening the bundle and *silently* dropping the tail of the
-  // user's edits would be the worse of the two failures.
-  if (journal.headerRejected) {
-    throw new MigrationError(
-      'unknown-schema',
-      `refusing to open: ${BUNDLE.journal} could not be read — ` +
-        (journal.problems[0]?.reason ?? 'its schema header is unreadable'),
-      paths.journal,
-    );
-  }
-  const replay = replayJournal(snapshot, journal.entries);
+  // A header this build cannot read withholds every entry rather than refusing the
+  // bundle: neither replaying them under v1 assumptions nor bricking the recording
+  // is acceptable, so the snapshot is the recovery point and the caller is told.
+  const replay = replayJournal(snapshot, journal.headerRejected ? [] : journal.entries);
 
   return {
     paths,
@@ -172,6 +174,13 @@ export async function readBundle(
     replay,
     journalTorn: journal.torn,
     journalProblems: journal.problems.map((p) => `line ${String(p.line)}: ${p.reason}`),
+    journalRejected: journal.headerRejected
+      ? {
+          reason:
+            journal.problems[0]?.reason ?? `${BUNDLE.journal} has an unreadable schema header`,
+          recoveredRevision: snapshot.revision,
+        }
+      : null,
   };
 }
 

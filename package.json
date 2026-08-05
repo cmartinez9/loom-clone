@@ -7,7 +7,7 @@
   "type": "commonjs",
   "main": "dist/main/index.cjs",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "workspaces": [
     "packages/*",

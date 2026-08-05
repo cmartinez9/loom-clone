@@ -21,6 +21,8 @@ import type { EditOp, JournalEntry } from '../journal/ops.ts';
 import { type MigrationRegistry, defaultRegistry } from '../migrate/registry.ts';
 import { isoTimestamp } from '../defaults.ts';
 
+const NEWLINE = 0x0a;
+
 /** The header line written when a journal is created or truncated. */
 export function journalHeaderLine(): string {
   return `${JSON.stringify({ schema: currentSchemaId('loom.journal') })}\n`;
@@ -46,7 +48,18 @@ export class JournalWriter {
     this.path = path;
   }
 
-  /** Open the journal for appending, writing the header if the file is new. */
+  /**
+   * Open the journal for appending, writing the header if the file is new and
+   * repairing a torn tail if the last append did not finish.
+   *
+   * The repair is what keeps property 2 above true across a crash. A killed writer
+   * leaves a final line with no terminator; appending onto it would weld the next
+   * entry to the torn one and produce a single unparseable line, so the *new*
+   * entry — fully and durably written — would be discarded on the following read.
+   * Truncating back to the last newline first means every append starts on a line
+   * boundary, and "a final chunk with no newline is a torn append" stays a rule
+   * about one line rather than about two.
+   */
   async open(): Promise<void> {
     if (this.handle !== null) return;
     // 'a' creates if missing and every write goes to the end, regardless of any
@@ -56,6 +69,16 @@ export class JournalWriter {
     if (size === 0) {
       await handle.write(Buffer.from(journalHeaderLine(), 'utf8'));
       this.dirty = true;
+    } else {
+      const existing = await readFile(this.path);
+      if (existing.at(-1) !== NEWLINE) {
+        // `lastIndexOf` of -1 means not one line survived — the header itself was
+        // torn — so there is nothing to keep and the file starts again.
+        const keep = existing.lastIndexOf(NEWLINE) + 1;
+        await handle.truncate(keep);
+        if (keep === 0) await handle.write(Buffer.from(journalHeaderLine(), 'utf8'));
+        await handle.sync();
+      }
     }
     this.handle = handle;
   }

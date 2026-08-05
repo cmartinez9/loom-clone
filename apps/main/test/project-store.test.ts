@@ -297,6 +297,24 @@ describe('applying ops', () => {
     });
   });
 
+  it('opens degraded when the journal schema is one this build cannot read', async () => {
+    await withStore(async ({ store }) => {
+      const { id, paths } = await store.create('FromTheFuture');
+      await writeFile(
+        paths.journal,
+        '{"schema":"loom.journal/99"}\n' +
+          '{"revision":1,"at":"2026-08-04T14:41:03.117Z","op":{"op":"clips.set","clips":[]}}\n',
+      );
+
+      // The recording must still open — it is the user's footage — from the last
+      // snapshot, with the unverifiable entries withheld rather than replayed.
+      const opened = await store.openProject(id);
+      expect(opened.replay.applied).toBe(0);
+      expect(opened.edit.revision).toBe(0);
+      expect(opened.journalRejected?.recoveredRevision).toBe(0);
+    });
+  });
+
   it('opens once when applyOps itself is what opens the project', async () => {
     await withStore(async ({ store }) => {
       const { id } = await store.create('RacedByApplyOps');
