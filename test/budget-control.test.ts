@@ -136,7 +136,8 @@ describe('the frame budget is enforced against a measured environment', () => {
    * Those guards catch a control that died or was truncated; they say nothing about §8.
    * But they are counts, counts come from the pacing, and the pacing has now moved
    * twice — so the arithmetic that turns one into the other is asserted here against a
-   * simulated fixed-refresh scheduler, at each of the three panels the gate reads off.
+   * simulated fixed-refresh scheduler, at each of the three panels the gate may meet.
+   * The guards themselves are all read off the fastest of them.
    *
    * The `+ 1` in {@link framesPerSpin} is the whole subtlety: a spin runs *after* the
    * frame body, so at 120 and 240 Hz, where `target + period` is an exact multiple of

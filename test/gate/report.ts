@@ -90,10 +90,12 @@ export interface GateFixture {
 /**
  * The measured environment control, and the proof that it is not an escape hatch.
  *
- * `test/gate/budget-control.ts` is the whole argument. In short: §8's bound is the
- * compositor's to meet on any host whose control clears it, and on a host whose
- * control does not, the shortfall is reported with the measured figure and the
- * compositor is held to the ceiling that control just demonstrated.
+ * `test/gate/budget-control.ts` is the whole argument. In short: this is one half of
+ * the branch condition — the other is {@link GateReport.gpuCost} beside
+ * {@link GateEnvironment.hardwareDecode} — and §8's bound is the compositor's to meet
+ * on any host that runs the product's workload *and* whose control clears it. Where
+ * this control does not clear it, the shortfall is reported with the measured figure
+ * and the compositor is held to the ceiling that control just demonstrated.
  */
 export interface GateBudgetControl {
   /** Measured in the scrub phase's own frames. */

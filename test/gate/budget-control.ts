@@ -157,9 +157,11 @@ export const CONTROL_PERIOD_MS = FRAME_BUDGET_MS * 2;
  *
  * Two consequences the panel decides and the gate must not assume: the duty is *at
  * most* the fifth {@link CONTROL_PERIOD_MS} argues for, quantisation only ever lowering
- * it; and how many frames a control sample speaks for grows with the refresh rate, so a
- * ratio guard has to be read off the fastest panel the gate expects to meet and a
- * floor off the slowest.
+ * it; and how many frames a control sample speaks for grows with the refresh rate, so
+ * **both** the ratio guard and the spin floors are read off the fastest panel the gate
+ * expects to meet — that is where one sample stands for the most frames and a phase
+ * therefore yields the fewest spins, which is the only side either can be derived from.
+ * `test/phase6-gate.test.ts` is where they are.
  */
 export function framesPerSpin(refreshHz: number): number {
   return Math.floor((CONTROL_TARGET_MS + CONTROL_PERIOD_MS) / (1000 / refreshHz)) + 1;
@@ -712,7 +714,8 @@ export function spinResolution(spins: number): number {
  * Returns the line the caller should report. **Throws — the gate fails — whenever the
  * compositor is the one that came up short**, which is what stops this branch from
  * being a way to pass by compositing slowly on a busy machine. Two things are asked of
- * it, and they belong to the two different doors that reach here:
+ * it — how badly, and how often — and *how badly* is a different bound on each of the
+ * two doors that reach here:
  *
  * - **how badly** the worst frame missed, against {@link TRACKS_CONTROL}× the worst spin
  *   — asked only where the control itself exceeded the budget, which is the only place
@@ -724,7 +727,7 @@ export function spinResolution(spins: number): number {
  * - **how often** the budget was missed at all, against how often this host missed it in
  *   the same frames ({@link overBudgetRate}) — asked on both doors.
  *
- * The second is a plain `>` against the control's own share, with no factor in it. A
+ * *How often* is a plain `>` against the control's own share, with no factor in it. A
  * factor there would be a number tuned until a known regression separated, judged
  * against a statistic a stalling host inflates — which is the circularity the ceiling
  * above already has, one level up. What does bound it is {@link spinResolution}: a share

@@ -295,13 +295,17 @@ a gap lives in `recording.json`, never in the container.
   ceiling is not asked at all; asking it would turn a fixed 16.67 ms bar into a moving
   12.60–15.15 ms one on the branch whose whole purpose is not failing a host for being a
   different machine. That door carries its own single-frame bound instead: §8's frame
-  **scaled by the per-frame work this host was measured doing**, `16.67 × (median GPU
-composite / 1.67)`, which is 33.1 ms on the runner. It is dimensional scaling by a
-  measured quantity rather than one of the arbitrary multipliers this gate has rejected
-  three times — the divisor does not move when the compositor gets slower — and it is
-  computed at judgement time, never pinned. At extreme ratios (swiftshader's 42.7 ms earns
-  427 ms) it degrades to no practical effect, which is a graceful floor and not a bug: such
-  a host was never going to say anything about §8.
+  **scaled by the per-frame work this host was measured doing**,
+  `16.67 × (median GPU composite / 1.67)`, which is 33.1 ms on the runner. It is
+  dimensional scaling by a measured quantity rather than one of the arbitrary multipliers
+  this gate has rejected three times, and it is computed at judgement time, never pinned.
+  The divisor is fixed, but the **numerator is measured on the compositor under test**, so
+  a GPU-side regression lifts this envelope ten times faster than it lifts the frame the
+  envelope judges: **the share beside it is what catches that class, and must never be
+  dropped on the strength of this bound**. A CPU-side regression — the one this gate is
+  judged on — leaves the GPU median where it was and is caught by both. At extreme ratios
+  (swiftshader's 42.7 ms earns 427 ms) the envelope degrades to no practical effect, which
+  is a graceful floor and not a bug: such a host was never going to say anything about §8.
   Both doors keep the over-budget **share**, a plain `>` against the host's own, floored at
   what the control could resolve: N spins report in steps of `1/N`, so a finer frame share
   cannot be told from a quantised zero and is reported INCONCLUSIVE rather than failed.
