@@ -32,6 +32,7 @@ export {
   DEFAULT_FLUSH_MS,
   DEFAULT_SAMPLE_HZ,
   DEFAULT_START_TIMEOUT_MS,
+  DEFAULT_STOP_TIMEOUT_MS,
   DEFAULT_SYNC_MS,
   InputSampler,
   type InputSamplerOptions,

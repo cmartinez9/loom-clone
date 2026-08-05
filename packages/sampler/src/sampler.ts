@@ -49,6 +49,34 @@ export const DEFAULT_SYNC_MS = 1000;
  */
 export const DEFAULT_START_TIMEOUT_MS = 5000;
 
+/**
+ * How long `stop()` waits for the helper to close its output before abandoning it.
+ *
+ * `'close'` rather than `'exit'` is what says the final flush window has been read,
+ * and that is a promise somebody else has to keep: `'close'` needs *every* holder of
+ * the pipe to let go, not just the process to be reaped. Two holders in this codebase
+ * may not. The acceptance test's disclaim shim runs `spawn-disclaimed`, which
+ * `posix_spawn`s a grandchild on the inherited fds and installs no signal handler, so
+ * a `SIGTERM` kills the shim on the default disposition and orphans a grandchild that
+ * still holds stdout. The production analogue is a main run loop wedged inside
+ * `NSCursor.currentSystemCursor`, which outlives the helper's own `SIGTERM` dispatch
+ * source because that source only asks `CFRunLoopStop` nicely. Neither may leave a
+ * recording unable to finalize, so the wait is bounded and an abandoned helper is
+ * reported rather than waited on.
+ */
+export const DEFAULT_STOP_TIMEOUT_MS = 5000;
+
+/**
+ * How long the helper gets to leave on its own after `stop`, before `SIGTERM` and
+ * then `SIGKILL`.
+ *
+ * `SIGKILL` is the escalation a wedged run loop cannot ignore, and the only one that
+ * closes the stdout of a helper stuck inside AppKit. It cannot help against the
+ * orphaned grandchild above — nothing this process can signal holds that pipe — which
+ * is why the bound exists on top of it.
+ */
+const STOP_GRACE_MS = 1000;
+
 /** `RecordingEvents.clicks.source` — the mechanism, so a log is diagnosable later. */
 export const CLICK_SOURCE = 'cgeventtap';
 
@@ -85,6 +113,13 @@ export interface InputSamplerOptions {
    * does not allow: a helper that cannot report is reported, never waited on.
    */
   startTimeoutMs?: number;
+  /**
+   * How long `stop()` waits for the helper to close its output before abandoning it.
+   *
+   * See {@link DEFAULT_STOP_TIMEOUT_MS} for the two ways a helper's stdout can outlive
+   * every signal this process can send it.
+   */
+  stopTimeoutMs?: number;
   /** Called on every click-capability transition — never on every sample. */
   onCapability?: (capability: ClickCapability) => void;
   /** Background failures with no caller to return to. Logged loudly by default. */
@@ -155,6 +190,7 @@ export class InputSampler {
       flushMs: options.flushMs ?? DEFAULT_FLUSH_MS,
       syncMs: options.syncMs ?? DEFAULT_SYNC_MS,
       startTimeoutMs: options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS,
+      stopTimeoutMs: options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS,
       sink: options.sink,
       t0Us: options.t0Us,
       ...(options.onCapability === undefined ? {} : { onCapability: options.onCapability }),
@@ -306,9 +342,15 @@ export class InputSampler {
   /**
    * Stop sampling and flush everything.
    *
-   * `stop` on stdin first, `SIGTERM` after a grace period: the helper's clean exit
-   * path disables the tap and flushes its own buffer, and killing it outright would
-   * discard up to 100 ms of samples for no reason.
+   * `stop` on stdin first, `SIGTERM` after a grace period, `SIGKILL` after another:
+   * the helper's clean exit path disables the tap and flushes its own buffer, and
+   * killing it outright would discard up to 100 ms of samples for no reason.
+   *
+   * The whole wait is bounded by {@link DEFAULT_STOP_TIMEOUT_MS}, because a pipe can
+   * be held by something no signal of ours reaches. Whatever the helper managed to
+   * say is written either way; what the bound gives up on is the helper, and that is
+   * said out loud through `onError` rather than left as a recording that never
+   * finalizes.
    */
   async stop(): Promise<void> {
     if (this.state === 'stopping' || this.state === 'stopped') {
@@ -326,10 +368,24 @@ export class InputSampler {
       } catch {
         // The pipe is already gone; the exit handler covers it.
       }
-      const kill = setTimeout(() => child.kill('SIGTERM'), 1000);
+      const term = setTimeout(() => child.kill('SIGTERM'), STOP_GRACE_MS);
+      term.unref?.();
+      const kill = setTimeout(() => child.kill('SIGKILL'), STOP_GRACE_MS * 2);
       kill.unref?.();
-      await this.exit;
+
+      const abandoned = await this.awaitExit();
+      clearTimeout(term);
       clearTimeout(kill);
+      if (abandoned) {
+        child.kill('SIGKILL');
+        this.report(
+          new Error(
+            `the input sampler did not close its output within ` +
+              `${String(this.options.stopTimeoutMs)} ms and has been abandoned; it may still ` +
+              `hold a click event tap`,
+          ),
+        );
+      }
     }
 
     this.clearTimers();
@@ -571,6 +627,25 @@ export class InputSampler {
   private enqueue(work: () => Promise<void>): void {
     this.writes = this.writes.then(work, work).catch((error: unknown) => {
       this.report(error instanceof Error ? error : new Error(String(error)));
+    });
+  }
+
+  /**
+   * Wait for the helper's output to close, bounded.
+   *
+   * Resolves `false` when the helper closed, `true` when the bound expired first and
+   * the caller should treat it as abandoned.
+   */
+  private awaitExit(): Promise<boolean> {
+    return new Promise<boolean>((fulfil) => {
+      const bound = setTimeout(() => {
+        fulfil(true);
+      }, this.options.stopTimeoutMs);
+      bound.unref?.();
+      void this.exit.then(() => {
+        clearTimeout(bound);
+        fulfil(false);
+      });
     });
   }
 

@@ -144,12 +144,14 @@ rewriting a growing JSON once a second for the length of the recording.
   part, on purpose: they share no revision, write a different file, and must not be
   able to queue behind a snapshot's recursive bundle-size walk — anything queued in
   memory is exactly what a crash costs.
-- **Stop the sampler, then close the project — in that order.** Every `ProjectStore`
-  write requires the project to be open and throws `UnknownRecordingError` otherwise;
-  none of them opens a bundle on the caller's behalf. The event-log and cursor-bitmap
-  writes are driven from the sampler's timers, so closing first turns a straggling
-  write into a loud, typed refusal rather than a silent re-open that re-takes the
-  bundle `.lock` and holds a closed recording for the rest of the session.
+- **Stop the sampler, then close the project — in that order.** `ProjectStore`'s
+  event-log and cursor-bitmap writes require the project to be open and throw
+  `UnknownRecordingError` otherwise; they never open a bundle on the caller's behalf,
+  because they are driven from the sampler's timers rather than from a user action.
+  Closing first therefore turns a straggling write into a loud, typed refusal rather
+  than a silent re-open that re-takes the bundle `.lock` and holds a closed recording
+  for the rest of the session. `applyOps` is the deliberate exception and still opens
+  a closed project: it is a renderer-driven user action, not a background timer.
 - **A spawned helper is not asar-aware.** Electron patches `fs` to read through
   `app.asar`; `child_process.spawn` hands the literal path to `uv_spawn`, which does
   not. Anything executable resolved under `dist/` goes through

@@ -276,6 +276,38 @@ describe('InputSampler', () => {
     expect(problems.join('\n')).toContain('protocol 99');
   });
 
+  it('gives up on a helper that never closes its output, and says so', async () => {
+    const previous = process.env['LOOM_FAKE_SCENARIO'];
+    process.env['LOOM_FAKE_SCENARIO'] = 'wedged';
+    const problems: string[] = [];
+    try {
+      const sink = new MemorySink();
+      const sampler = new InputSampler({
+        sink,
+        helperPath: FAKE,
+        t0Us: 1_000_000_000,
+        stopTimeoutMs: 300,
+        onError: (error) => problems.push(error.message),
+      });
+      await sampler.start();
+      await new Promise((fulfil) => setTimeout(fulfil, 150));
+
+      // `close` needs every holder of the pipe to let go, and one of them may be a
+      // grandchild nothing here can signal. Without a bound this never returns and
+      // the recording cannot be finalized.
+      await sampler.stop();
+
+      // Abandoned, not silently forgotten: a helper still holding a click event tap
+      // is exactly the thing that must not disappear from the record.
+      expect(problems.join('\n')).toContain('abandoned');
+      // And what it did say was written, not discarded with the process.
+      expect(sink.lines('cursor').filter((line) => line['e'] === undefined)).toHaveLength(1);
+    } finally {
+      if (previous === undefined) delete process.env['LOOM_FAKE_SCENARIO'];
+      else process.env['LOOM_FAKE_SCENARIO'] = previous;
+    }
+  });
+
   it('refuses to start twice', async () => {
     const sampler = new InputSampler({
       sink: new MemorySink(),

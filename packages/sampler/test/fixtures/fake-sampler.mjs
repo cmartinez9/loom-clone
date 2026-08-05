@@ -122,6 +122,20 @@ const SCENARIOS = {
     },
   ],
 
+  /**
+   * A helper that answers, and then holds its output open through everything.
+   *
+   * Stands in for the two shapes a pipe can outlive the signals sent at it: the
+   * disclaim shim dying on the default disposition and orphaning a grandchild that
+   * still holds stdout, and a main run loop wedged in `NSCursor.currentSystemCursor`
+   * that the helper's own SIGTERM dispatch source only asks nicely to stop.
+   */
+  wedged: [
+    { k: 'hello', version: 1, pid: process.pid, tUs: T0, monotonicUs: T0, hz: 120, shapeNames: 17 },
+    { k: 'status', tUs: T0, clicks: tap({ reason: 'accessibility-denied' }) },
+    { k: 'cursor', tUs: T0 + 8000, x: 0.5, y: 0.5, c: '', m: 0 },
+  ],
+
   /** A display reconfiguration mid-recording (§2.5). */
   reconfigure: [
     { k: 'hello', version: 1, pid: process.pid, tUs: T0, monotonicUs: T0, hz: 120, shapeNames: 17 },
@@ -162,13 +176,24 @@ process.stdout.write(text.slice(split));
 
 if (scenario === 'granted-then-crash') process.exit(4);
 
-// Stay alive until the parent says stop or closes the pipe, exactly like the helper.
+// Stay alive until the parent says stop or closes the pipe, exactly like the helper —
+// unless the scenario is `wedged`, which answers to nothing short of SIGKILL.
+const deaf = scenario === 'wedged';
+
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
+  if (deaf) return;
   if (chunk.includes('"stop"')) {
     process.stdout.write(`${JSON.stringify({ k: 'bye', tUs: T0 + 30_000_000 })}\n`);
     process.exit(0);
   }
 });
-process.stdin.on('end', () => process.exit(0));
-process.on('SIGTERM', () => process.exit(0));
+process.stdin.on('end', () => {
+  if (!deaf) process.exit(0);
+});
+process.on('SIGTERM', () => {
+  if (!deaf) process.exit(0);
+});
+// A closed stdin would otherwise empty the event loop and end the process, which is
+// the one thing this scenario must not do: the pipe has to outlive the request.
+if (deaf) setInterval(() => {}, 1000);
