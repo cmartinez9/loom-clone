@@ -294,23 +294,33 @@ a gap lives in `recording.json`, never in the container.
   control beside it was healthy and 1.5 × 8.40 ms is 12.60 ms — **below** §8 — so that
   ceiling is not asked at all; asking it would turn a fixed 16.67 ms bar into a moving
   12.60–15.15 ms one on the branch whose whole purpose is not failing a host for being a
-  different machine. Both doors keep the over-budget **share**, a plain `>` against the
-  host's own, floored at what the control could resolve: N spins report in steps of `1/N`,
-  so a finer frame share cannot be told from a quantised zero and is reported INCONCLUSIVE
-  rather than failed. **That floor is computed from the spin count at judgement time and
-  must never be pinned to a number** — it is a property of the sample size, and the moment
-  it is written down it becomes an over-budget tolerance. It is also inert on the ceiling's
-  door: a control that missed the budget has `spinShare >= 1/N` already, so nothing that
-  beats `spinShare` can be under the floor.
-  **Regression detection therefore carries the representativeness door**, and it was
-  measured rather than argued. The documented regression — 20 ms on one composite in
-  thirty, patched into the shipping `Compositor.render` — goes red on **both** branches:
-  strict, on §8's own assertion; deferred, on the share, ~3.3% of frames against a host
-  that missed none of its own spins, five times the floor. CI run 31039796990 sits the
-  other side of it — 1 frame of 380, 0.263%, against a 154-spin control resolving 0.649% —
-  and is reported as inconclusive, which is the outcome this shape exists to produce. The
-  **slow-compositor control is the only absolute check left on that door**, which is why
-  it is asserted unconditionally and why it must never be made conditional. The one
+  different machine. That door carries its own single-frame bound instead: §8's frame
+  **scaled by the per-frame work this host was measured doing**, `16.67 × (median GPU
+composite / 1.67)`, which is 33.1 ms on the runner. It is dimensional scaling by a
+  measured quantity rather than one of the arbitrary multipliers this gate has rejected
+  three times — the divisor does not move when the compositor gets slower — and it is
+  computed at judgement time, never pinned. At extreme ratios (swiftshader's 42.7 ms earns
+  427 ms) it degrades to no practical effect, which is a graceful floor and not a bug: such
+  a host was never going to say anything about §8.
+  Both doors keep the over-budget **share**, a plain `>` against the host's own, floored at
+  what the control could resolve: N spins report in steps of `1/N`, so a finer frame share
+  cannot be told from a quantised zero and is reported INCONCLUSIVE rather than failed.
+  **That floor is computed from the spin count at judgement time and must never be pinned
+  to a number** — it is a property of the sample size, and the moment it is written down it
+  becomes an over-budget tolerance. It is also inert on the ceiling's door: a control that
+  missed the budget has `spinShare >= 1/N` already, so nothing that beats `spinShare` can be
+  under the floor.
+  **What the representativeness door does and does not claim.** It detects regressions by
+  **rate**, and bounds single frames only by that scaled envelope. **It does not certify
+  §8.** The documented regression — 20 ms on one composite in thirty, patched into the
+  shipping `Compositor.render` — goes red on **both** branches: strict, on §8's own
+  assertion; deferred, on the share, ~3.3% of frames against a host that missed none of its
+  own spins, five times the floor. CI run 31039796990 sits the other side of it — 1 frame of
+  380, 0.263%, against a 154-spin control resolving 0.649%, and 17.20 ms inside the 33.1 ms
+  envelope — so it is reported inconclusive, which is the outcome this shape exists to
+  produce. The **slow-compositor control is asserted unconditionally** and must never be
+  made conditional: it is what proves the rate bound still detects a compositor slow on
+  every frame. The one
   surviving gap is the **middle band**: the ceiling is a multiple of a number measured on
   the thread the compositor saturates, so it rises with the regression it judges, and under
   sustained load the host's own over-budget share runs ahead of the regression's (22% of

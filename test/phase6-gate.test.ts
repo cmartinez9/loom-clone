@@ -418,13 +418,14 @@ describe('phase 6 gate: 4K scrub and play', () => {
       // Where both answer yes the four assertions below are exactly §8's, unchanged.
       // Where either does not, the shortfall is reported and the compositor is held to
       // what that control measured instead — which of the two answered no decides what:
-      // a stalled control earns the ceiling it measured, a host that simply is not this
-      // product's machine earns no per-frame number at all, because 1.5x a *healthy*
-      // 8.40 ms spin is 12.60 ms and holding a runner to that is tighter than §8 rather
-      // than looser. Both doors keep the share of windows missed, floored at what that
-      // control could resolve, and that is the part that stops this being an escape
-      // hatch. `test/gate/budget-control.ts` argues it; the slow-compositor control
-      // below and `test/budget-control.test.ts` prove it.
+      // a stalled control earns the ceiling it measured, and a host that simply is not
+      // this product's machine earns §8's own frame scaled by how much more per-frame
+      // work it was measured doing. Not 1.5x its healthy 8.40 ms spin, which is 12.60 ms
+      // and tighter than §8 rather than looser. Both doors keep the share of windows
+      // missed, floored at what that control could resolve, and between the scaled
+      // envelope and that share this is not an escape hatch.
+      // `test/gate/budget-control.ts` argues it; the slow-compositor control below and
+      // `test/budget-control.test.ts` prove it.
       const shortfalls: string[] = [];
       const scrubHost: HostProfile = {
         hardwareDecode: report.environment.hardwareDecode,

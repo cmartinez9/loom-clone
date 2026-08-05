@@ -348,6 +348,51 @@ export function hostRepresentsTarget(host: HostProfile): boolean {
   return gpuMs <= REPRESENTATIVE_GPU_MS;
 }
 
+/**
+ * §8's frame, scaled by how much more per-frame work this host was measured doing —
+ * the single-frame bound on the representativeness door, and `null` where the driver
+ * offered no reading to scale by.
+ *
+ * `budgetMs × (median GPU composite / {@link REPRESENTATIVE_GPU_MS})`, both terms
+ * measured or already declared, computed at judgement time. Nothing new is introduced
+ * and nothing is pinned: move the host and the bound moves with it.
+ *
+ * ## Why this is not the widened bound this project has rejected three times
+ *
+ * It looks superficially like one, and the next reader must not mistake it. What was
+ * rejected each time was an **arbitrary multiplier or tolerance** — a 3× stall ceiling,
+ * a one-in-a-hundred over-budget allowance, a p99 standing in for the max — and every
+ * one of them let a **worse product pass on the same hardware**. This is **dimensional
+ * scaling by a measured quantity**: a host measured doing twice the per-frame work is
+ * given twice the frame time, and a compositor that got slower on a fixed host still
+ * fails, because the divisor did not move. Decisively, the door this applies to has **no
+ * single-frame bound at all** without it — the tracking ceiling belongs to the stalled
+ * control's door and is not asked here — so this is strictly *more* checking than not
+ * having it, which is the opposite of a weakening.
+ *
+ * ## Where it stops meaning anything, said out loud
+ *
+ * The ratio is unbounded above, so a wildly non-representative host — `use-angle
+ * swiftshader` measured 42.7 ms of GPU per composite — earns an envelope so large
+ * (427 ms) that it has no practical effect on any single frame. That is a **graceful
+ * floor, not a wrong answer**: such a host was never going to say anything about §8, and
+ * the rate check beside this one is what carries regression detection there. Do not read
+ * it later as a bug and do not cap it with a constant; a cap would be exactly the
+ * arbitrary multiplier this avoids.
+ *
+ * Checked against figures rather than derived from them: the paravirtual runner's
+ * 3.309 ms median gives 16.67 × (3.309 / 1.667) = 33.1 ms, so CI run 31039796990's
+ * 17.20 ms frame clears it, the 123.6 ms frame that same runner has produced does not,
+ * and neither does a 500 ms one. The ratio is always above 1 here by construction —
+ * a host under {@link REPRESENTATIVE_GPU_MS} is representative and never reaches this
+ * door — so the envelope can never be tighter than §8's own number.
+ */
+export function scaledFrameEnvelope(host: HostProfile, budgetMs: number): number | null {
+  const gpuMs = host.gpu.medianMs;
+  if (gpuMs === null) return null;
+  return budgetMs * (gpuMs / REPRESENTATIVE_GPU_MS);
+}
+
 /** The median of a phase's completed timer-query results, and its worst. */
 export function gpuProfile(samplesMs: readonly number[]): GpuProfile {
   if (samplesMs.length === 0) return NO_GPU_PROFILE;
@@ -660,9 +705,12 @@ export function spinResolution(spins: number): number {
  * - **how badly** the worst frame missed, against {@link TRACKS_CONTROL}× the worst spin
  *   — asked only where the control itself exceeded the budget, which is the only place
  *   that ceiling is looser than the number it stands in for. See {@link TRACKS_CONTROL}.
+ * - **how badly**, on the other door, against {@link scaledFrameEnvelope} — §8's own
+ *   frame scaled by how much more per-frame work this host was measured doing. A phase
+ *   deferred for representativeness alone would otherwise carry no single-frame bound at
+ *   all, and one catastrophic frame in a phase can fall under the rate check's floor.
  * - **how often** the budget was missed at all, against how often this host missed it in
- *   the same frames ({@link overBudgetRate}) — asked on both doors, and the only thing
- *   asked on the representativeness one.
+ *   the same frames ({@link overBudgetRate}) — asked on both doors.
  *
  * The second is a plain `>` against the control's own share, with no factor in it. A
  * factor there would be a number tuned until a known regression separated, judged
@@ -689,6 +737,18 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
           `however slow the machine is. ${figures(control, budgetMs)}`,
       );
     }
+  } else if (!hostRepresentsTarget(evidence.host)) {
+    const envelope = scaledFrameEnvelope(evidence.host, budgetMs);
+    if (envelope !== null && measured.maxMs > envelope) {
+      throw new Error(
+        `${what}: worst frame ${fmt(measured.maxMs)} ms at frame ${measured.maxAt}, over the ` +
+          `${fmt(envelope)} ms this host's own workload earns — ${fmt(budgetMs)} ms scaled by the ` +
+          `${fmt(evidence.host.gpu.medianMs ?? 0)} ms it spends per composite against the ` +
+          `${fmt(REPRESENTATIVE_GPU_MS)} ms a representative one may. A machine doing that much ` +
+          `more work per frame is given that much more frame; nothing here excuses a frame past ` +
+          `it. ${describeHost(evidence.host)}. ${figures(control, budgetMs)}`,
+      );
+    }
   }
   const frameShare = overBudgetRate(measured.overBudget, measured.count);
   const spinShare = overBudgetRate(control.overBudget, control.count);
@@ -707,12 +767,27 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
   }
   return (
     `${what}: ${whyDeferred(evidence)} — ${figures(control, budgetMs)}; ` +
-    `${describeHost(evidence.host)}. The worst frame was ${fmt(measured.maxMs)} ms ` +
+    `${describeHost(evidence.host)}. The worst frame was ${fmt(measured.maxMs)} ms` +
+    `${envelopeCleared(evidence)} ` +
     `(${measured.overBudget} of ${measured.count} frames over budget, ${pct(frameShare)}, against ` +
     `the host's own ${pct(spinShare)})${verdict(frameShare, resolution, control.count)}. ` +
     `See test/gate/budget-control.ts; §8's number is asserted exactly as written on any host ` +
     `that runs the product's own workload and whose control clears it.`
   );
+}
+
+/**
+ * The single-frame bound this phase actually cleared, named in the line it passed on.
+ *
+ * Only the representativeness door carries {@link scaledFrameEnvelope}, so a report that
+ * does not name it was judged by the ceiling or by nothing, and saying which is the
+ * difference between a deferral a reader can check and one they have to re-derive.
+ */
+function envelopeCleared(evidence: BudgetEvidence): string {
+  if (!environmentSustainsBudget(evidence.control, evidence.budgetMs)) return '';
+  const envelope = scaledFrameEnvelope(evidence.host, evidence.budgetMs);
+  if (envelope === null || hostRepresentsTarget(evidence.host)) return '';
+  return `, inside the ${fmt(envelope)} ms this host's own per-frame workload earns,`;
 }
 
 /**

@@ -39,6 +39,7 @@ import {
   overBudgetRate,
   REPRESENTATIVE_GPU_MS,
   REPRESENTATIVE_GPU_SHARE,
+  scaledFrameEnvelope,
   SLOW_COMPOSITE_MS,
   spinResolution,
   TRACKS_CONTROL,
@@ -458,6 +459,95 @@ describe('the frame budget is enforced against a measured environment', () => {
         evidence({ count: 900, maxMs: 20.3, maxAt: 256, overBudget: 30 }, ciControl, RUNNER_HOST),
       ),
     ).toThrow(/a larger share than this host missed it on of its own spins/);
+  });
+
+  /**
+   * **The single-frame bound on the representativeness door.**
+   *
+   * The rate check above cannot see one catastrophic frame: a share under `1/spins` is
+   * quantisation, so on the runner's own figures up to two frames of *any* magnitude
+   * would be reported inconclusive with nothing else to say about them. The ceiling
+   * belongs to the other door. So the frame is held to §8's own number scaled by how much
+   * more per-frame work this host was measured doing — dimensional scaling by a measured
+   * quantity, not a multiplier picked to clear a run, and strictly more checking than the
+   * nothing that was there before it.
+   */
+  it('bounds a single frame by §8’s frame scaled to the host’s own workload', () => {
+    // 16.67 x (3.309 / 1.667) = 33.1 ms on the runner, and never tighter than §8 itself:
+    // a host under the representative line never reaches this door at all.
+    const envelope = scaledFrameEnvelope(RUNNER_HOST, FRAME_BUDGET_MS);
+    expect(envelope).not.toBeNull();
+    expect(envelope).toBeCloseTo(
+      FRAME_BUDGET_MS * ((RUNNER_HOST.gpu.medianMs ?? 0) / REPRESENTATIVE_GPU_MS),
+      10,
+    );
+    expect(envelope ?? 0).toBeCloseTo(33.09, 1);
+    expect(envelope ?? 0).toBeGreaterThan(FRAME_BUDGET_MS);
+
+    // Computed from the measurement, never pinned: twice the per-frame work, twice the
+    // frame time.
+    const heavier: HostProfile = {
+      hardwareDecode: 'no',
+      gpu: { count: 290, medianMs: 6.618, maxMs: 12 },
+    };
+    expect(scaledFrameEnvelope(heavier, FRAME_BUDGET_MS) ?? 0).toBeCloseTo((envelope ?? 0) * 2, 10);
+
+    // The frame the rate check cannot see, on the runner's own figures: 1 of 380 against
+    // a 154-spin control is under the floor, so only this bound stands between a 123.6 ms
+    // frame — a magnitude that runner has actually produced — and a pass.
+    const ciControl = control({ count: 154, maxMs: 10.1, maxAt: 96, meanMs: 8.47 });
+    const catastrophic = evidence(
+      { count: 380, maxMs: 123.6, maxAt: 186, overBudget: 1 },
+      ciControl,
+      RUNNER_HOST,
+    );
+    expect(overBudgetRate(1, 380)).toBeLessThan(spinResolution(ciControl.count));
+    expect(() => expectTracksControl(catastrophic)).toThrow(
+      /over the 33.09 ms this host's own workload earns/,
+    );
+    // And 500 ms, the same way.
+    expect(() =>
+      expectTracksControl(
+        evidence({ count: 380, maxMs: 500, maxAt: 186, overBudget: 1 }, ciControl, RUNNER_HOST),
+      ),
+    ).toThrow(/this host's own workload earns/);
+
+    // While the run this round was built for clears it and says so.
+    const ciRun = expectTracksControl(
+      evidence({ count: 380, maxMs: 17.2, maxAt: 186, overBudget: 1 }, ciControl, RUNNER_HOST),
+    );
+    expect(ciRun).toContain("inside the 33.09 ms this host's own per-frame workload earns");
+    expect(ciRun).toContain('INCONCLUSIVE');
+  });
+
+  /**
+   * Where the scaled envelope stops meaning anything, stated so it is not later read as
+   * a bug: the ratio is unbounded above, so a wildly non-representative host earns an
+   * envelope with no practical single-frame effect. That is a graceful floor — such a
+   * host was never going to say anything about §8 — and capping it with a constant would
+   * be exactly the arbitrary multiplier this shape avoids.
+   */
+  it('CONTROL: degrades gracefully on a host nothing could represent', () => {
+    // `use-angle swiftshader`, measured: 42.7 ms of GPU per composite.
+    const swiftshader: HostProfile = {
+      hardwareDecode: 'no',
+      gpu: { count: 120, medianMs: 42.749, maxMs: 61 },
+    };
+    expect(scaledFrameEnvelope(swiftshader, FRAME_BUDGET_MS) ?? 0).toBeGreaterThan(400);
+    expect(
+      expectTracksControl(evidence({ maxMs: 120, overBudget: 0 }, HEALTHY, swiftshader)),
+    ).toContain('cannot run the workload §8 is about');
+
+    // And it is the ceiling's door, not this one, that judges a stalled host — the two
+    // bounds never both apply, so the envelope can never loosen the ceiling.
+    expect(() =>
+      expectTracksControl(evidence({ maxMs: 200, overBudget: 1 }, STALLED, swiftshader)),
+    ).toThrow(/cannot hold this machine's own ceiling/);
+
+    // A driver with no timer query has nothing to scale by — and never reaches here,
+    // because an unmeasured host reads as representative.
+    expect(scaledFrameEnvelope(UNKNOWN_HOST, FRAME_BUDGET_MS)).toBeNull();
+    expect(hostRepresentsTarget({ hardwareDecode: 'no', gpu: NO_GPU_PROFILE })).toBe(true);
   });
 
   /**
