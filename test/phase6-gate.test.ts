@@ -39,13 +39,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  assertsAbsoluteBudget,
   environmentSustainsBudget,
   expectTracksControl,
   framesPerSpin,
+  REPRESENTATIVE_GPU_MS,
   type BudgetEvidence,
+  type HostProfile,
 } from './gate/budget-control.ts';
 import { shouldRelaunch } from './gate/relaunch.ts';
-import type { GateReport } from './gate/report.ts';
+import type { GateReport, GpuProfile } from './gate/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -102,44 +105,42 @@ const SCRUB_FRAME_FLOOR = 30;
 const PLAY_FRAME_FLOOR = 60;
 
 /**
- * The two panels the control's sample-count guards are read off, and nothing between
- * them is assumed.
+ * The one panel every sample-count guard below is read off: the fastest the gate expects
+ * to meet.
  *
- * A spin covers `framesPerSpin(hz)` frames, which *rises* with the refresh rate — 3
- * frames at 60 Hz, 6 at 120, 11 at 240 — so the two guards below read opposite ends of
- * that range, because they ask opposite questions of it. The **ratio cap** asks how
- * many frames one control sample may stand for, and so takes the largest that number
- * ever gets: the **fastest** panel's 11, since anything smaller fails a healthy run on
- * a panel the gate does not get to choose. The **floors** convert the frame floors
- * above into spins, and so take the **slowest** panel's 3 — where a spin covers the
- * fewest frames, and a phase that measured only the floor's worth of them therefore has
- * the most spins to show for it. That asymmetry is the point: the floors are the tight
- * half of the pair and the ratio the loose one.
+ * A spin covers `framesPerSpin(hz)` frames, and that number *rises* with the refresh
+ * rate — 3 at 60 Hz, 6 at 120, 11 at 240 — because the control is paced by the wall
+ * clock and the panel is not the gate's to choose. So the fastest panel is where one
+ * control sample stands for the most frames, and therefore where a phase of a given
+ * length yields the *fewest* spins. Both guards have to survive there: the ratio cap
+ * because it asks how many frames a sample may speak for, and the floors because a floor
+ * a 240 Hz panel cannot reach would fail a run that met every §8 bound.
  */
-const SLOWEST_PANEL_HZ = 60;
 const FASTEST_PANEL_HZ = 240;
 
 /**
- * The control's own floors, paired with the frame floors through the 60 Hz relation
- * exactly as they have always been: 30 scrub frames are 10 spins there, 60 play frames
- * are 20.
+ * The control's own floors: the frame floors above, converted into the smallest number
+ * of spins any panel can produce from them — 2 and 5.
  *
- * Derived rather than written down, because the last time they were written down the
- * pacing they were derived from moved and they did not. Nothing here is padded: a
- * larger floor would fail a short-but-honest phase, and a smaller one would let a
- * control that died a third of the way in look like one that ran.
+ * Read off {@link FASTEST_PANEL_HZ} because that is the fewest, which is the only side
+ * a floor can be derived from. Reading them off the slowest panel computed the *largest*
+ * floor instead — 10 spins for a 30-frame scrub phase that a 240 Hz panel gives 3 — which
+ * is the same inverted derivation this gate has already corrected once.
+ *
+ * With both guards read off one panel the ratio cap below is the stronger of the two on
+ * any phase that met its frame floor. These stay because they name the failure directly:
+ * a control that produced nothing, or almost nothing, fails here with its own count in
+ * the message rather than inside an inequality about somebody else's.
  */
-const SCRUB_SPIN_FLOOR = Math.floor(SCRUB_FRAME_FLOOR / framesPerSpin(SLOWEST_PANEL_HZ));
-const PLAY_SPIN_FLOOR = Math.floor(PLAY_FRAME_FLOOR / framesPerSpin(SLOWEST_PANEL_HZ));
+const SCRUB_SPIN_FLOOR = Math.floor(SCRUB_FRAME_FLOOR / framesPerSpin(FASTEST_PANEL_HZ));
+const PLAY_SPIN_FLOOR = Math.floor(PLAY_FRAME_FLOOR / framesPerSpin(FASTEST_PANEL_HZ));
 
 /**
  * The most frames one control sample is ever allowed to speak for: 11, the 240 Hz
  * reading of {@link framesPerSpin}.
  *
- * The loose half of the pair, and deliberately so — how many frames a spin covers is
- * the *panel's* choice, not the gate's, so this is read off the fastest panel the gate
- * expects to meet rather than off the one it happens to be running on. It still catches
- * a control that ran for the first eleventh of a phase and stopped.
+ * Anything smaller fails a healthy run on a panel the gate does not get to choose. It
+ * still catches a control that ran for the first eleventh of a phase and stopped.
  */
 const FRAMES_PER_SPIN_CAP = framesPerSpin(FASTEST_PANEL_HZ);
 
@@ -262,6 +263,11 @@ async function runGateUntilMeasured(): Promise<RunResult> {
   return result;
 }
 
+function describeGpu(gpu: GpuProfile): string {
+  if (gpu.medianMs === null) return 'no timer query';
+  return `median=${gpu.medianMs.toFixed(3)}ms max=${(gpu.maxMs ?? 0).toFixed(3)}ms n=${String(gpu.count)}`;
+}
+
 function describeRun(report: GateReport): string {
   return [
     '',
@@ -269,7 +275,13 @@ function describeRun(report: GateReport): string {
     // everything below, and the reason it gave up is the only line worth reading.
     ...(report.error === undefined || report.error === '' ? [] : [`error        ${report.error}`]),
     `renderer     ${report.environment.glRenderer}`,
-    `scheduler    ${report.environment.scheduler}   encode: ${report.environment.hardwareEncode}`,
+    `scheduler    ${report.environment.scheduler}   encode: ${report.environment.hardwareEncode}` +
+      `   decode: ${report.environment.hardwareDecode}`,
+    // What kind of machine this was, beside what it was doing. A frame here is only the
+    // frame §8 is about when the decoder is hardware-backed and the composite is not
+    // carrying a 30 MB upload; both halves are printed whichever branch the run took.
+    `host gpu     scrub: ${describeGpu(report.gpuCost.scrub)}  play: ${describeGpu(report.gpuCost.play)}` +
+      `   (a tenth of §8's frame is ${REPRESENTATIVE_GPU_MS.toFixed(2)}ms)`,
     `fixture      ${String(report.fixture.width)}x${String(report.fixture.height)} ` +
       `${String(report.fixture.frameCount)} frames / ${report.fixture.durationSec.toFixed(2)}s ` +
       `(${report.fixture.observedFps.toFixed(1)} fps observed, longest hold ` +
@@ -391,37 +403,54 @@ describe('phase 6 gate: 4K scrub and play', () => {
       // printed report because it is what tells a regression apart from a single
       // descheduled frame when this does fail — it is a diagnostic, not the bound.
       //
-      // What decides whether that number is the *compositor's* to meet is a fixed span
-      // of arithmetic, with none of the compositor's code in it, measured in these same
-      // frames — so "the compositor got slow" and "this host will not give any program
-      // a whole frame" can never be mistaken for one another. Where the host clears the
-      // budget the four assertions below are exactly §8's, unchanged; where it cannot,
-      // the shortfall is reported and the compositor is held to what that control
-      // measured instead — the ceiling it earned, and the share of windows it missed the
-      // budget on — which is the part that stops this being an escape hatch.
-      // `test/gate/budget-control.ts` argues it; the slow-compositor control below and
-      // `test/budget-control.test.ts` prove it.
+      // Two measured facts decide whether that number is the *compositor's* to meet, and
+      // `assertsAbsoluteBudget` is the pair of them. A fixed span of arithmetic with none
+      // of the compositor's code in it, measured in these same frames, says whether this
+      // host would give any program a whole frame — so "the compositor got slow" and
+      // "this machine stalls" can never be mistaken for one another. Whether a hardware
+      // decoder exists here, beside what the composite actually cost the GPU in these
+      // same frames, says whether a frame here is the piece of work §8 is about at all:
+      // without one, every composite carries a ~30 MB CPU-backed upload that the Macs
+      // this ships to never perform, and the runner is a different workload rather than a
+      // slow target machine.
+      //
+      // Where both answer yes the four assertions below are exactly §8's, unchanged.
+      // Where either does not, the shortfall is reported and the compositor is held to
+      // what that control measured instead — the ceiling it earned, and the share of
+      // windows it missed the budget on — which is the part that stops this being an
+      // escape hatch. `test/gate/budget-control.ts` argues it; the slow-compositor
+      // control below and `test/budget-control.test.ts` prove it.
       const shortfalls: string[] = [];
+      const scrubHost: HostProfile = {
+        hardwareDecode: report.environment.hardwareDecode,
+        gpu: report.gpuCost.scrub,
+      };
+      const playHost: HostProfile = {
+        hardwareDecode: report.environment.hardwareDecode,
+        gpu: report.gpuCost.play,
+      };
       const scrubEvidence: BudgetEvidence = {
         what: 'scrub',
         budgetMs: FRAME_BUDGET_MS,
         measured: report.scrub,
         control: report.control.scrub,
+        host: scrubHost,
       };
       const playEvidence: BudgetEvidence = {
         what: 'play',
         budgetMs: FRAME_BUDGET_MS,
         measured: report.play,
         control: report.control.play,
+        host: playHost,
       };
 
-      if (environmentSustainsBudget(report.control.scrub, FRAME_BUDGET_MS)) {
+      if (assertsAbsoluteBudget(scrubEvidence)) {
         expect(report.scrub.overBudget, detail).toBe(0);
         expect(report.scrub.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
       } else {
         shortfalls.push(expectTracksControl(scrubEvidence));
       }
-      if (environmentSustainsBudget(report.control.play, FRAME_BUDGET_MS)) {
+      if (assertsAbsoluteBudget(playEvidence)) {
         expect(report.play.overBudget, detail).toBe(0);
         expect(report.play.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
       } else {
@@ -450,6 +479,15 @@ describe('phase 6 gate: 4K scrub and play', () => {
         budgetMs: FRAME_BUDGET_MS,
         measured: slow.frames,
         control: slow.control,
+        // The play phase's, because this one composites nothing: its source never has a
+        // frame, so `Compositor.render` returns before the timer query opens. Carried
+        // for the failure message only — the branch below is keyed on the control alone,
+        // deliberately. Representativeness decides whether §8's *absolute* number applies
+        // to a host, and the ceiling this branch requires is derived from that host's own
+        // spin rather than from §8, so consulting it here would only ever excuse the
+        // slowed path on a runner. This proof must not get weaker on the machine the
+        // deferral is for.
+        host: playHost,
       };
       if (environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)) {
         // The host held the budget through this phase too, so the ceiling its control

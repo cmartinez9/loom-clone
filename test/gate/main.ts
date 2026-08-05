@@ -24,7 +24,7 @@ import { registerLoomScheme } from '../../apps/main/src/protocol.ts';
 import { serveFile } from '../../apps/main/src/media-reader.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
-import { NO_CONTROL } from './budget-control.ts';
+import { NO_CONTROL, NO_GPU_PROFILE } from './budget-control.ts';
 import type { GateReport } from './report.ts';
 
 interface Args {
@@ -87,6 +87,7 @@ function failureReport(error: string): GateReport {
       glRenderer: 'unknown',
       scheduler: 'raf',
       hardwareEncode: 'unknown',
+      hardwareDecode: 'unknown',
       electron: process.versions.electron ?? '',
       chrome: process.versions.chrome ?? '',
     },
@@ -109,6 +110,7 @@ function failureReport(error: string): GateReport {
     scrub: empty,
     play: empty,
     control: { scrub: NO_CONTROL, play: NO_CONTROL },
+    gpuCost: { scrub: NO_GPU_PROFILE, play: NO_GPU_PROFILE },
     slowCompositor: { injectedMs: 0, frames: empty, control: NO_CONTROL },
     scrubChecks: [],
     settleSamples: 0,

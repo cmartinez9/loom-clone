@@ -57,8 +57,11 @@ import {
   burn,
   controlSink,
   EnvironmentControl,
+  GpuCostProbe,
   NO_CONTROL,
+  NO_GPU_PROFILE,
   SLOW_COMPOSITE_MS,
+  type HardwareDecode,
 } from './budget-control.ts';
 import { CODE_BIT_COUNT, codeCellCenter, FIXTURE_SIZE, generate4kPart } from './fixture.ts';
 import type { GateBridge, GateReport, PhaseMetrics, PlaySample, ScrubCheck } from './report.ts';
@@ -265,6 +268,31 @@ function readFrameCode(row: Uint8Array, viewport: [number, number]): number {
   return value;
 }
 
+/**
+ * Whether this host can decode the fixture in hardware — asked of the platform, not of
+ * the renderer string.
+ *
+ * `prefer-hardware` is a *requirement* to `isConfigSupported`, not a hint: the UA
+ * answers unsupported when it cannot provide an accelerated decoder for this exact
+ * config. That is the same question `fixture.ts` asks of the encoder, and it is the
+ * structural discriminator `budget-control.ts` argues from — every Mac this ships to
+ * answers yes, and a host that answers no is handing the compositor CPU-backed frames.
+ *
+ * A probe that throws answers `'unknown'`, which reads as representative: an instrument
+ * that could not measure must tighten this gate rather than loosen it.
+ */
+async function probeHardwareDecode(config: VideoDecoderConfig): Promise<HardwareDecode> {
+  try {
+    const support = await VideoDecoder.isConfigSupported({
+      ...config,
+      hardwareAcceleration: 'prefer-hardware',
+    });
+    return support.supported === true ? 'yes' : 'no';
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function run(): Promise<GateReport> {
   if (!hasWebCodecs()) throw new Error('this renderer has no WebCodecs; the gate cannot run');
 
@@ -275,6 +303,9 @@ async function run(): Promise<GateReport> {
     `encoded ${String(part.frameCount)} frames (${String(part.bytes.byteLength)} bytes, ` +
       `${part.hardwareAcceleration}) in ${part.encodeMs.toFixed(0)} ms`,
   );
+
+  const hardwareDecode = await probeHardwareDecode(part.config);
+  log(`hardware-backed decode for this fixture: ${hardwareDecode}`);
 
   await window.gate.write(MEDIA_PATH, part.bytes);
   await window.gate.write(
@@ -322,7 +353,11 @@ async function run(): Promise<GateReport> {
   const chosen = await chooseScheduler();
   // Armed per phase, below. Until then it is inert and costs a branch a frame.
   const control = new EnvironmentControl();
+  // Sampled before the spin, so the phase's GPU cost is read off the driver's own
+  // completed queries rather than out of a window the control has already occupied.
+  const gpuCost = new GpuCostProbe(compositor.gpuTimer);
   const clock = counting(chosen.scheduler, () => {
+    gpuCost.sample();
     control.tick();
   });
   const trouble: { loopError: Error | null; stalled: string | null } = {
@@ -450,6 +485,7 @@ async function run(): Promise<GateReport> {
   // inside a window in proportion to how much of the clock that window occupies.
   // `budget-control.ts` argues both halves.
   control.arm();
+  gpuCost.arm();
 
   // ---- scrub -------------------------------------------------------------
   const scrubChecks: ScrubCheck[] = [];
@@ -506,8 +542,10 @@ async function run(): Promise<GateReport> {
   await clock.after(2);
   const scrub = snapshot(loop.metrics);
   const scrubControl = control.snapshot();
+  const scrubGpu = gpuCost.snapshot();
   loop.metrics.reset();
   control.reset();
+  gpuCost.reset();
 
   // ---- play --------------------------------------------------------------
   const hitsBefore = reader.stats.hits;
@@ -533,7 +571,12 @@ async function run(): Promise<GateReport> {
   }
   const play = snapshot(loop.metrics);
   const playControl = control.snapshot();
+  const playGpu = gpuCost.snapshot();
   control.reset();
+  // The slow-compositor phase below is driven by a stub source that never has a frame,
+  // so `Compositor.render` returns before the timer query opens and there is nothing
+  // there to sample. Stopped rather than left running, so that stays true by construction.
+  gpuCost.disarm();
   loop.stop();
   // Read here, not at the end: the slow-compositor control below moves them.
   const playHits = reader.stats.hits - hitsBefore;
@@ -620,6 +663,7 @@ async function run(): Promise<GateReport> {
       glRenderer,
       scheduler: chosen.mode,
       hardwareEncode: part.hardwareAcceleration,
+      hardwareDecode,
       electron: navigator.userAgent,
       chrome: navigator.userAgent,
     },
@@ -642,6 +686,7 @@ async function run(): Promise<GateReport> {
     scrub,
     play,
     control: { scrub: scrubControl, play: playControl },
+    gpuCost: { scrub: scrubGpu, play: playGpu },
     slowCompositor: {
       injectedMs: SLOW_COMPOSITE_MS,
       frames: slowFrames,
@@ -687,6 +732,7 @@ run().then(
         glRenderer: 'unknown',
         scheduler: 'raf',
         hardwareEncode: 'unknown',
+        hardwareDecode: 'unknown',
         electron: navigator.userAgent,
         chrome: navigator.userAgent,
       },
@@ -709,6 +755,7 @@ run().then(
       scrub: EMPTY_METRICS,
       play: EMPTY_METRICS,
       control: { scrub: NO_CONTROL, play: NO_CONTROL },
+      gpuCost: { scrub: NO_GPU_PROFILE, play: NO_GPU_PROFILE },
       slowCompositor: {
         injectedMs: SLOW_COMPOSITE_MS,
         frames: EMPTY_METRICS,

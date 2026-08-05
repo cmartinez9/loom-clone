@@ -23,6 +23,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  assertsAbsoluteBudget,
   CLEARS_BUDGET,
   CONTROL_PERIOD_MS,
   CONTROL_TARGET_MS,
@@ -30,12 +31,20 @@ import {
   environmentSustainsBudget,
   expectTracksControl,
   framesPerSpin,
+  GpuCostProbe,
+  gpuProfile,
+  hostRepresentsTarget,
   NO_CONTROL,
+  NO_GPU_PROFILE,
   overBudgetRate,
+  REPRESENTATIVE_GPU_MS,
+  REPRESENTATIVE_GPU_SHARE,
   SLOW_COMPOSITE_MS,
   TRACKS_CONTROL,
+  UNKNOWN_HOST,
   type BudgetEvidence,
   type ControlPhase,
+  type HostProfile,
 } from './gate/budget-control.ts';
 
 const FRAME_BUDGET_MS = 1000 / 60;
@@ -57,12 +66,37 @@ const STALLED = control({ maxMs: 74.2, overBudget: 2 });
 /** A host that only just missed the budget — this machine's smallest real reading. */
 const JUST_OVER = control({ maxMs: 17.3, overBudget: 1 });
 
-function evidence(measured: Partial<BudgetEvidence['measured']>, c: ControlPhase): BudgetEvidence {
+/**
+ * The machines this ships to: a hardware H.264 decoder, and a composite whose GPU cost
+ * is a rounding error inside §8's frame because ANGLE-Metal binds the decoded frame's
+ * IOSurface rather than uploading it. Measured, on an M5 Pro.
+ */
+const TARGET_HOST: HostProfile = {
+  hardwareDecode: 'yes',
+  gpu: { count: 310, medianMs: 0.312, maxMs: 0.51 },
+};
+
+/**
+ * GitHub's macos-14 runner: an Apple Paravirtual device with no hardware video decoder
+ * at all, so every composite carries a ~30 MB CPU-backed `texImage2D`. Measured, on the
+ * run that turned `main` red.
+ */
+const RUNNER_HOST: HostProfile = {
+  hardwareDecode: 'no',
+  gpu: { count: 290, medianMs: 3.309, maxMs: 7.4 },
+};
+
+function evidence(
+  measured: Partial<BudgetEvidence['measured']>,
+  c: ControlPhase,
+  host: HostProfile = TARGET_HOST,
+): BudgetEvidence {
   return {
     what: 'play',
     budgetMs: FRAME_BUDGET_MS,
     measured: { count: 360, maxMs: 0.3, maxAt: 71, overBudget: 0, ...measured },
     control: c,
+    host,
   };
 }
 
@@ -450,5 +484,200 @@ describe('the frame budget is enforced against a measured environment', () => {
     // so a control that silently stopped fails loudly there instead of here.
     expect(environmentSustainsBudget(NO_CONTROL, FRAME_BUDGET_MS)).toBe(true);
     expect(environmentSustainsBudget(control({ count: 0, maxMs: 0 }), FRAME_BUDGET_MS)).toBe(true);
+  });
+});
+
+/**
+ * **The other half of the branch condition: is a frame here the frame §8 is about?**
+ *
+ * The control above is pure arithmetic, and that is what makes it a control — and what
+ * makes it blind to the one path a virtualised runner's cost actually lives on. CI run
+ * 31039796990 is the whole case: the control found the host healthy (10.10 ms worst spin,
+ * 8.47 ms mean, nothing over budget), the strict branch applied, and §8 failed on a
+ * 17.20 ms frame beside a 5.00 ms p99 — a cost the spin could not have seen, because it
+ * was a ~30 MB CPU-backed `texImage2D` that exists only where there is no hardware
+ * decoder to hand the compositor an IOSurface.
+ *
+ * So {@link hostRepresentsTarget} asks the two structural questions, and this file pins
+ * both that it separates the two measured profiles and — the part that matters — that a
+ * real compositor regression still fails on *both* sides of it.
+ */
+describe('the frame budget is enforced against a host that runs the product', () => {
+  it('draws the line at a tenth of §8’s own frame, not between two machines', () => {
+    // The derivation, and it is the derivation rather than a threshold placed to clear a
+    // run: §8 gives the whole frame 16.67 ms, and a host whose *unregressed* composite
+    // already spends a tenth of that on the GPU is not running the product's workload.
+    // One tenth is the order of magnitude, expressed against the only number in this
+    // gate that was not measured on somebody's particular machine.
+    expect(REPRESENTATIVE_GPU_SHARE).toBe(1 / 10);
+    expect(REPRESENTATIVE_GPU_MS).toBeCloseTo(FRAME_BUDGET_MS / 10, 10);
+
+    // And the check on it, which is not the same thing as the derivation: the two
+    // profiles this project has measured land either side with room, an order of
+    // magnitude apart. Neither is within a factor of two of deciding it.
+    const target = TARGET_HOST.gpu.medianMs ?? 0;
+    const runner = RUNNER_HOST.gpu.medianMs ?? 0;
+    expect(runner / target).toBeGreaterThan(10);
+    expect(REPRESENTATIVE_GPU_MS / target).toBeGreaterThan(5);
+    expect(runner / REPRESENTATIVE_GPU_MS).toBeGreaterThan(1.9);
+  });
+
+  it('separates the machines this ships to from the runner', () => {
+    expect(hostRepresentsTarget(TARGET_HOST)).toBe(true);
+    expect(hostRepresentsTarget(RUNNER_HOST)).toBe(false);
+  });
+
+  it('takes both facts, so the compositor cannot buy its own way out of §8', () => {
+    // The GPU reading is the one number here the thing under test can move, and the
+    // conjunction is what stops it being a lever: `hardwareDecode` is a property of the
+    // platform, probed before a frame is composited. On the hardware this ships to it is
+    // `'yes'`, the GPU reading is never consulted, and a compositor that got slow on the
+    // GPU is held to §8 exactly as written however much it spends there.
+    expect(
+      hostRepresentsTarget({ hardwareDecode: 'yes', gpu: { count: 90, medianMs: 40, maxMs: 61 } }),
+    ).toBe(true);
+    // And a missing decoder alone is not enough either: without the upload actually
+    // landing in the frame there is nothing to say this host's frame is a different
+    // piece of work.
+    expect(
+      hostRepresentsTarget({
+        hardwareDecode: 'no',
+        gpu: { count: 300, medianMs: 0.4, maxMs: 0.9 },
+      }),
+    ).toBe(true);
+  });
+
+  it('CONTROL: anything unmeasured tightens this gate rather than loosening it', () => {
+    // The same rule `environmentSustainsBudget` follows for an empty control. A probe
+    // that could not answer, and a driver with no timer query, have shown nothing about
+    // the host — and "shown nothing" must never buy the compositor a weaker bound.
+    expect(hostRepresentsTarget(UNKNOWN_HOST)).toBe(true);
+    expect(hostRepresentsTarget({ hardwareDecode: 'unknown', gpu: RUNNER_HOST.gpu })).toBe(true);
+    expect(hostRepresentsTarget({ hardwareDecode: 'no', gpu: NO_GPU_PROFILE })).toBe(true);
+    expect(gpuProfile([])).toEqual(NO_GPU_PROFILE);
+  });
+
+  /**
+   * **The proof, and the thing this round turns on.**
+   *
+   * The documented regression — 20 ms burned on one composite in thirty, patched into
+   * the shipping `Compositor.render` — must go red on a representative host *and* on a
+   * host the gate has just declared cannot represent the product. If it can pass on
+   * either, the representativeness branch is a hole rather than a discrimination.
+   *
+   * The figures are this project's own: 30 of 900 play frames over budget at 20.30 ms
+   * worst, beside a control that did its 8.33 ms of arithmetic in 8.40 ms and never
+   * missed a window.
+   */
+  it('CONTROL: a real compositor regression fails on both branches', () => {
+    const regressed = { count: 900, maxMs: 20.3, maxAt: 256, overBudget: 30 };
+
+    // Representative host: the strict branch, and these are the two assertions the gate
+    // makes there, verbatim. Both fail.
+    const strict = evidence(regressed, HEALTHY, TARGET_HOST);
+    expect(assertsAbsoluteBudget(strict)).toBe(true);
+    expect(() => {
+      expect(strict.measured.overBudget).toBe(0);
+    }).toThrow();
+    expect(() => {
+      expect(strict.measured.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+    }).toThrow();
+
+    // Non-representative host, on each of the two control readings a runner has actually
+    // produced beside a healthy spin. The absolute number is not asserted — and the
+    // tracking bound catches the regression anyway, on the ceiling: 1.5x a spin that
+    // stayed inside the budget cannot reach 20.30 ms.
+    for (const c of [HEALTHY, control({ count: 380, maxMs: 10.1, maxAt: 96, meanMs: 8.47 })]) {
+      const deferred = evidence(regressed, c, RUNNER_HOST);
+      expect(assertsAbsoluteBudget(deferred)).toBe(false);
+      expect(environmentSustainsBudget(c, FRAME_BUDGET_MS)).toBe(true);
+      expect(() => expectTracksControl(deferred)).toThrow(/cannot hold this machine's own ceiling/);
+    }
+
+    // And where a host stall does lift that ceiling over the regression, the share still
+    // has it: the spin runs after the frame body, so none of the regression's own burn
+    // lands in it.
+    const stalled = control({ count: 204, maxMs: 23.7, maxAt: 114, meanMs: 8.54, overBudget: 2 });
+    const underStall = evidence(regressed, stalled, RUNNER_HOST);
+    expect(regressed.maxMs).toBeLessThan(stalled.maxMs * TRACKS_CONTROL);
+    expect(() => expectTracksControl(underStall)).toThrow(/30 of 900 frames over/);
+  });
+
+  /**
+   * What the deferral does and does not buy, said out loud with the numbers.
+   *
+   * On the run that turned `main` red the deferred branch's ceiling — 1.5x a 10.10 ms
+   * spin, 15.15 ms — still sits below the 17.20 ms frame, so routing that phase away
+   * from §8's absolute number does **not** on its own turn that run green. That is the
+   * honest consequence of falling to a bound derived from the host's own spin, and it is
+   * pinned here rather than discovered on the next red build: representativeness decides
+   * *which* bound applies, and the bound it falls to is not a weaker one on a host whose
+   * control was healthy.
+   */
+  it('CONTROL: the deferred branch is not a pass, on the very run this was built for', () => {
+    const ciControl = control({ count: 380, maxMs: 10.1, maxAt: 96, meanMs: 8.47 });
+    const ciRun = evidence(
+      { count: 380, maxMs: 17.2, maxAt: 186, overBudget: 1 },
+      ciControl,
+      RUNNER_HOST,
+    );
+    expect(assertsAbsoluteBudget(ciRun)).toBe(false);
+    expect(ciRun.measured.maxMs).toBeGreaterThan(ciControl.maxMs * TRACKS_CONTROL);
+    expect(() => expectTracksControl(ciRun)).toThrow(/cannot hold this machine's own ceiling/);
+  });
+
+  it('reports which half deferred the phase, with the figures for both', () => {
+    const shortfall = expectTracksControl(
+      evidence({ maxMs: 12, overBudget: 0 }, HEALTHY, RUNNER_HOST),
+    );
+    expect(shortfall).toContain('cannot run the workload §8 is about');
+    expect(shortfall).toContain('hardware-backed decode: no');
+    expect(shortfall).toContain('3.31 ms median GPU composite');
+    // And both halves, when both are why.
+    const both = expectTracksControl(evidence({ maxMs: 12, overBudget: 0 }, STALLED, RUNNER_HOST));
+    expect(both).toContain('this environment cannot sustain');
+    expect(both).toContain('cannot run the workload §8 is about');
+  });
+
+  /**
+   * The probe, which has to be a reading of the driver's queries rather than of the
+   * gate's frames.
+   *
+   * `GpuTimer.lastMs` holds the most recent *completed* query, so it repeats across the
+   * frames between results; recording every frame would weight the median by how long a
+   * value happened to sit there rather than by how often the GPU produced it.
+   */
+  it('samples the timer query’s own cadence, not the frame rate', () => {
+    const source = { lastMs: null as number | null };
+    const probe = new GpuCostProbe(source);
+    const feed = (values: (number | null)[]): void => {
+      for (const value of values) {
+        source.lastMs = value;
+        probe.sample();
+      }
+    };
+
+    // Disarmed, nothing is recorded however many frames go by.
+    feed([1, 2, 3]);
+    expect(probe.snapshot()).toEqual(NO_GPU_PROFILE);
+
+    probe.arm();
+    // Three completed queries held across nine frames are three samples, and the median
+    // is the middle query rather than the value that sat there longest.
+    feed([0.3, 0.3, 0.3, 5, 5, 5, 5, 0.4, 0.4]);
+    expect(probe.snapshot()).toEqual({ count: 3, medianMs: 0.4, maxMs: 5 });
+
+    // A driver with no timer query answers null forever, and that is not a zero.
+    const blind = new GpuCostProbe({ lastMs: null });
+    blind.arm();
+    blind.sample();
+    expect(blind.snapshot().medianMs).toBeNull();
+
+    // Reset clears the phase, not the last value seen: the next phase must not re-record
+    // the reading the previous one ended on.
+    probe.reset();
+    expect(probe.snapshot()).toEqual(NO_GPU_PROFILE);
+    feed([0.4, 0.4, 0.9]);
+    expect(probe.snapshot()).toEqual({ count: 1, medianMs: 0.9, maxMs: 0.9 });
   });
 });

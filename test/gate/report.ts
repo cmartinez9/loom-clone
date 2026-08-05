@@ -14,9 +14,9 @@
  * a vacuous one — because a preview that renders nothing renders it very quickly.
  */
 
-import type { ControlPhase } from './budget-control.ts';
+import type { ControlPhase, GpuProfile, HardwareDecode } from './budget-control.ts';
 
-export type { ControlPhase };
+export type { ControlPhase, GpuProfile, HardwareDecode };
 
 export interface PhaseMetrics {
   /** Frames measured. */
@@ -59,6 +59,16 @@ export interface GateEnvironment {
   /** `'raf'` when `requestAnimationFrame` drove the loop, `'timer'` for the fallback. */
   scheduler: 'raf' | 'timer';
   hardwareEncode: string;
+  /**
+   * Whether this host has a hardware-backed decoder for the fixture's own config.
+   *
+   * Half of {@link GateReport.gpuCost}'s question and the structural half: every Mac
+   * this ships to has one, and a host without one hands the compositor CPU-backed
+   * frames, which is a different piece of work rather than a slower one. Probed with
+   * `VideoDecoder.isConfigSupported`, never inferred from the renderer string — a
+   * device name is exactly the tuned-to-one-host shortcut this must not become.
+   */
+  hardwareDecode: HardwareDecode;
   electron: string;
   chrome: string;
 }
@@ -144,6 +154,14 @@ export interface GateReport {
   play: PhaseMetrics;
   /** What this host could sustain, measured in the very frames above. */
   control: GateBudgetControl;
+  /**
+   * What the composite cost the GPU, in those same frames.
+   *
+   * The other half of "is this host the product's workload" — see
+   * `test/gate/budget-control.ts`. A tenth of §8's whole frame is the line, and it is
+   * only ever consulted on a host already shown to have no hardware decoder.
+   */
+  gpuCost: { scrub: GpuProfile; play: GpuProfile };
   /** CONTROL for that control: a compositor that cannot hold the budget. */
   slowCompositor: GateSlowCompositor;
   scrubChecks: ScrubCheck[];
