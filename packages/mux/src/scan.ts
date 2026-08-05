@@ -28,8 +28,11 @@ export interface BoxHeader {
   headerBytes: number;
 }
 
-/** The smallest number of bytes from which a header can possibly be read. */
+/** The largest a box header can be: 16 bytes, when it carries a `largesize`. */
 export const MAX_BOX_HEADER_BYTES = 16;
+
+/** The smallest a box header can be, and all this writer ever emits. */
+export const MIN_BOX_HEADER_BYTES = 8;
 
 /**
  * Read a box header, or return `null` if `bytes` does not hold a whole one.
@@ -216,6 +219,203 @@ export interface InitSegmentFacts {
 
 /** Read back the facts {@link initSegment} wrote, for rebuilding `recording.json`. */
 export function parseInitSegment(bytes: Uint8Array): InitSegmentFacts {
+  const { entriesFrom, to, timescale } = findSampleDescription(bytes);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entry = children(bytes, entriesFrom, to)[0];
+  if (entry === undefined) throw new Mp4ParseError('stsd has no sample entry');
+  const width = view.getUint16(entry.at + entry.header.headerBytes + 24, false);
+  const height = view.getUint16(entry.at + entry.header.headerBytes + 26, false);
+
+  // Sample-entry extensions begin after the 78-byte VisualSampleEntry body.
+  const avcCBox = findChild(
+    bytes,
+    entry.at + entry.header.headerBytes + 78,
+    entry.at + entry.header.size,
+    'avcC',
+  );
+  if (avcCBox === null) throw new Mp4ParseError('sample entry has no avcC');
+  const avcC = bytes.slice(
+    avcCBox.at + avcCBox.header.headerBytes,
+    avcCBox.at + avcCBox.header.size,
+  );
+
+  return { timescale, width, height, avcC };
+}
+
+export interface AudioInitSegmentFacts {
+  /** Units per second on the media timeline, which for audio is the sample rate. */
+  timescale: number;
+  sampleRate: number;
+  channels: number;
+  /** The AudioSpecificConfig from `esds`, verbatim. */
+  audioSpecificConfig: Uint8Array;
+  /**
+   * Samples the edit list says to skip — the encoder's priming.
+   *
+   * A reader that decodes raw chunks rather than handing the file to a demuxer
+   * (which is what `packages/decode` and the exporter will do) has to apply this
+   * itself: the trim lives in the container, and pulling the samples out from
+   * under it loses the trim with it.
+   */
+  encoderDelaySamples: number;
+}
+
+/** Sampling frequencies an AudioSpecificConfig can name by index (ISO 14496-3). */
+const ASC_SAMPLE_RATES = [
+  96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
+
+/** Channel counts an AudioSpecificConfig can name by configuration (ISO 14496-3). */
+const ASC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 8];
+
+/**
+ * Walk MPEG-4 descriptors, which carry their length in one to four bytes with the
+ * top bit as a continuation flag. Both forms are legal and both are in the wild.
+ */
+function findDescriptor(bytes: Uint8Array, tag: number): Uint8Array | null {
+  let at = 0;
+  while (at + 2 <= bytes.byteLength) {
+    const found = bytes[at];
+    at += 1;
+    let size = 0;
+    for (let i = 0; i < 4 && at < bytes.byteLength; i++) {
+      const byte = bytes[at] ?? 0;
+      at += 1;
+      size = (size << 7) | (byte & 0x7f);
+      if ((byte & 0x80) === 0) break;
+    }
+    if (at + size > bytes.byteLength) return null;
+    const payload = bytes.subarray(at, at + size);
+    if (found === tag) return payload;
+    // Descend into the two container descriptors on the path to the codec config,
+    // rather than assuming a fixed layout that a different muxer would break.
+    if (found === 0x03) {
+      // ES_Descriptor: ES_ID (2) + flags (1), then nested descriptors.
+      const nested = findDescriptor(payload.subarray(3), tag);
+      if (nested !== null) return nested;
+    } else if (found === 0x04) {
+      // DecoderConfigDescriptor: 13 bytes of fields, then DecoderSpecificInfo.
+      const nested = findDescriptor(payload.subarray(13), tag);
+      if (nested !== null) return nested;
+    }
+    at += size;
+  }
+  return null;
+}
+
+/** Object type, rate and channel count, read out of an AudioSpecificConfig. */
+export function parseAudioSpecificConfig(asc: Uint8Array): {
+  objectType: number;
+  sampleRate: number;
+  channels: number;
+} {
+  if (asc.byteLength < 2) throw new Mp4ParseError('AudioSpecificConfig is too short');
+  const first = asc[0] ?? 0;
+  const second = asc[1] ?? 0;
+  const objectType = first >>> 3;
+  if (objectType === 31) throw new Mp4ParseError('escaped AAC object types are not supported');
+  const frequencyIndex = ((first & 0x07) << 1) | (second >>> 7);
+  const channelConfig = (second >>> 3) & 0x0f;
+  if (frequencyIndex === 0x0f) {
+    if (asc.byteLength < 5) throw new Mp4ParseError('AudioSpecificConfig declares no sample rate');
+    const rate =
+      (((asc[1] ?? 0) & 0x7f) << 17) |
+      ((asc[2] ?? 0) << 9) |
+      ((asc[3] ?? 0) << 1) |
+      ((asc[4] ?? 0) >>> 7);
+    return { objectType, sampleRate: rate, channels: ((asc[4] ?? 0) >>> 3) & 0x0f };
+  }
+  return {
+    objectType,
+    sampleRate: ASC_SAMPLE_RATES[frequencyIndex] ?? 0,
+    channels: ASC_CHANNELS[channelConfig] ?? channelConfig,
+  };
+}
+
+/** `mp4a.40.2` — the codec string `recording.json` and `AudioDecoder` both want. */
+export function codecStringFromAsc(asc: Uint8Array): string {
+  return `mp4a.40.${parseAudioSpecificConfig(asc).objectType}`;
+}
+
+/**
+ * The `elst` media time of the file's single track, in media timescale units, or
+ * `0` when there is no edit list.
+ */
+function editListMediaTime(bytes: Uint8Array): number {
+  const top = children(bytes, 0, bytes.byteLength);
+  const moov = top.find((c) => c.header.type === 'moov');
+  if (moov === undefined) return 0;
+  const trak = findChild(
+    bytes,
+    moov.at + moov.header.headerBytes,
+    moov.at + moov.header.size,
+    'trak',
+  );
+  if (trak === null) return 0;
+  const edts = findChild(
+    bytes,
+    trak.at + trak.header.headerBytes,
+    trak.at + trak.header.size,
+    'edts',
+  );
+  if (edts === null) return 0;
+  const elst = findChild(
+    bytes,
+    edts.at + edts.header.headerBytes,
+    edts.at + edts.header.size,
+    'elst',
+  );
+  if (elst === null) return 0;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const at = elst.at + elst.header.headerBytes;
+  const version = view.getUint8(at);
+  if (view.getUint32(at + 4, false) < 1) return 0;
+  // v0: segment_duration u32 then media_time i32; v1 widens both to 64 bits.
+  const mediaTime =
+    version === 1
+      ? view.getUint32(at + 16, false) * 0x1_0000_0000 + view.getUint32(at + 20, false)
+      : view.getInt32(at + 12, false);
+  return mediaTime > 0 ? mediaTime : 0;
+}
+
+/** Read back the facts {@link audioInitSegment} wrote, for crash recovery. */
+export function parseAudioInitSegment(bytes: Uint8Array): AudioInitSegmentFacts {
+  const stsd = findSampleDescription(bytes);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entry = children(bytes, stsd.entriesFrom, stsd.to)[0];
+  if (entry === undefined) throw new Mp4ParseError('stsd has no sample entry');
+  const body = entry.at + entry.header.headerBytes;
+  const channels = view.getUint16(body + 16, false);
+  const sampleRate = view.getUint32(body + 24, false) / 0x1_0000;
+
+  // Sample-entry extensions begin after the 28-byte AudioSampleEntry body.
+  const esds = findChild(bytes, body + 28, entry.at + entry.header.size, 'esds');
+  if (esds === null) throw new Mp4ParseError('audio sample entry has no esds');
+  const asc = findDescriptor(
+    bytes.subarray(esds.at + esds.header.headerBytes + 4, esds.at + esds.header.size),
+    0x05,
+  );
+  if (asc === null) throw new Mp4ParseError('esds carries no AudioSpecificConfig');
+
+  const declared = parseAudioSpecificConfig(asc);
+  return {
+    encoderDelaySamples: editListMediaTime(bytes),
+    timescale: stsd.timescale,
+    // The AudioSpecificConfig is the authority; the sample entry's 16.16 rate
+    // cannot even represent every rate a device might report.
+    sampleRate: declared.sampleRate > 0 ? declared.sampleRate : sampleRate,
+    channels: declared.channels > 0 ? declared.channels : channels,
+    audioSpecificConfig: asc.slice(),
+  };
+}
+
+/** The `stsd` of the file's single track, plus its media timescale. */
+function findSampleDescription(bytes: Uint8Array): {
+  entriesFrom: number;
+  to: number;
+  timescale: number;
+} {
   const top = children(bytes, 0, bytes.byteLength);
   const moov = top.find((c) => c.header.type === 'moov');
   if (moov === undefined) throw new Mp4ParseError('no complete moov box');
@@ -271,26 +471,11 @@ export function parseInitSegment(bytes: Uint8Array): InitSegmentFacts {
   if (stsd === null) throw new Mp4ParseError('stbl has no stsd');
 
   // stsd: version/flags (4) + entry_count (4), then the sample entries.
-  const entriesFrom = stsd.at + stsd.header.headerBytes + 8;
-  const entry = children(bytes, entriesFrom, stsd.at + stsd.header.size)[0];
-  if (entry === undefined) throw new Mp4ParseError('stsd has no sample entry');
-  const width = view.getUint16(entry.at + entry.header.headerBytes + 24, false);
-  const height = view.getUint16(entry.at + entry.header.headerBytes + 26, false);
-
-  // Sample-entry extensions begin after the 78-byte VisualSampleEntry body.
-  const avcCBox = findChild(
-    bytes,
-    entry.at + entry.header.headerBytes + 78,
-    entry.at + entry.header.size,
-    'avcC',
-  );
-  if (avcCBox === null) throw new Mp4ParseError('sample entry has no avcC');
-  const avcC = bytes.slice(
-    avcCBox.at + avcCBox.header.headerBytes,
-    avcCBox.at + avcCBox.header.size,
-  );
-
-  return { timescale, width, height, avcC };
+  return {
+    entriesFrom: stsd.at + stsd.header.headerBytes + 8,
+    to: stsd.at + stsd.header.size,
+    timescale,
+  };
 }
 
 /**

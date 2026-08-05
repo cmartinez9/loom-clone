@@ -35,6 +35,7 @@
 import { open, type FileHandle } from 'node:fs/promises';
 import { writeAtomic } from '@loom/format/fs';
 import type { FrameIndexDoc } from '@loom/format';
+import { writeAllBytes } from './io.ts';
 import {
   FragmentWriter,
   frameIndexDoc,
@@ -232,14 +233,7 @@ export class MediaPartWriter {
 
   /** `write(2)` may write fewer bytes than it was given; loop until it has them all. */
   private async writeAll(handle: FileHandle, bytes: Uint8Array): Promise<void> {
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      const { bytesWritten } = await handle.write(bytes, offset, bytes.byteLength - offset);
-      if (bytesWritten <= 0) {
-        throw new Error(`write to ${this.options.mediaPath} made no progress`);
-      }
-      offset += bytesWritten;
-    }
+    await writeAllBytes(handle, bytes, this.options.mediaPath);
   }
 
   private enqueue<T>(work: (handle: FileHandle) => Promise<T>): Promise<T> {

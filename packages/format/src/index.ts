@@ -30,6 +30,7 @@ export { isUlid, ulid, ulidTime, ULID_PATTERN } from './ids.ts';
 
 // ---- document types --------------------------------------------------------
 export type {
+  AudioTrackKey,
   IsoTimestamp,
   PartIndex,
   RecordingId,
@@ -37,7 +38,7 @@ export type {
   TrackKey,
   Vec2,
 } from './types/common.ts';
-export { TRACK_KEYS } from './types/common.ts';
+export { AUDIO_TRACK_KEYS, TRACK_KEYS, isAudioTrack } from './types/common.ts';
 
 export type {
   ExportRecord,
@@ -120,6 +121,32 @@ export {
   partSuffix,
   sanitizeRecordingName,
 } from './bundle/layout.ts';
+
+// ---- A/V sync --------------------------------------------------------------
+export {
+  CROSS_TRACK_SNAP_SEC,
+  audioRuns,
+  audioSampleIndexAt,
+  audioSampleTimeSec,
+  driftSec,
+  resampleRatio,
+  snapNearby,
+  totalGapSec,
+  trackSourceTimeSec,
+  type AudioPartTiming,
+  type AudioRun,
+} from './sync/align.ts';
+export {
+  AudioCaptureMeter,
+  TrackEpochEstimator,
+  alignAudioPart,
+  audioPartDoc,
+  type AlignAudioPartOptions,
+  type AudioBufferFacts,
+  type AudioCaptureMeterOptions,
+  type AudioCaptureSummary,
+  type CapturedGap,
+} from './sync/audio-meter.ts';
 
 // ---- validation ------------------------------------------------------------
 export { IssueSink, ValidationError, type ValidationIssue } from './validate/issues.ts';

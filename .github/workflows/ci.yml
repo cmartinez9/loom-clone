@@ -48,10 +48,11 @@ jobs:
       - name: Build
         run: npm run build
 
-  # The phase 1 gate is only worth what its mutation proof says it is: break the
-  # capture writer five ways, and every one has to make a test fail. Kept off the
-  # per-push job because it re-runs the crash test ten times; a pull request is the
-  # point at which "does this gate still measure anything" has to be answered.
+  # A gate is only worth what its mutation proof says it is: break the capture
+  # writers eight ways — phase 1's crash gate and phase 3's A/V sync gate — and every
+  # one has to make a test fail. Kept off the per-push job because it re-runs the
+  # crash test ten times; a pull request is the point at which "do these gates still
+  # measure anything" has to be answered.
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: macos-14

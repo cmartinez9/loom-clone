@@ -46,6 +46,9 @@ import {
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  type AudioTrackFacts,
+  type AudioTrackReport,
+  type AudioTrackSettings,
   type CaptureEndReport,
   type CaptureOptions,
   type ChunkMsg,
@@ -55,18 +58,31 @@ import {
   type RecoveryReport,
 } from '@loom/ipc';
 import {
+  AUDIO_TRACK_KEYS,
   DEFAULT_RECORDING_NAME,
   TRACK_KEYS,
+  alignAudioPart,
+  driftSec,
+  isAudioTrack,
+  type AudioCaptureSummary,
+  type AudioTrackKey,
   type DisplayInfo,
   type PermissionState,
   type RecordingDoc,
   type RecordingId,
 } from '@loom/format';
-import type { ProjectStore } from '../project-store.ts';
+import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
+import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
-import { finalizedRecordingDoc, provisionalRecordingDoc } from './recording-doc.ts';
+import {
+  finalizedRecordingDoc,
+  provisionalRecordingDoc,
+  withAudioTrack,
+  withScreenTrack,
+  type FinalizedAudioFacts,
+} from './recording-doc.ts';
 
-/** Phase 1 captures the screen and nothing else. */
+/** The video track phase 1 records. Phase 4 adds `webcam` beside it. */
 const TRACK = 'screen';
 
 /** A chunk larger than this is not a frame; it is a bug or an attack. */
@@ -89,6 +105,33 @@ const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 const MAX_HELD_CHUNKS = 300;
 
 /**
+ * How far an audio part may start from the first screen frame before we say so.
+ *
+ * Two tracks of one capture start within a frame or two of each other — the
+ * measured offsets in §2.3's example are 9 ms and 21 ms. A second is not a late
+ * device; it is a sign that the audio and video capture clocks do not share an
+ * origin, which is the one assumption `startTimeSec` cannot be measured without.
+ */
+const MAX_PLAUSIBLE_TRACK_OFFSET_SEC = 1;
+
+/**
+ * Gaps a renderer may report for one track.
+ *
+ * A real recording has a handful; an unbounded list is memory main allocates on a
+ * renderer's say-so, and a `recording.json` nothing can read.
+ */
+const MAX_REPORTED_GAPS = 1024;
+
+/**
+ * Longest microphone device id a renderer may name.
+ *
+ * A `deviceId` from `enumerateDevices` is a 64-character hash. The bound is here
+ * because the value is handed straight back to the capture page as a constraint,
+ * and an unbounded string from a renderer is a payload rather than a device.
+ */
+const MAX_DEVICE_ID_LENGTH = 200;
+
+/**
  * Windows that may drive a recording.
  *
  * The preload is shared by every window, so *which* window may use
@@ -109,6 +152,17 @@ export interface RecorderSessionOptions {
   statusIntervalMs?: number;
 }
 
+/** One audio track's state while it is being recorded. */
+interface ActiveAudio {
+  part: number;
+  /** Chunks that arrived before `beginAudioPart` resolved, in arrival order. */
+  held: ChunkMsg[];
+  open: boolean;
+  facts: AudioTrackFacts;
+  sampleRate: number;
+  channels: number;
+}
+
 interface Active {
   id: RecordingId;
   options: CaptureOptions;
@@ -120,6 +174,14 @@ interface Active {
   firstPtsUs: number | null;
   lastEndUs: number;
   droppedFrames: number;
+  /**
+   * The microphone and system tracks, once each has announced itself.
+   *
+   * Audio parts open independently of the screen's and of each other — three
+   * encoders, three first chunks, no guaranteed order — so each keeps its own
+   * held-chunk buffer rather than sharing the screen's.
+   */
+  audio: Map<AudioTrackKey, ActiveAudio>;
   /** The first write that failed. A recording that cannot be written is over. */
   writeError: Error | null;
   end: CaptureEndReport | null;
@@ -137,6 +199,8 @@ export class RecorderSession {
   private endWaiters: ((report: CaptureEndReport) => void)[] = [];
   /** Serializes start/stop so two clicks cannot interleave two lifecycles. */
   private chain: Promise<unknown> = Promise.resolve();
+  /** Serializes track announcements, which are a read-modify-write of one document. */
+  private metaChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: RecorderSessionOptions) {
     this.options = { stopTimeoutMs: 5_000, statusIntervalMs: 250, ...options };
@@ -170,11 +234,20 @@ export class RecorderSession {
       await this.enqueue(() => this.stop());
     });
 
+    // Serialized, not just awaited. Each `onMeta` reads the provisional document,
+    // adds a track and writes it back, and there is an `await` in the middle: two
+    // tracks announcing themselves at once would both read the same document and
+    // the second write would drop the first track. Three encoders start within
+    // milliseconds of each other, so this is the common case, not the rare one.
     ipcMain.on(CHANNEL.captureMeta, (event, raw: unknown) => {
       if (!this.fromCaptureWindow(event)) return;
-      void this.onMeta(raw).catch((error: unknown) => {
-        this.failActive(error);
-      });
+      this.metaChain = this.metaChain.then(
+        () =>
+          this.onMeta(raw).catch((error: unknown) => {
+            this.failActive(error);
+          }),
+        () => undefined,
+      );
     });
 
     ipcMain.on(CHANNEL.captureChunk, (event, raw: unknown) => {
@@ -243,15 +316,31 @@ export class RecorderSession {
     try {
       await store.openProject(id);
       await store.setState(id, 'recording');
+      // `recording.json` before the capture page is told anything, carrying the
+      // facts only a live session knows — which display, which scale factor, which
+      // permissions. Tracks are added to it as their encoders announce themselves
+      // (§2.3, and `recording-doc.ts` for why that is three writes and not one).
+      const provisional = provisionalRecordingDoc({
+        display: this.displayInfo(options.displayId),
+        requestedFps: options.fps,
+        capture: {
+          app: this.options.appVersion,
+          os: this.options.osVersion,
+          permissions: this.permissions(),
+          resolutionClamp: `${String(options.maxDimension)}px`,
+        },
+      });
+      await store.writeRecordingDoc(id, provisional);
       this.active = {
         id,
         options,
-        provisional: null,
+        provisional,
         part: null,
         held: [],
         firstPtsUs: null,
         lastEndUs: 0,
         droppedFrames: 0,
+        audio: new Map(),
         writeError: null,
         end: null,
       };
@@ -320,9 +409,18 @@ export class RecorderSession {
         active.part === null
           ? null
           : await store.finalizeMediaPart(active.id, TRACK, report?.endedAtUs ?? undefined);
+      // Audio closes even when the screen failed: a file descriptor into the
+      // bundle outliving the recording is the thing `close` exists to prevent.
+      const audio = await this.finalizeAudio(active, report);
 
       const provisional = active.provisional;
-      if (provisional === null || finalizedPart === null || finalizedPart.frameCount === 0) {
+      const screenTrack = provisional?.tracks.screen;
+      if (
+        provisional === null ||
+        screenTrack === undefined ||
+        finalizedPart === null ||
+        finalizedPart.frameCount === 0
+      ) {
         const reason =
           active.writeError !== null
             ? `the recording could not be written: ${active.writeError.message}`
@@ -342,11 +440,14 @@ export class RecorderSession {
         finalizedRecordingDoc(
           provisional,
           {
-            durationSec: finalizedPart.durationSec,
-            frameCount: finalizedPart.frameCount,
-            observedFps: finalizedPart.observedFps,
-            endedEarly: endReason !== null,
-            ...(endReason === null ? {} : { endReason }),
+            screen: {
+              durationSec: finalizedPart.durationSec,
+              frameCount: finalizedPart.frameCount,
+              observedFps: finalizedPart.observedFps,
+              endedEarly: endReason !== null,
+              ...(endReason === null ? {} : { endReason }),
+            },
+            audio,
           },
           // The capture page is the only thing that counts drops, so its report is
           // the number. `active.droppedFrames` is the last one it sent, and stands
@@ -443,7 +544,21 @@ export class RecorderSession {
     const active = this.active;
     if (active === null) return;
     const meta = metaMessage(raw);
-    if (meta.track !== TRACK) throw new Error(`phase 1 records ${TRACK} only`);
+    if (isAudioTrack(meta.track)) {
+      // An audio track that cannot be opened costs its own track and nothing else
+      // (§7.3): the user pressed record to record their screen.
+      try {
+        await this.onAudioMeta(active, meta, meta.track);
+      } catch (error) {
+        // Scoped cleanup belongs to `onAudioMeta`, which is the only thing that
+        // knows whether the state under this key is the one it created. A
+        // duplicate announcement for a track that already has a healthy open part
+        // fails here, and deleting that state would discard a live track.
+        console.error(`[recorder] the ${meta.track} track could not be opened:`, error);
+      }
+      return;
+    }
+    if (meta.track !== TRACK) throw new Error(`phase 1 records ${TRACK} and audio only`);
     if (active.part !== null) throw new Error('the screen track already has an open part');
 
     const description = meta.decoderConfig.description;
@@ -456,19 +571,12 @@ export class RecorderSession {
 
     const { store } = this.options;
     const file = store.mediaRelativePath(TRACK, meta.part);
-    const provisional = provisionalRecordingDoc({
-      display: this.displayInfo(active.options.displayId),
+    const provisional = withScreenTrack(this.requireProvisional(active), {
       file,
       index: file.replace(/\.mp4$/, '.index.json'),
       codec: meta.decoderConfig.codec,
       size: [width, height],
       requestedFps: active.options.fps,
-      capture: {
-        app: this.options.appVersion,
-        os: this.options.osVersion,
-        permissions: this.permissions(),
-        resolutionClamp: `${String(active.options.maxDimension)}px`,
-      },
     });
     await store.writeRecordingDoc(active.id, provisional);
 
@@ -481,10 +589,105 @@ export class RecorderSession {
       nominalFps: active.options.fps,
       colour: { primaries: 1, transfer: 13, matrix: 1, fullRange: false },
     });
-    active.provisional = { ...provisional };
+    active.provisional = provisional;
     active.part = meta.part;
     if (opened.file !== file) throw new Error('the part path moved under the recording document');
     this.appendHeldChunks(active);
+  }
+
+  /**
+   * The first message of an audio part.
+   *
+   * Same order as the screen's, for the same reason: the document that describes
+   * the part exists before the part does, so a crash can never leave media with
+   * nothing describing it. The facts it carries — device, and the voice processing
+   * macOS actually applied (research trap 3) — are knowable only here.
+   *
+   * An audio track that cannot be opened is **not** an error that ends the
+   * recording. §7.3 is explicit that losing the microphone leaves screen and system
+   * audio recording; the same holds for a track that never starts.
+   */
+  private async onAudioMeta(active: Active, meta: MetaMsg, track: AudioTrackKey): Promise<void> {
+    if (active.audio.has(track)) throw new Error(`${track} already has an open part`);
+    const facts = meta.audio;
+    const description = meta.decoderConfig.description;
+    const sampleRate = meta.decoderConfig.sampleRate ?? 0;
+    const channels = meta.decoderConfig.numberOfChannels ?? 0;
+    if (facts === undefined || description === undefined || description.byteLength === 0) {
+      console.error(`[recorder] ${track} announced no decoder configuration; the track is dropped`);
+      return;
+    }
+    if (sampleRate <= 0 || channels <= 0) {
+      console.error(`[recorder] ${track} reported no sample rate or channel count; dropped`);
+      return;
+    }
+
+    const state: ActiveAudio = {
+      part: meta.part,
+      held: [],
+      open: false,
+      facts,
+      sampleRate,
+      channels,
+    };
+    active.audio.set(track, state);
+
+    const { store } = this.options;
+    try {
+      const provisional = withAudioTrack(this.requireProvisional(active), {
+        track,
+        file: store.mediaRelativePath(track, meta.part),
+        codec: meta.decoderConfig.codec,
+        sampleRate,
+        channels,
+        facts,
+      });
+      await store.writeRecordingDoc(active.id, provisional);
+      active.provisional = provisional;
+
+      await store.beginAudioPart(active.id, {
+        track,
+        part: meta.part,
+        sampleRate,
+        channels,
+        audioSpecificConfig: description,
+        bitrate: active.options.audioBitrate,
+      });
+    } catch (error) {
+      if (active.audio.get(track) === state) active.audio.delete(track);
+      throw error;
+    }
+
+    // The track can be given up on while the part is being created — the writer
+    // is two awaits away and {@link onAudioChunk} drops the track if it overruns
+    // its held-chunk budget in that window. A part nobody is going to write to is
+    // closed rather than left holding a file descriptor into the bundle.
+    if (active.audio.get(track) !== state) {
+      await store.abortMediaPart(active.id, track).catch((error: unknown) => {
+        console.error(`[recorder] closing the abandoned ${track} part failed:`, error);
+      });
+      return;
+    }
+    state.open = true;
+    this.appendHeldAudio(active, track, state);
+
+    if (facts.violations.length > 0) {
+      // Research trap 3. The recording keeps the track — audio the user asked for
+      // is worth having even when it is processed — and `recording.json` records
+      // the settings that were really applied, so it is diagnosable rather than
+      // mysterious. What must not happen is silence about it.
+      console.error(
+        `[recorder] the ${track} track kept ${facts.violations.join(', ')} despite explicit ` +
+          'constraints; anything with music or video in it will sound processed',
+      );
+    }
+  }
+
+  /** The provisional document, which `start` writes before anything else exists. */
+  private requireProvisional(active: Active): RecordingDoc {
+    const provisional = active.provisional;
+    if (provisional === null) throw new Error('the recording has no provisional document');
+    return provisional;
   }
 
   /**
@@ -509,6 +712,10 @@ export class RecorderSession {
       this.failActive(error);
       return;
     }
+    if (isAudioTrack(chunk.track)) {
+      this.onAudioChunk(active, chunk, chunk.track);
+      return;
+    }
     if (chunk.track !== TRACK) return;
 
     if (active.part === null) {
@@ -526,6 +733,176 @@ export class RecorderSession {
     }
     if (chunk.part !== active.part) return;
     this.appendChunk(active, chunk);
+  }
+
+  /**
+   * One encoded AAC frame.
+   *
+   * The audio counterpart of {@link onChunk}, and separate from it in one way that
+   * matters: a failed audio write does **not** end the recording. The screen is
+   * what the user pressed record for, and a microphone that fills the disk or a
+   * device that vanishes mid-write costs its own track and nothing else (§7.3).
+   */
+  private onAudioChunk(active: Active, chunk: ChunkMsg, track: AudioTrackKey): void {
+    const state = active.audio.get(track);
+    if (state === undefined) return;
+    if (chunk.part !== state.part) return;
+
+    if (!state.open) {
+      if (state.held.length >= MAX_HELD_CHUNKS) {
+        // The track is given up on rather than continued from here. The frames
+        // that were held are counted by the meter in the capture renderer, which
+        // is what produces `startTimeSec`, `durationSec` and `measuredSampleRate`
+        // — so writing the rest would describe samples the `.m4a` does not
+        // contain and shift everything in it earlier, with no gap to explain it.
+        // §7.3: that costs this track and nothing else.
+        console.error(
+          `[recorder] ${track} produced ${MAX_HELD_CHUNKS} frames faster than its part could ` +
+            'be opened; the track is dropped rather than written out of sync',
+        );
+        state.held = [];
+        active.audio.delete(track);
+        return;
+      }
+      state.held.push(chunk);
+      return;
+    }
+    this.appendAudioChunk(active, track, chunk);
+  }
+
+  private appendAudioChunk(active: Active, track: AudioTrackKey, chunk: ChunkMsg): void {
+    void this.options.store
+      .appendMediaChunk(active.id, track, {
+        data: chunk.data,
+        isKey: true,
+        timestampUs: chunk.timestampUs,
+        durationUs: chunk.durationUs,
+      })
+      .catch((error: unknown) => {
+        console.error(`[recorder] writing the ${track} track failed:`, error);
+      });
+  }
+
+  /** Write whatever arrived while `beginAudioPart` was resolving, in arrival order. */
+  private appendHeldAudio(active: Active, track: AudioTrackKey, state: ActiveAudio): void {
+    const held = state.held;
+    state.held = [];
+    for (const chunk of held) this.appendAudioChunk(active, track, chunk);
+  }
+
+  /**
+   * Close every audio part and turn its measurements into `recording.json` fields.
+   *
+   * The measurements come from the capture page's report and are **not**
+   * recomputed here: `measuredSampleRate` and `gaps` can only be read from the raw
+   * buffer stream, and by the time bytes reach this process the encoder has
+   * removed the evidence (§5.5, §5.4.5). What main does is place them on the
+   * recording clock, whose origin is the first screen frame.
+   */
+  private async finalizeAudio(
+    active: Active,
+    report: CaptureEndReport | null,
+  ): Promise<Partial<Record<AudioTrackKey, FinalizedAudioFacts>>> {
+    const out: Partial<Record<AudioTrackKey, FinalizedAudioFacts>> = {};
+    for (const track of AUDIO_TRACK_KEYS) {
+      const state = active.audio.get(track);
+      if (state?.open !== true) continue;
+      let written: FinalizedAudioPart | null = null;
+      try {
+        written = await this.options.store.finalizeAudioPart(active.id, track);
+      } catch (error) {
+        console.error(`[recorder] finalizing the ${track} part failed:`, error);
+      }
+
+      const measured = report?.audio?.find((entry) => entry.track === track);
+      if (measured !== undefined) {
+        out[track] = this.alignedAudio(active, measured, report?.epochOffsetUs ?? 0);
+        continue;
+      }
+      const fromBytes = writtenAudio(state, written);
+      if (fromBytes === null) {
+        console.warn(`[recorder] ${track} produced no media and no measurements`);
+        continue;
+      }
+      console.warn(
+        `[recorder] ${track} produced media but no measurements; it is described from the ` +
+          'bytes that were written, at the nominal rate and starting with the screen',
+      );
+      out[track] = fromBytes;
+    }
+    return out;
+  }
+
+  /**
+   * One track's measurements, placed on the recording clock (§5.4, §5.5).
+   *
+   * Both timestamps are moved onto the shared arrival clock first. They are not on
+   * one clock to begin with: Chromium stamps captured audio and captured video
+   * against different epochs, measured on this machine as video from zero and audio
+   * from the system's uptime. `TrackEpochEstimator` is what relates them, and
+   * without it `startTimeSec` is a subtraction of two unrelated numbers.
+   */
+  private alignedAudio(
+    active: Active,
+    measured: AudioTrackReport,
+    videoEpochOffsetUs: number,
+  ): FinalizedAudioFacts {
+    const timing = alignAudioPart(measured.summary, {
+      // `clock.t0Us` is the first screen frame; every other track's start is an
+      // offset from it. With no screen frame there is nothing to be offset from,
+      // and the track starts the recording.
+      originUs:
+        active.firstPtsUs === null
+          ? (measured.summary.firstTimestampUs ?? 0) + measured.epochOffsetUs
+          : active.firstPtsUs + videoEpochOffsetUs,
+      epochOffsetUs: measured.epochOffsetUs,
+      referenceStartSec: 0,
+    });
+    this.reportAudioTiming(measured, timing.startTimeSec, timing.durationSec);
+    return {
+      timing,
+      endedEarly: measured.endedEarly,
+      ...(measured.endReason === undefined ? {} : { endReason: measured.endReason }),
+    };
+  }
+
+  /**
+   * Say what a track's clock did, in the log, every time.
+   *
+   * §10.1 asks for cumulative measured-vs-nominal drift to be logged during
+   * capture "so we can see it in the field before a user reports it". This is that
+   * line. The offset check beside it guards the one assumption underneath all of
+   * this: that `VideoFrame.timestamp` and the audio timestamps share an origin. A
+   * track that claims to start seconds away from the screen has not found a
+   * genuinely late device; it has found that assumption to be wrong, and it says so
+   * rather than quietly writing a number the exporter will act on.
+   */
+  private reportAudioTiming(
+    measured: AudioTrackReport,
+    startTimeSec: number,
+    durationSec: number,
+  ): void {
+    const summary = measured.summary;
+    const drift = driftSec(
+      { sampleRate: summary.nominalSampleRate, measuredSampleRate: summary.measuredSampleRate },
+      durationSec,
+    );
+    console.log(
+      `[recorder] ${measured.track}: start ${startTimeSec.toFixed(4)}s, ` +
+        `${durationSec.toFixed(3)}s, measured ${summary.measuredSampleRate.toFixed(2)} Hz ` +
+        `against a nominal ${summary.nominalSampleRate} ` +
+        `(${(drift * 1000).toFixed(1)} ms of drift over the recording), ` +
+        `${summary.gaps.length} gap(s)`,
+    );
+    if (Math.abs(startTimeSec) > MAX_PLAUSIBLE_TRACK_OFFSET_SEC) {
+      console.error(
+        `[recorder] ${measured.track} claims to start ${startTimeSec.toFixed(3)}s from the first ` +
+          'screen frame. Two capture tracks should start within a frame or two of each other, so ' +
+          'this most likely means the audio and video capture clocks do not share an origin on ' +
+          'this machine. The measured value is recorded rather than corrected; see the ' +
+          'carried-forward obligations in AGENTS.md.',
+      );
+    }
   }
 
   /** Write, in arrival order, whatever came in while `beginMediaPart` was resolving. */
@@ -609,7 +986,12 @@ export class RecorderSession {
           callback({});
           return;
         }
-        callback({ video: source });
+        // `'loopback'` is what makes system audio work with no driver, no
+        // installer and no admin prompt — the reason the macOS floor is 14
+        // (`decision-macos-floor.md`, research report §5.2). Not
+        // `'loopbackWithMute'`: muting the speakers while recording them would
+        // mean the user cannot hear what they are demonstrating.
+        callback(wanted.systemAudio ? { video: source, audio: 'loopback' } : { video: source });
       })
       .catch((error: unknown) => {
         console.error('[recorder] enumerating screen sources failed:', error);
@@ -806,14 +1188,37 @@ function captureOptions(raw: unknown): Partial<CaptureOptions> {
   if (typeof bitrate === 'number' && bitrate >= 100_000 && bitrate <= 200_000_000) {
     out.bitrate = Math.round(bitrate);
   }
+  // Strict booleans, not truthiness: a renderer that sends `0` or `''` for
+  // `systemAudio` is malformed, and reading it as "off" would answer a question it
+  // did not ask. An absent or out-of-range field falls through to
+  // `DEFAULT_CAPTURE_OPTIONS`, which is what decides whether a microphone opens.
+  if (typeof input['systemAudio'] === 'boolean') out.systemAudio = input['systemAudio'];
+  if (typeof input['micVoiceProcessing'] === 'boolean') {
+    out.micVoiceProcessing = input['micVoiceProcessing'];
+  }
+  const mic = input['micDeviceId'];
+  if (mic === null) out.micDeviceId = null;
+  else if (typeof mic === 'string' && mic.length > 0 && mic.length <= MAX_DEVICE_ID_LENGTH) {
+    out.micDeviceId = mic;
+  }
+  const audioBitrate = input['audioBitrate'];
+  if (typeof audioBitrate === 'number' && audioBitrate >= 32_000 && audioBitrate <= 512_000) {
+    out.audioBitrate = Math.round(audioBitrate);
+  }
   return out;
 }
 
+/** A part index, or `null` when the value is not one. */
+function partIndex(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 999
+    ? value
+    : null;
+}
+
 function requirePart(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 999) {
-    throw new Error('part must be an integer between 0 and 999');
-  }
-  return value;
+  const part = partIndex(value);
+  if (part === null) throw new Error('part must be an integer between 0 and 999');
+  return part;
 }
 
 function requireTrack(value: unknown): ChunkMsg['track'] {
@@ -835,6 +1240,7 @@ function metaMessage(raw: unknown): MetaMsg {
     throw new Error('meta.decoderConfig.codec must be a short string');
   }
   const description = decoder['description'];
+  const audio = audioFacts(input['audio']);
   return {
     track: requireTrack(input['track']),
     part: requirePart(input['part']),
@@ -844,8 +1250,130 @@ function metaMessage(raw: unknown): MetaMsg {
       ...(typeof decoder['codedHeight'] === 'number'
         ? { codedHeight: decoder['codedHeight'] }
         : {}),
+      ...(isRate(decoder['sampleRate']) ? { sampleRate: decoder['sampleRate'] } : {}),
+      ...(isChannelCount(decoder['numberOfChannels'])
+        ? { numberOfChannels: decoder['numberOfChannels'] }
+        : {}),
       ...(description instanceof Uint8Array ? { description } : {}),
     },
+    ...(audio === null ? {} : { audio }),
+  };
+}
+
+function isRate(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 384_000;
+}
+
+function isChannelCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 32;
+}
+
+/** A short string from a renderer, bounded so a device name cannot be a payload. */
+function shortString(value: unknown, max = 200): string | null {
+  return typeof value === 'string' && value.length <= max ? value : null;
+}
+
+function audioSettings(raw: unknown): AudioTrackSettings | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const input = raw as Record<string, unknown>;
+  if (!isRate(input['sampleRate']) || !isChannelCount(input['channelCount'])) return null;
+  return {
+    sampleRate: input['sampleRate'],
+    channelCount: input['channelCount'],
+    echoCancellation: input['echoCancellation'] === true,
+    noiseSuppression: input['noiseSuppression'] === true,
+    autoGainControl: input['autoGainControl'] === true,
+  };
+}
+
+function audioFacts(raw: unknown): AudioTrackFacts | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const input = raw as Record<string, unknown>;
+  const settings = audioSettings(input['settings']);
+  if (settings === null) return null;
+  const violations = Array.isArray(input['violations'])
+    ? input['violations'].map((v) => shortString(v, 64)).filter((v): v is string => v !== null)
+    : [];
+  return {
+    deviceId: shortString(input['deviceId']),
+    deviceName: shortString(input['deviceName']),
+    source: shortString(input['source'], 64),
+    settings,
+    violations: violations.slice(0, 8),
+  };
+}
+
+/**
+ * One audio track's measurements, shape-checked like every other renderer message.
+ *
+ * These numbers decide where every audio sample in the recording is placed, so a
+ * malformed one is refused rather than written: a `measuredSampleRate` of zero or
+ * a gap of `NaN` in `recording.json` is a recording no later phase can read.
+ */
+function audioReports(raw: unknown): AudioTrackReport[] {
+  if (!Array.isArray(raw)) return [];
+  const reports: AudioTrackReport[] = [];
+  for (const entry of raw.slice(0, AUDIO_TRACK_KEYS.length)) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const input = entry as Record<string, unknown>;
+    const track = input['track'];
+    if (track !== 'mic' && track !== 'system') continue;
+    const facts = audioFacts(input['facts']);
+    const summary = audioSummary(input['summary']);
+    const part = partIndex(input['part']);
+    if (facts === null || summary === null || part === null) continue;
+    const endReason = input['endReason'];
+    reports.push({
+      track,
+      part,
+      facts,
+      summary,
+      epochOffsetUs:
+        typeof input['epochOffsetUs'] === 'number' && Number.isFinite(input['epochOffsetUs'])
+          ? input['epochOffsetUs']
+          : 0,
+      endedEarly: input['endedEarly'] === true,
+      ...(endReason === 'device-lost' ||
+      endReason === 'permission-revoked' ||
+      endReason === 'disk-full' ||
+      endReason === 'crash'
+        ? { endReason }
+        : {}),
+    });
+  }
+  return reports;
+}
+
+function audioSummary(raw: unknown): AudioCaptureSummary | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const input = raw as Record<string, unknown>;
+  if (!isRate(input['nominalSampleRate']) || !isRate(input['measuredSampleRate'])) return null;
+  const finite = (value: unknown): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  const stamp = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const gaps = Array.isArray(input['gaps']) ? input['gaps'] : [];
+  return {
+    bufferCount: finite(input['bufferCount']),
+    sampleCount: finite(input['sampleCount']),
+    firstTimestampUs: stamp(input['firstTimestampUs']),
+    lastTimestampUs: stamp(input['lastTimestampUs']),
+    lastFrameCount: finite(input['lastFrameCount']),
+    gaps: gaps
+      .slice(0, MAX_REPORTED_GAPS)
+      .map((gap) => {
+        const g = (gap ?? {}) as Record<string, unknown>;
+        return {
+          atUs: finite(g['atUs']),
+          durationUs: Math.max(0, finite(g['durationUs'])),
+          cause: shortString(g['cause'], 64) ?? 'unknown',
+        };
+      })
+      .filter((gap) => gap.durationUs > 0),
+    gapUs: Math.max(0, finite(input['gapUs'])),
+    nominalSampleRate: input['nominalSampleRate'],
+    measuredSampleRate: input['measuredSampleRate'],
+    rateIsNominal: input['rateIsNominal'] === true,
   };
 }
 
@@ -889,11 +1417,54 @@ function endReport(raw: unknown): CaptureEndReport {
     framesEncoded: typeof input['framesEncoded'] === 'number' ? input['framesEncoded'] : 0,
     framesDropped: typeof input['framesDropped'] === 'number' ? input['framesDropped'] : 0,
     ...(typeof input['message'] === 'string' ? { message: input['message'].slice(0, 500) } : {}),
+    ...(input['audio'] === undefined ? {} : { audio: audioReports(input['audio']) }),
+    ...(typeof input['epochOffsetUs'] === 'number' && Number.isFinite(input['epochOffsetUs'])
+      ? { epochOffsetUs: input['epochOffsetUs'] }
+      : {}),
   };
 }
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * One audio track described from the bytes on disk, when no measurement arrived.
+ *
+ * The capture page owns `measuredSampleRate` and `gaps` — they can only be read
+ * from the raw buffer stream (§5.5) — so a renderer that died, or a stop that
+ * timed out, leaves main with a finished `.m4a` and nothing to describe it with.
+ * Leaving it out of `recording.json` loses the audio outright: the bundle
+ * finalizes to `editable`, which no crash-recovery pass ever looks at again.
+ *
+ * So the part is written from what the writer counted, and every number in it is
+ * the honest one: the nominal rate rather than a measured one, no gaps rather
+ * than invented ones, and `startTimeSec: 0` — the value the snap in §5.4
+ * mechanism 3 produces for an ordinary recording anyway. The track is marked
+ * `endedEarly` with `endReason: 'crash'`, because whatever happened, the capture
+ * did not end the way it was asked to.
+ *
+ * `sampleCount` counts the encoder's priming, which the part's edit list tells a
+ * reader to skip; `durationSec` is the extent of the *decoded* media, so the
+ * priming comes back off (see `AudioPart.startTimeSec`).
+ */
+function writtenAudio(
+  state: ActiveAudio,
+  written: FinalizedAudioPart | null,
+): FinalizedAudioFacts | null {
+  if (written === null || written.frameCount === 0 || state.sampleRate <= 0) return null;
+  const decodedSamples = Math.max(0, written.sampleCount - AAC_ENCODER_DELAY_SAMPLES);
+  if (decodedSamples === 0) return null;
+  return {
+    timing: {
+      startTimeSec: 0,
+      durationSec: decodedSamples / state.sampleRate,
+      measuredSampleRate: state.sampleRate,
+      gaps: [],
+    },
+    endedEarly: true,
+    endReason: 'crash',
+  };
 }
 
 /**

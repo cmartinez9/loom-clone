@@ -19,14 +19,15 @@
  *   `getDisplayMedia` handing back a real ScreenCaptureKit track. It needs the
  *   Screen Recording grant and refuses to run without it, because a run that starts
  *   without it produces black frames or no frames and looks like a bug in our code.
- * - **`--synthetic`** replaces **only** the display-source acquisition — one
- *   assignment to `navigator.mediaDevices.getDisplayMedia`, evaluated in the real
- *   capture page — with a canvas stream. Everything downstream is the shipped path:
- *   the same `MediaStreamTrackProcessor` loop, the same `VideoEncoder`, the same
- *   encoded-chunk IPC, the same `ProjectStore`, the same fragmented MP4, the same
- *   finalize. It runs on a machine with no Screen Recording grant, and it therefore
- *   proves nothing at all about the three things it stands in for — see the
- *   carried-forward obligations in `AGENTS.md`.
+ * - **`--synthetic`** replaces **only** the source acquisition — two assignments,
+ *   to `navigator.mediaDevices.getDisplayMedia` and `getUserMedia`, evaluated in the
+ *   real capture page — with a canvas stream and an oscillator. Everything
+ *   downstream is the shipped path: the same `MediaStreamTrackProcessor` loops, the
+ *   same `VideoEncoder` and `AudioEncoder`, the same encoded-chunk IPC, the same
+ *   `ProjectStore`, the same fragmented MP4 and M4A, the same finalize. It runs on a
+ *   machine with no Screen Recording grant, and it therefore proves nothing at all
+ *   about the things it stands in for — see the carried-forward obligations in
+ *   `AGENTS.md`.
  *
  * Neither mode substitutes for phase 2's signed-bundle check: in development TCC is
  * inherited from the terminal (research report §7, trap 6).
@@ -57,6 +58,7 @@ const recordingsRoot = arg('root');
 const distRoot = arg('dist');
 const seconds = Number(arg('seconds', '3'));
 const synthetic = process.argv.includes('--synthetic');
+const audio = !process.argv.includes('--no-audio');
 
 app.setName(LOOM_PRODUCT_NAME);
 app.setAppUserModelId(LOOM_BUNDLE_ID);
@@ -153,7 +155,26 @@ function syntheticSourceScript(width: number, height: number, fps: number): stri
       ctx.font = '64px monospace';
       ctx.fillText('frame ' + String(n), 32, 96);
     }, ${String(Math.max(1, Math.round(1000 / fps)))});
-    navigator.mediaDevices.getDisplayMedia = () => Promise.resolve(stream);
+    // A tone for the audio half. The oscillator goes through the same
+    // MediaStreamTrackProcessor -> AudioEncoder path a loopback track would, so
+    // what this exercises is the pipeline and the clock, not the device.
+    const audioContext = new AudioContext({ sampleRate: 48000 });
+    const oscillator = audioContext.createOscillator();
+    oscillator.frequency.value = 440;
+    const destination = audioContext.createMediaStreamDestination();
+    oscillator.connect(destination);
+    oscillator.start();
+    const audioTrack = destination.stream.getAudioTracks()[0];
+
+    navigator.mediaDevices.getDisplayMedia = (options) => {
+      const out = new MediaStream(stream.getVideoTracks());
+      if (options && options.audio && audioTrack !== undefined) out.addTrack(audioTrack.clone());
+      return Promise.resolve(out);
+    };
+    navigator.mediaDevices.getUserMedia = () => {
+      if (audioTrack === undefined) return Promise.reject(new Error('no synthetic microphone'));
+      return Promise.resolve(new MediaStream([audioTrack.clone()]));
+    };
     return String(canvas.width) + 'x' + String(canvas.height);
   })()`;
 }
@@ -194,7 +215,13 @@ app
     installLoomProtocol({ store, rendererRoot: join(distRoot, 'renderer') });
     recorder.install();
 
-    const options = { fps: 30, maxDimension: 1920, bitrate: 4_000_000 };
+    const options = {
+      fps: 30,
+      maxDimension: 1920,
+      bitrate: 4_000_000,
+      systemAudio: audio,
+      micDeviceId: audio ? 'default' : null,
+    };
     if (synthetic) {
       const width = Math.min(1280, options.maxDimension);
       const window = await readyCapturePage();
@@ -210,6 +237,26 @@ app
     const summary = (await store.list()).find((s) => s.id === recordingId);
     const opened = await store.readProject(recordingId);
     const part = opened.recording?.tracks.screen?.parts[0];
+    // Every fact A/V sync rests on, for a human to read: what the device claimed,
+    // what it actually ran at, where it started relative to the first screen frame,
+    // and whether macOS honoured the constraints of research trap 3.
+    const audioTracks = (['mic', 'system'] as const).flatMap((key) => {
+      const track = opened.recording?.tracks[key];
+      const audioPart = track?.parts[0];
+      if (track === undefined || audioPart === undefined) return [];
+      return [
+        {
+          track: key,
+          deviceName: track.deviceName ?? null,
+          constraints: track.constraints ?? null,
+          sampleRate: audioPart.sampleRate,
+          measuredSampleRate: audioPart.measuredSampleRate,
+          startTimeSec: audioPart.startTimeSec,
+          durationSec: audioPart.durationSec,
+          gaps: audioPart.gaps.length,
+        },
+      ];
+    });
     process.stdout.write(
       `${JSON.stringify({
         recordingId,
@@ -222,6 +269,7 @@ app
         size: part?.size ?? null,
         codec: part?.codec ?? null,
         droppedFrames: opened.recording?.capture.droppedFrames.screen ?? 0,
+        audio: audioTracks,
         path: summary?.path ?? null,
       })}\n`,
     );

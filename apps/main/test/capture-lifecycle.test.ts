@@ -28,7 +28,11 @@ import {
   type RecordingId,
 } from '@loom/format';
 import { ProjectStore } from '../src/project-store.ts';
-import { finalizedRecordingDoc, provisionalRecordingDoc } from '../src/recorder/recording-doc.ts';
+import {
+  finalizedRecordingDoc,
+  provisionalRecordingDoc,
+  withScreenTrack,
+} from '../src/recorder/recording-doc.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
 const fixture = loadEncodedFixture();
@@ -54,32 +58,37 @@ afterEach(async () => {
 
 function provisional(store: ProjectStore): RecordingDoc {
   const file = store.mediaRelativePath('screen', 0);
-  return provisionalRecordingDoc({
-    display: {
-      id: 1,
-      name: 'Built-in Liquid Retina XDR',
-      logicalSize: [1728, 1117],
-      pixelSize: [3456, 2234],
-      scaleFactor: 2,
-      colorSpace: 'display-p3',
-    },
-    file,
-    index: file.replace(/\.mp4$/, '.index.json'),
-    codec: 'avc1.64000d',
-    size: [fixture.width, fixture.height],
-    requestedFps: fixture.fps,
-    capture: {
-      app: '0.1.0-test',
-      os: '26.5.1',
-      permissions: {
-        screen: 'granted',
-        camera: 'not-determined',
-        microphone: 'not-determined',
-        accessibility: false,
+  return withScreenTrack(
+    provisionalRecordingDoc({
+      display: {
+        id: 1,
+        name: 'Built-in Liquid Retina XDR',
+        logicalSize: [1728, 1117],
+        pixelSize: [3456, 2234],
+        scaleFactor: 2,
+        colorSpace: 'display-p3',
       },
-      resolutionClamp: '3840px',
+      requestedFps: fixture.fps,
+      capture: {
+        app: '0.1.0-test',
+        os: '26.5.1',
+        permissions: {
+          screen: 'granted',
+          camera: 'not-determined',
+          microphone: 'not-determined',
+          accessibility: false,
+        },
+        resolutionClamp: '3840px',
+      },
+    }),
+    {
+      file,
+      index: file.replace(/\.mp4$/, '.index.json'),
+      codec: 'avc1.64000d',
+      size: [fixture.width, fixture.height],
+      requestedFps: fixture.fps,
     },
-  });
+  );
 }
 
 /** Start a recording and write `frames` frames into it. */
@@ -159,7 +168,7 @@ describe('the documents capture writes', () => {
   it('fills in the real numbers at finalize without touching the rest', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
-      { durationSec: 10, frameCount: 300, observedFps: 30, endedEarly: false },
+      { screen: { durationSec: 10, frameCount: 300, observedFps: 30, endedEarly: false } },
       2,
       '2026-08-05T00:00:00.000Z',
     );
@@ -180,11 +189,13 @@ describe('the documents capture writes', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
       {
-        durationSec: 4,
-        frameCount: 120,
-        observedFps: 30,
-        endedEarly: true,
-        endReason: 'permission-revoked',
+        screen: {
+          durationSec: 4,
+          frameCount: 120,
+          observedFps: 30,
+          endedEarly: true,
+          endReason: 'permission-revoked',
+        },
       },
       0,
       '2026-08-05T00:00:00.000Z',
@@ -213,10 +224,12 @@ describe('a recording that stops cleanly', () => {
       finalizedRecordingDoc(
         provisional(store),
         {
-          durationSec: part.durationSec,
-          frameCount: part.frameCount,
-          observedFps: part.observedFps,
-          endedEarly: false,
+          screen: {
+            durationSec: part.durationSec,
+            frameCount: part.frameCount,
+            observedFps: part.observedFps,
+            endedEarly: false,
+          },
         },
         0,
         new Date().toISOString(),

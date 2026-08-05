@@ -31,12 +31,13 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break the capture writer five ways; each must fail the gate
+npm run verify:mutation   # break the capture writers eight ways; each must fail a gate
+node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
-node scripts/smoke-capture.mjs --synthetic       # ...with a canvas in place of the screen
+node scripts/smoke-capture.mjs --synthetic       # ...with a canvas and an oscillator instead
 node packages/sampler/native/build.mjs --force   # rebuild only the native sampler
 ./dist/native/loom-input-sampler probe           # what input capture can do right now
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
@@ -46,8 +47,11 @@ npx electron scripts/screenshot.cjs --out shots --theme light   # capture the re
 
 ```
 packages/format/   the on-disk format: schemas, types, validation, migrations,
-                   writeAtomic, the edit journal.  `@loom/format` is PURE (no node,
-                   no DOM); `@loom/format/fs` is the filesystem half.
+                   writeAtomic, the edit journal, and `src/sync/` — the A/V
+                   alignment arithmetic, which lives here rather than in a package
+                   §1.3 does not list because every function in it is a reading of
+                   a §2.3 field.  `@loom/format` is PURE (no node, no DOM);
+                   `@loom/format/fs` is the filesystem half.
 packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it with.
                    `@loom/mux` is PURE; `@loom/mux/fs` owns the file descriptor and,
                    like `@loom/format/fs`, has exactly one caller.
@@ -107,6 +111,24 @@ comes from after a restart, since `recording.json` does not carry it).
    as iconography. `packages/design/test/no-generic-look.test.ts` enforces the
    mechanical half. Rationale: `data/loom-design/report.md` §2 and §8.
 
+## A/V sync, in one paragraph
+
+Tracks are captured separately and aligned by `recording.json`, never by trimming
+media (§5.4). Three fields carry it and `packages/format/src/sync/` is the only
+supported way to read them: **`startTimeSec`** (each part's first sample, on the
+recording clock, snapped to the reference when the offset is under one audio buffer),
+**`measuredSampleRate`** (what the device actually ran at — a "48 kHz" device is not
+48000.000 Hz, and 50 ppm is 60 ms over twenty minutes), and **`gaps`** (time in which
+the device produced nothing; the container has no hole in it, so `audioRuns()`
+reproduces one as silence). `durationSec` on an audio part is its extent on the
+recording clock, gaps included; the media in the file is `durationSec - Σ gaps` long.
+The measurements can only be taken from the raw buffer stream, so `AudioCaptureMeter`
+runs in the capture renderer and a handful of numbers cross IPC; main places them on
+the clock and writes them. **The gate is `apps/main/test/av-sync.test.ts`: a
+flash/tone cross-correlation at 1 minute and at 20 minutes, |offset| < 20 ms, with
+four controls that must fail.** One minute alone is not a gate — it passes a build
+that ignores `measuredSampleRate` by 2.6 ms and fails it by 59.6 ms at twenty.
+
 ## The format, in one paragraph
 
 A recording is a `.loomrec` **directory** of independently-captured, independently-
@@ -130,8 +152,9 @@ are lists of parts (`screen.000.mp4`) from day one, never a single file.
 
 ## Capture, in one paragraph
 
-A hidden renderer runs `getDisplayMedia` → `MediaStreamTrackProcessor` →
-`VideoEncoder` and sends **encoded chunks** to main, which writes each one as its own
+A hidden renderer runs `getDisplayMedia` (video **and** `audio: 'loopback'`) and
+`getUserMedia` (the microphone) → `MediaStreamTrackProcessor` →
+`VideoEncoder`/`AudioEncoder`, and sends **encoded chunks** to main, which writes each one as its own
 `moof`+`mdat` fragment the instant it exists. One sample per fragment is the crash
 budget made explicit: a `SIGKILL` costs what this process still holds, so a fragment
 is one frame (~110 bytes of overhead, ~0.2% at 12 Mbps) rather than the report's
@@ -141,10 +164,31 @@ is written **before the first frame** with the facts only a live session knows
 (display, scale factor, permissions); recovery corrects it rather than inventing it.
 The frame index is held in memory and written at finalize — recovery rebuilds it by
 scanning the fragments, which is strictly better than a checkpoint and avoids
-rewriting a growing JSON once a second for the length of the recording.
+rewriting a growing JSON once a second for the length of the recording. Audio parts
+are the same fragment layout in a `.m4a` (one AAC frame per fragment, no sidecar —
+1024 samples is arithmetic, not an index), and their media timeline is contiguous:
+a gap lives in `recording.json`, never in the container.
 
 ## Sharp edges
 
+- **Audio and video capture clocks do not share an epoch.** Measured by
+  `scripts/smoke-capture.mjs`: video frames timestamped from zero, audio buffers from
+  2,678,930 s — the machine's uptime. `startTimeSec` is therefore _not_ a subtraction
+  of the two raw timestamps; `TrackEpochEstimator` relates them through the one clock
+  both are observed on (arrival time), and the residue is removed by the §5.4
+  mechanism 3 snap. Sample timestamps themselves are still never wall-clock derived.
+- **AAC has 2112 samples of encoder priming**, and AVFoundation trims it by default
+  while libavformat does not — 44 ms apart, twice the sync budget. The writer states
+  the trim in an `elst` edit list so both agree; a reader that pulls raw chunks out of
+  a part instead of demuxing it has to apply `parseAudioInitSegment().encoderDelaySamples`
+  itself.
+- **Every track announcement is a read-modify-write of one `recording.json`.** Three
+  encoders announce themselves within milliseconds of each other, so `RecorderSession`
+  serializes them on `metaChain`; without it the second write drops the first track,
+  which is exactly what happened and what the smoke script caught.
+- **An audio failure never fails a recording.** §7.3: a microphone that is refused,
+  vanishes or cannot be encoded costs its own track and nothing else. The screen is
+  what the user pressed record for.
 - **Bracket notation is deliberate.** `tsconfig.json` sets
   `noPropertyAccessFromIndexSignature`; `doc['schema']` is how this codebase says "this
   key may not be there".
@@ -218,6 +262,24 @@ rewriting a growing JSON once a second for the length of the recording.
   unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
   re-measure, then decide. If a genuine frame over budget turns up on the fixed
   instrument, that is a decision to take with real numbers, not a threshold to adjust.
+  The instrument has since needed fixing a second time, the same way: **the gate's own
+  readback was the largest cost inside the window it was measuring.** A whole 1440p
+  frame out of the GPU is 14.7 MB synchronously plus an in-place flip of the same —
+  measured at 20.8, 29.6 and 97.8 ms on an M5 Pro where every actual frame of the run
+  cost 0.2–0.5 ms — and the gate did it eighteen times inside the scrub and play
+  windows, with a CPU-backed 30 MB `texImage2D` due on the next frame. Both readers
+  now read a slice (one row for the frame code, 8×8 px for the settle probe), which is
+  what the settle probe's own comment had said to do since phase 6. Anything added to
+  those windows has to be cheap, or it is not measuring the preview any more.
+- **Test files run one at a time, and anything measuring the machine measures it
+  twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
+  6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
+  machine for the better part of a minute. `vitest.config.ts` sets
+  `fileParallelism: false` so they cannot measure each other. The other half is
+  `packages/sampler/test/rate-control.ts`: a rate is only comparable to a control
+  measured **across the same window**, never before or after it — the same no-op timer
+  has reported 25.4 Hz beside one run and 80.7 Hz beside the next, and CI once failed
+  a sampler handed 44 Hz against a control that found 69.5 Hz in a lull moments later.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and
@@ -233,7 +295,19 @@ rewriting a growing JSON once a second for the length of the recording.
   really does model the silent no-op) and `test/relaunch-policy.test.ts`, which
   enumerates every bad-run shape and requires that none of them earns a second launch.
   A retry around an acceptance gate is how a real defect gets to look like weather;
-  it stays defensible only while it stays this narrow.
+  it stays defensible only while it stays this narrow. The other half of "silent" is
+  that the event carries **no reason**, and one of the reasons was ours to remove:
+  Chromium's GPU watchdog kills the GPU process when a call has not come back inside
+  its timeout, and every context in it goes too. In a browser that is a tab staying
+  responsive; here it is a slow host pre-empting the measurement that exists to catch
+  slowness — CI lost the context on both launches of one job while the same commit
+  passed in another, on runners that vary by 5× (a 24.5 ms warmup frame and a 4.1 ms
+  composite on one, 4.7 ms and 1.9 ms on another). `test/gate/main.ts` therefore runs
+  with `--disable-gpu-watchdog`, so a frame that takes too long arrives as a number
+  over budget rather than as a run that measured nothing, and notes
+  `child-process-gone` so a context that goes anyway names what died. The gate prints
+  its own log on a bad run for the same reason: how far it got is the difference
+  between a host that took the instrument away and a defect that always will.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
@@ -249,9 +323,9 @@ rewriting a growing JSON once a second for the length of the recording.
   `0`, and by `clicks.ndjson` existing only once the tap is live. Phase 10's auto-zoom
   is the consumer that breaks silently if either collapses.
 
-## Carried forward to phase 2: three things no dev run has verified
+## Carried forward to phase 2: five things no dev run has verified
 
-Phase 1 shipped with these **unverified**, not verified-and-passing. They are
+Phases 1 and 3 shipped with these **unverified**, not verified-and-passing. They are
 obligations on phase 2's signed-bundle gate, and until that gate runs, no report may
 describe them as working:
 
@@ -261,6 +335,13 @@ describe them as working:
 3. **`setContentProtection(true)` actually keeping the recorder HUD out of captured
    frames.** `windows.test.ts` asserts the flag is set on the role; nothing has
    watched the pixels.
+4. **`audio: 'loopback'` reaching a real speaker output**, and whether macOS honours
+   the AEC/NS/AGC-off stereo constraints on the track it hands back (research trap 3).
+   The code asserts the constraints and records what was actually applied in
+   `recording.json`; only a machine with the grant can say what that is.
+5. **A real microphone's `startTimeSec`.** The epoch correction is exercised against
+   Chromium's own clocks by `--synthetic`, and the residue snapped to zero there — but
+   a real device has its own latency, and only a granted run can show it.
 
 Why they are open: a machine that has not granted Screen Recording to the _terminal_
 cannot run the leg that would prove any of them, and granting it to a dev binary
@@ -268,11 +349,14 @@ proves the wrong thing anyway, because a dev build inherits the terminal's TCC (
 trap 6) — a pass there would not predict a packaged build.
 
 What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
-replaces only `navigator.mediaDevices.getDisplayMedia`, in the real capture page, and
-drives the shipped `MediaStreamTrackProcessor` → `VideoEncoder` → encoded-chunk IPC →
-`ProjectStore` → fragmented MP4 → finalize path end to end. Without `--synthetic` the
-script refuses to start when the grant is missing and names what to grant, rather than
-failing three layers down in `desktopCapturer` with "Failed to get sources".
+replaces only the _source acquisition_ — `getDisplayMedia` and `getUserMedia` — in the
+real capture page, and drives the shipped `MediaStreamTrackProcessor` →
+`VideoEncoder`/`AudioEncoder` → encoded-chunk IPC → `ProjectStore` → fragmented MP4 and
+M4A → finalize path end to end, on Chromium's real capture clocks. Without
+`--synthetic` the script refuses to start when the grant is missing and names what to
+grant, rather than failing three layers down in `desktopCapturer` with "Failed to get
+sources". Run it after any change to capture: it is the only thing that watches the
+two clocks, and it is what caught both of phase 3's real bugs.
 
 ## Maintaining this file
 

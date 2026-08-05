@@ -210,6 +210,13 @@ export async function generate4kPart(options: GenerateOptions = {}): Promise<Gen
   await encoder.flush();
   encoder.close();
   const encodeMs = performance.now() - startedAt;
+  // Hand the 4K canvas back *before* the caller creates the context it measures on.
+  // An accelerated 2D canvas this size holds ~30 MB of GPU memory per buffer, nothing
+  // reads it once the encode is done, and V8 sees a small JS object — so left alone it
+  // sits beside the run's own render target, screen texture and frame ring until a GC
+  // that has no reason to hurry. Resizing drops the backing store now instead.
+  canvas.width = 1;
+  canvas.height = 1;
   if (failure.error !== null) throw failure.error;
   if (decoderConfig === null) throw new Error('the encoder never emitted a decoder config');
   if (chunks.length === 0) throw new Error('the encoder produced no chunks');

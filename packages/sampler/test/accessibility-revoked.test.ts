@@ -152,8 +152,14 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
     // the user to restart the app for nothing.
     expect(capability.restartRequired).toBe(false);
 
+    // The ceiling is measured *across* this window rather than after it. Both figures
+    // are only comparable while they describe the same machine, and this one changes
+    // between two windows a second apart: the same control measured 25.4 Hz beside one
+    // run here and 80.7 Hz beside the next. See `rate-control.ts`.
+    const ceiling = measureCeiling(control, SAMPLE_HZ);
     await new Promise((fulfil) => setTimeout(fulfil, SAMPLE_WINDOW_MS));
     await sampler.stop();
+    const machineCeiling = await ceiling;
     await bundle.store.close(bundle.id);
 
     // ---- no silent zeros -----------------------------------------------------
@@ -184,7 +190,7 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
     const evidence = {
       what: 'position sampling',
       hz: deliveredHz(samples),
-      control: await measureCeiling(control, SAMPLE_HZ),
+      control: machineCeiling,
     };
     for (const shortfall of [
       expectSampleCount({
@@ -285,8 +291,14 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
     });
 
     const capability = await sampler.start();
+    // Started with the window, for the reason above. The ceiling's own window is fixed
+    // and longer than this one — a 300 ms reading of it is three coalescing groups wide
+    // — so it outlives the sampler's; overlapping it is still the closest the two
+    // measurements get to describing the same machine.
+    const ceiling = measureCeiling(control, SAMPLE_HZ);
     await new Promise((fulfil) => setTimeout(fulfil, SHORT_WINDOW_MS));
     await sampler.stop();
+    const machineCeiling = await ceiling;
     await bundle.store.close(bundle.id);
 
     // A user who declined Accessibility and a user macOS refused are different
@@ -304,7 +316,7 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
     const shortfall = expectSampleCount({
       what: 'position sampling with clicks declined',
       hz: deliveredHz(samples),
-      control: await measureCeiling(control, SAMPLE_HZ),
+      control: machineCeiling,
       count: sampler.health.samples,
       floor: 10,
       windowMs: SHORT_WINDOW_MS,

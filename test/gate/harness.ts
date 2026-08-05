@@ -73,11 +73,12 @@ function log(message: string): void {
  * A lost context is silent by design: every GL call becomes a no-op, `readPixels`
  * leaves the caller's buffer exactly as it was, and `getParameter` answers `null`.
  * On a shared paravirtual GPU that has happened here mid-run, and without this the
- * gate went on measuring: the readback scratch kept the last frame it had really
- * read, `compositor.readPixels`'s in-place flip turned every other reading upside
- * down, and what came out was a plausible-looking set of wrong frame numbers and a
- * control that could no longer see its own black. The instrument dying has to be
- * distinguishable from a result, so the run is abandoned the moment it is seen.
+ * gate went on measuring: every readback scratch kept the last pixels it had really
+ * read, the whole-frame reader of the day flipped them in place so every other
+ * reading came out upside down, and what emerged was a plausible-looking set of
+ * wrong frame numbers and a control that could no longer see its own black. The
+ * instrument dying has to be distinguishable from a result, so the run is abandoned
+ * the moment it is seen — which is why every reader below checks *before* it reads.
  */
 const lost: { where: string | null } = { where: null };
 
@@ -90,6 +91,7 @@ function checkContext(gl: WebGL2RenderingContext, where: string): void {
 function snapshot(metrics: {
   count: number;
   maxMs: number;
+  maxAt: number;
   meanMs: number;
   overBudget: number;
   percentileMs: (p: number) => number;
@@ -97,6 +99,7 @@ function snapshot(metrics: {
   return {
     count: metrics.count,
     maxMs: metrics.maxMs,
+    maxAt: metrics.maxAt,
     meanMs: metrics.meanMs,
     p50Ms: metrics.percentileMs(0.5),
     p99Ms: metrics.percentileMs(0.99),
@@ -180,20 +183,34 @@ function counting(inner: FrameScheduler): {
   };
 }
 
-/** Decode the frame number out of composited pixels. `-1` when the band is unreadable. */
-function readFrameCode(pixels: Uint8Array, viewport: [number, number]): number {
+/**
+ * The row of the composite the frame-code band lands on, counted from the top.
+ *
+ * `fixture.ts` paints every cell of the band across the top of the frame, so all
+ * twelve share one `v` and the whole code lives on a single row of the composited
+ * picture. `-1` when it does not land inside the viewport at all.
+ */
+function codeRow(viewport: [number, number]): number {
+  const content = contentRect(FIXTURE_SIZE, viewport);
+  if (content.width < 1 || content.height < 1) return -1;
+  const [, v] = codeCellCenter(0);
+  const y = Math.round(content.y + v * content.height);
+  return y < 0 || y >= viewport[1] ? -1 : y;
+}
+
+/** Decode the frame number out of that one row. `-1` when the band is unreadable. */
+function readFrameCode(row: Uint8Array, viewport: [number, number]): number {
   const content = contentRect(FIXTURE_SIZE, viewport);
   if (content.width < 1 || content.height < 1) return -1;
   let value = 0;
   for (let bit = 0; bit < CODE_BIT_COUNT; bit++) {
-    const [u, v] = codeCellCenter(bit);
+    const [u] = codeCellCenter(bit);
     const x = Math.round(content.x + u * content.width);
-    const y = Math.round(content.y + v * content.height);
-    if (x < 0 || y < 0 || x >= viewport[0] || y >= viewport[1]) return -1;
-    const offset = (y * viewport[0] + x) * 4;
-    const r = pixels[offset] ?? 0;
-    const g = pixels[offset + 1] ?? 0;
-    const b = pixels[offset + 2] ?? 0;
+    if (x < 0 || x >= viewport[0]) return -1;
+    const offset = x * 4;
+    const r = row[offset] ?? 0;
+    const g = row[offset + 1] ?? 0;
+    const b = row[offset + 2] ?? 0;
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     // Mid-grey is not a legitimate reading of a black-or-white cell; treat it as
     // unreadable rather than guessing, so a blurred or blank frame fails loudly.
@@ -276,13 +293,46 @@ async function run(): Promise<GateReport> {
     },
   });
 
-  const pixels = new Uint8Array(VIEWPORT[0] * VIEWPORT[1] * 4);
+  // ---- reading the composite back ----------------------------------------
+  // Both readers below read a *slice*, through `gl.readPixels` on the compositor's
+  // own target, rather than calling `Compositor.readPixels`.
+  //
+  // A whole-frame readback at 1440p is 14.7 MB out of the GPU synchronously plus an
+  // in-place flip of the same 14.7 MB, and the gate used to do exactly that eighteen
+  // times — twelve scrub targets and six playback samples — *inside* the very windows
+  // whose single worst frame it then judges against 16.7 ms with no allowance.
+  //
+  // Measured here, on an M5 Pro with hardware decode and everything else in this run
+  // costing 0.2–0.5 ms a frame: **20.8 ms, 29.6 ms and 97.8 ms** for the three whole
+  // frames, against **0.1–0.2 ms** for one row. One readback is one to six times the
+  // entire frame budget, and the frame after it has to push a CPU-backed 30 MB
+  // `texImage2D` through the transfer path it just drained — already ~5 ms of the
+  // budget on the paravirtual GPU CI runs on. So the instrument was the largest
+  // single cost in the window it was measuring, and it landed on a handful of frames
+  // rather than spreading: CI reported one play frame at 82 ms and one at 180 ms in
+  // runs whose own p99 was 2.2 ms and 6.6 ms, and 15.3 ms against a 16.7 ms bound in
+  // the run either side of them that passed.
+  //
+  // Neither reader needs a whole frame. The settle probe needs eight by eight pixels
+  // at the middle of the picture to tell a composite from the background; the frame
+  // code needs exactly one row, because `fixture.ts` puts every cell of the band on
+  // one. That is 82 KB across a run instead of 265 MB, and nothing the gate asserts
+  // is read from a pixel that is no longer fetched.
+  const bandRow = codeRow(VIEWPORT);
+  if (bandRow < 0) throw new Error('the frame-code band does not land inside the viewport');
+  const band = new Uint8Array(VIEWPORT[0] * 4);
+  const readCode = (where: string): number => {
+    // Before the read, for the same reason as the probe below: `readPixels` is a
+    // no-op on a lost context and `band` is reused, so a stale row would decode into
+    // a plausible frame number nothing ever composited.
+    checkContext(gl, where);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, compositor.framebuffer);
+    // `readPixels` is bottom-up; the band is `bandRow` rows down from the top.
+    gl.readPixels(0, VIEWPORT[1] - 1 - bandRow, VIEWPORT[0], 1, gl.RGBA, gl.UNSIGNED_BYTE, band);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return readFrameCode(band, VIEWPORT);
+  };
 
-  // A whole-frame readback is a synchronous GPU stall and cannot run on every tick
-  // of a settle window without becoming the thing that blows the budget it is
-  // watching. Eight by eight pixels at the middle of the picture is enough to tell
-  // a composite from the background, and reads the compositor's own target rather
-  // than the canvas, so it sees exactly what `render` left behind.
   const probe = new Uint8Array(PROBE_PX * PROBE_PX * 4);
   const content = contentRect(FIXTURE_SIZE, VIEWPORT);
   const centreLuma = (): number => {
@@ -350,23 +400,36 @@ async function run(): Promise<GateReport> {
     const settleMs = performance.now() - startedAt;
     // One more frame so the composite reflects the settled ring, then read back.
     await clock.after(2);
-    checkContext(gl, `the readback for scrub target ${String(i)}`);
-    compositor.readPixels(pixels);
     scrubChecks.push({
       targetSec,
       expectedFrame,
-      observedFrame: readFrameCode(pixels, VIEWPORT),
+      observedFrame: readCode(`the readback for scrub target ${String(i)}`),
       settleMs,
     });
   }
+
+  // Back to the start, and waited out like every other target above. This is the
+  // largest backward jump of the run — a full ring closed, the decoder reset, a
+  // fresh GOP fetched and decoded — and it is a *scrub*: measured here, in the
+  // window whose bound covers exactly that kind of frame, rather than billed to
+  // playback, which used to inherit it along with the misses it produces. Playback
+  // then starts from a settled playhead, which is what §8's "play" means.
+  const firstFrame = index.frameAtTime(0);
+  const firstMicros = firstFrame < 0 ? -1 : index.ptsMicros(firstFrame);
+  loop.seek(0);
+  const rewoundAt = performance.now();
+  while (performance.now() - rewoundAt < SETTLE_TIMEOUT_MS) {
+    const held = reader.ring.frameAtMicros(firstMicros);
+    if (held !== null && held.timestamp === firstMicros) break;
+    await clock.after(1);
+  }
+  await clock.after(2);
   const scrub = snapshot(loop.metrics);
   loop.metrics.reset();
 
   // ---- play --------------------------------------------------------------
   const hitsBefore = reader.stats.hits;
   const missesBefore = reader.stats.misses;
-  loop.seek(0);
-  await clock.after(2);
   loop.play();
   const playStartedAt = performance.now();
   const playSamples: PlaySample[] = [];
@@ -378,12 +441,10 @@ async function run(): Promise<GateReport> {
     // efficiently; the frame-number band can.
     if (loop.time >= nextSampleAtSec && playSamples.length < 6) {
       const atSec = loop.time;
-      checkContext(gl, `the readback at ${atSec.toFixed(2)}s of playback`);
-      compositor.readPixels(pixels);
       playSamples.push({
         atSec,
         expectedFrame: index.frameAtTime(atSec),
-        observedFrame: readFrameCode(pixels, VIEWPORT),
+        observedFrame: readCode(`the readback at ${atSec.toFixed(2)}s of playback`),
       });
       nextSampleAtSec = atSec + part.durationSec / 8;
     }
@@ -458,6 +519,7 @@ async function run(): Promise<GateReport> {
 const EMPTY_METRICS: PhaseMetrics = {
   count: 0,
   maxMs: 0,
+  maxAt: -1,
   meanMs: 0,
   p50Ms: 0,
   p99Ms: 0,

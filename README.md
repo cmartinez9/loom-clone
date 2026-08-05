@@ -5,23 +5,35 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 1 of 14: the capture spine**, plus the phase 5 cursor and click sampler and
-phase 6's decode path and WebGL2 compositor, built early and out of order because they
-are self-contained.
+**Phase 3 of 14: audio and the A/V sync machinery**, plus the phase 5 cursor and click
+sampler and phase 6's decode path and WebGL2 compositor, built early and out of order
+because they are self-contained.
 
-What runs today: the app launches, records the screen, and lists the recordings it
-finds under `~/Movies/Loom Clone` — revealing them in Finder or moving them to the
-Trash. Audio is phase 3, the webcam phase 4, and the editor phase 7; they are
-deliberately absent rather than stubbed.
+What runs today: the app launches, records the screen with the microphone and the
+system's own audio output alongside it, and lists the recordings it finds under
+`~/Movies/Loom Clone` — revealing them in Finder or moving them to the Trash. System
+audio needs no driver and no admin prompt, which is why the floor is macOS 14. The
+webcam is phase 4 and the editor phase 7; they are deliberately absent rather than
+stubbed.
 
-The property phase 1 exists to establish: **a recording survives the process being
-killed.** Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and
-are written by the main process as fragmented-MP4 fragments the instant they exist,
-so a `SIGKILL` costs at most the frame in flight. `npm test` proves it by killing a
-real recording mid-stream and measuring what comes back — the gate is 95%, measured
-at 96.4–99.4% across three kill points — and `npm run verify:mutation` proves the
-gate itself by breaking the writer five ways and requiring the test to fail each
-time.
+The property phase 1 established: **a recording survives the process being killed.**
+Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
+by the main process as fragmented-MP4 fragments the instant they exist, so a
+`SIGKILL` costs at most the frame in flight. `npm test` proves it by killing a real
+recording mid-stream and measuring what comes back — the gate is 95%, measured at
+96.4–99.4% across three kill points.
+
+The property phase 3 establishes: **the three tracks stay together.** They are
+captured separately, by three devices with three clocks, and nothing is trimmed to
+make them line up — each track records where it started, how fast its device really
+ran, and where it dropped out, and `recording.json` is what puts them back together.
+`npm test` proves it by recording a flash and a tone at the same instant and
+cross-correlating them at 1 minute **and at 20 minutes**, with a 20 ms budget. Twenty
+minutes is the point: a build that trusts a sound card's claim of "48 kHz" is 2.6 ms
+out at one minute and 59.6 ms out at twenty.
+
+`npm run verify:mutation` proves both gates by breaking the writers eight ways and
+requiring a test to fail each time.
 
 The native input sampler is complete alongside it, but nothing starts it yet, because
 the permission flow that turns it on is phase 2.
@@ -61,11 +73,14 @@ npm run build && node scripts/smoke-capture.mjs
 ```
 
 That needs Screen Recording granted to your terminal, and stops with instructions if
-it is missing. Adding `--synthetic` puts a canvas where the display source would be
-and runs everything below it for real, so it works without the grant — at the cost of
-covering neither `desktopCapturer`, nor the `getDisplayMedia` authorisation, nor
-`setContentProtection`. Those three remain unverified in a dev environment and are
-carried forward to phase 2's signed-bundle gate; `AGENTS.md` records them.
+it is missing. It prints what each audio device claimed, what it actually ran at, and
+where each track started relative to the first frame. Adding `--synthetic` puts a
+canvas and an oscillator where the real sources would be and runs everything below
+them for real, so it works without the grant — at the cost of covering neither
+`desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`,
+nor whether macOS honours the constraints on a real loopback track. Those remain
+unverified in a dev environment and are carried forward to phase 2's signed-bundle
+gate; `AGENTS.md` records them.
 
 ## How it is put together
 

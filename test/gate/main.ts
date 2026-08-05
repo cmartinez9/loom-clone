@@ -77,7 +77,7 @@ async function finish(report: GateReport, code: number): Promise<void> {
 
 /** A report for a failure that happened before the harness could produce one. */
 function failureReport(error: string): GateReport {
-  const empty = { count: 0, maxMs: 0, meanMs: 0, p50Ms: 0, p99Ms: 0, overBudget: 0 };
+  const empty = { count: 0, maxMs: 0, maxAt: -1, meanMs: 0, p50Ms: 0, p99Ms: 0, overBudget: 0 };
   return {
     ok: false,
     error,
@@ -140,6 +140,19 @@ registerLoomScheme();
 // The harness canvas is 2560x1440 and the window is small; without this the
 // drawing buffer would be clamped to the window on some configurations.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '2048');
+// The GPU watchdog kills the GPU process when a call has not come back inside its
+// timeout, and every context living in it goes too — silently, as a
+// `webglcontextlost` event with no reason attached. In a browser that is a tab
+// staying responsive. Here it is the instrument being taken away mid-run because
+// the host was *slow*, which is the one thing this gate exists to measure and fail
+// on: CI lost the context on both launches of one job on a runner where the same
+// commit passed in another, and the runner that did pass it was already reporting a
+// 24.5 ms warmup frame and a 4.1 ms composite against 4.7 ms and 1.9 ms on a quick
+// one. A frame that takes too long has to arrive as a number over budget, not as a
+// run that measured nothing — so the watchdog does not get to pre-empt the
+// measurement. Nothing about what is measured changes; a genuinely hung GPU still
+// fails, on the frame budget, with the frame named.
+app.commandLine.appendSwitch('disable-gpu-watchdog');
 
 void app.whenReady().then(async () => {
   protocol.handle(LOOM_SCHEME, async (request) => {
@@ -221,6 +234,19 @@ void app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   void finish(failureReport('the gate window closed before the harness reported'), 1);
+});
+
+/**
+ * A GPU process that dies takes every context in it with it, and the renderer cannot
+ * see why: `webglcontextlost` arrives with no reason attached. Noted rather than
+ * finished on — the harness's report is still what decides the run — so that a lost
+ * context names its mechanism in the log instead of leaving the next reader to guess.
+ */
+app.on('child-process-gone', (_event, details) => {
+  note(
+    `${details.type} process gone: ${details.reason} (exit ${String(details.exitCode)})` +
+      (details.name === undefined ? '' : ` [${details.name}]`),
+  );
 });
 
 process.on('uncaughtException', (error: Error) => {

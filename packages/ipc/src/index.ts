@@ -51,15 +51,27 @@
  */
 
 import type {
+  AudioCaptureSummary,
+  AudioTrackKey,
   EditDocument,
   EditOp,
+  PartEndReason,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
   TrackKey,
 } from '@loom/format';
 
-export type { EditDocument, EditOp, RecordingDoc, RecordingId, RecordingSummary, TrackKey };
+export type {
+  AudioCaptureSummary,
+  AudioTrackKey,
+  EditDocument,
+  EditOp,
+  RecordingDoc,
+  RecordingId,
+  RecordingSummary,
+  TrackKey,
+};
 
 /** Returned by every `on*` subscription; call it to stop listening. */
 export type Unsubscribe = () => void;
@@ -107,9 +119,9 @@ export interface ProjectApi {
 // ---------------------------------------------------------------- recorder
 
 /**
- * What to capture. Phase 1 is **screen video only**; microphone and system audio
- * (phase 3) and the webcam (phase 4) add fields here rather than a second options
- * type, because they are options on one capture, not three captures.
+ * What to capture: screen video, the microphone and the system's audio output. The
+ * webcam (phase 4) adds fields here rather than a second options type, because they
+ * are options on one capture, not three captures.
  */
 export interface CaptureOptions {
   /** Electron display id. `null` records the primary display. */
@@ -125,6 +137,37 @@ export interface CaptureOptions {
   maxDimension: number;
   /** Target video bitrate, bits per second. */
   bitrate: number;
+  /**
+   * Record what comes out of the speakers, via `audio: 'loopback'`.
+   *
+   * The captain asked for this explicitly, with a pre-recording toggle
+   * (`loom-clone-decisions.md`, "Additional requirement"). It needs no driver on
+   * macOS 14+ (research report §5.2), which is why the floor is 14.
+   */
+  systemAudio: boolean;
+  /**
+   * Microphone device id, `'default'` for the system default, or `null` for no
+   * microphone at all.
+   */
+  micDeviceId: string | null;
+  /** AAC bitrate per audio track, bits per second. */
+  audioBitrate: number;
+  /**
+   * Let macOS apply echo cancellation, noise suppression and gain control to the
+   * **microphone**. Off by default, and off is not a neutral choice:
+   *
+   * - it is the same processing research trap 3 is about, applied to the other
+   *   track, and it is irreversible — decision 5 deletes the sources after an
+   *   export, so a mangled mic recording is mangled for good;
+   * - this project's central rule is that nothing is baked in until export
+   *   (trap 10). Voice processing is baking in;
+   * - macOS's voice-processing IO unit reconfigures the whole audio session, and
+   *   the system-audio loopback we capture alongside it is part of that session.
+   *
+   * System audio ignores this: it is always captured clean (see
+   * {@link LOOPBACK_AUDIO_CONSTRAINTS}).
+   */
+  micVoiceProcessing: boolean;
 }
 
 export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
@@ -132,7 +175,102 @@ export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
   fps: 30,
   maxDimension: 3840,
   bitrate: 12_000_000,
+  systemAudio: true,
+  micDeviceId: 'default',
+  audioBitrate: 128_000,
+  micVoiceProcessing: false,
 };
+
+/**
+ * The constraints the system-audio track is captured with. **Research trap 3.**
+ *
+ * Left at their defaults, macOS hands back a *mono* loopback track with echo
+ * cancellation, noise suppression and automatic gain control switched on, and
+ * "every screen recording with music or a video in it will sound mangled". The
+ * scout verified that constraining them explicitly is honoured; Loom's own
+ * documentation admits the same trap in as many words ("system audio and noise
+ * filter can't be used simultaneously").
+ *
+ * This is a constant rather than an option because there is no case for the other
+ * value: a loopback capture has no echo to cancel, no noise to suppress and no
+ * level to ride. {@link violatedLoopbackConstraints} asserts the track we actually
+ * got matches.
+ */
+export const LOOPBACK_AUDIO_CONSTRAINTS = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  channelCount: 2,
+  sampleRate: 48000,
+} as const;
+
+/** What an audio track reported after its constraints were applied. */
+export interface AudioTrackSettings {
+  sampleRate: number;
+  channelCount: number;
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+}
+
+/**
+ * Which of trap 3's constraints the platform did not honour, named.
+ *
+ * Returning the list rather than throwing is deliberate: audio the user asked for
+ * is worth having even when it is processed, and `recording.json` records what was
+ * actually applied so a bad recording is diagnosable rather than mysterious. The
+ * capture page says so loudly; the format keeps the evidence.
+ */
+export function violatedLoopbackConstraints(settings: AudioTrackSettings): string[] {
+  const violations: string[] = [];
+  if (settings.echoCancellation) violations.push('echoCancellation');
+  if (settings.noiseSuppression) violations.push('noiseSuppression');
+  if (settings.autoGainControl) violations.push('autoGainControl');
+  if (settings.channelCount < LOOPBACK_AUDIO_CONSTRAINTS.channelCount) {
+    violations.push(`channelCount=${settings.channelCount}`);
+  }
+  return violations;
+}
+
+/** What only the live capture knows about an audio track, sent before its first frame. */
+export interface AudioTrackFacts {
+  deviceId: string | null;
+  deviceName: string | null;
+  /** `'getdisplaymedia-loopback'` for the system track (research report §5.2). */
+  source: string | null;
+  settings: AudioTrackSettings;
+  /** Empty unless the platform ignored a constraint. See trap 3, above. */
+  violations: string[];
+}
+
+/**
+ * One audio track's measurements, sent when capture ends.
+ *
+ * `summary` is what `AudioCaptureMeter` measured while the buffers were arriving —
+ * the *only* place `measuredSampleRate` and `gaps` can be read (§5.5). Main turns
+ * it into `recording.json` fields with `alignAudioPart`; it does not re-derive it,
+ * because the encoded stream no longer contains the evidence.
+ */
+export interface AudioTrackReport {
+  track: AudioTrackKey;
+  part: number;
+  facts: AudioTrackFacts;
+  summary: AudioCaptureSummary;
+  /**
+   * Microseconds to add to this track's timestamps to put them on the same clock
+   * as every other track's.
+   *
+   * Not a refinement — the thing that makes `startTimeSec` mean anything.
+   * Chromium timestamps a captured audio buffer against a different epoch than a
+   * captured video frame: measured on this machine, video from zero and audio
+   * from 2,678,930 s, which is the machine's uptime. Subtracting one from the
+   * other without this gives a microphone that started a month before the screen.
+   * `TrackEpochEstimator` explains how it is measured.
+   */
+  epochOffsetUs: number;
+  endedEarly: boolean;
+  endReason?: PartEndReason;
+}
 
 /**
  * Where a recording is in its life. A subset of `project.json`'s `state` (§2.2)
@@ -211,6 +349,17 @@ export interface CaptureEndReport {
    */
   framesDropped: number;
   message?: string;
+  /**
+   * One entry per audio track that produced anything. Absent when the capture
+   * recorded no audio, which is not the same as an entry with no samples in it.
+   */
+  audio?: AudioTrackReport[];
+  /**
+   * The video track's own epoch offset, in microseconds. See
+   * {@link AudioTrackReport.epochOffsetUs} — the recording clock's origin is the
+   * first screen frame *on the shared clock*, so it needs this one too.
+   */
+  epochOffsetUs?: number;
 }
 
 export interface CaptureApi {
@@ -360,13 +509,28 @@ export interface ChunkMsg {
 export interface MetaMsg {
   track: TrackKey;
   part: number;
-  /** `VideoDecoderConfig` from the WebCodecs encoder, structured-cloneable. */
+  /**
+   * The decoder configuration from the WebCodecs encoder, structured-cloneable.
+   *
+   * Video fills in `codedWidth`/`codedHeight` and carries an `avcC` record as
+   * `description`; audio fills in `sampleRate`/`numberOfChannels` and carries an
+   * AudioSpecificConfig. Both are the same field the encoder handed over, which is
+   * the point: main writes what the encoder said, never what the request asked for.
+   */
   decoderConfig: {
     codec: string;
     codedWidth?: number;
     codedHeight?: number;
+    sampleRate?: number;
+    numberOfChannels?: number;
     description?: Uint8Array;
   };
+  /**
+   * Audio tracks only: the device and constraint facts `recording.json` records
+   * **before the first frame**, because they are knowable only while the session
+   * is live and recovery cannot invent them (§2.3).
+   */
+  audio?: AudioTrackFacts;
 }
 
 // ---------------------------------------------------------------- loom://

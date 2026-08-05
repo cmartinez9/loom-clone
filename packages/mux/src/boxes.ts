@@ -64,6 +64,10 @@ export function u64(value: number): Uint8Array {
   return concat([u32(high), u32(low)]);
 }
 
+export function u24(value: number): Uint8Array {
+  return u8(value >>> 16, value >>> 8, value);
+}
+
 export function fourcc(type: string): Uint8Array {
   if (type.length !== 4) throw new RangeError(`box type must be four characters: ${type}`);
   return encoder.encode(type);
@@ -293,6 +297,286 @@ export function initSegment(spec: InitSegmentSpec): Uint8Array {
   );
 
   return concat([ftyp(), moov]);
+}
+
+// --------------------------------------------------------------------- audio
+
+/**
+ * The samples an AAC encoder puts in front of the stream before the first real
+ * one, and the single largest sync error available to this phase.
+ *
+ * AAC-LC is a lapped transform: the decoder needs a window of input before it can
+ * emit the first correct sample, so the encoder emits that window as *priming* and
+ * a decoder hands it back at the front of the stream. It is a fixed property of the
+ * encoder, and on this platform — macOS 14+, AudioToolbox, which is also what
+ * Chromium's `AudioEncoder` uses — it is 2112 samples, 44 ms at 48 kHz. Measured,
+ * not assumed: a 1 kHz burst at sample 24002 of a WAV comes back at sample 26114
+ * after `afconvert -f adts -d aac` and back, a difference of exactly 2112.
+ * `packages/mux/test/audio-part.test.ts` re-measures it against a file this writer
+ * produced, so a platform that changes it fails there rather than as mysterious
+ * lip-sync error in an export.
+ *
+ * 44 ms is more than twice this phase's whole 20 ms budget, so it has to be
+ * handled, and it has to be handled in a way every reader agrees on. Measured on
+ * this machine, against a file with no edit list:
+ *
+ * ```
+ * afconvert (AVFoundation)  burst at 24002, 96192 samples   priming trimmed
+ * ffmpeg    (libavformat)   burst at 26114, 98304 samples   priming delivered
+ * ```
+ *
+ * Two decoders, two answers, 44 ms apart — which is exactly the kind of ambiguity
+ * that becomes a bug three phases later, when the export path uses one of them and
+ * the gate uses the other. So {@link audioInitSegment} writes the `elst` edit list
+ * that says so explicitly, and both then agree on 24002. See {@link editList}.
+ */
+export const AAC_ENCODER_DELAY_SAMPLES = 2112;
+
+export interface AudioInitSegmentSpec {
+  /** Samples per second the device reported. Also the media timescale. */
+  sampleRate: number;
+  channels: number;
+  /**
+   * The AudioSpecificConfig, verbatim from `AudioDecoderConfig.description` — two
+   * bytes for AAC-LC. It goes in the `esds` DecoderSpecificInfo, which is the only
+   * place a decoder can find the real object type, rate and channel layout.
+   */
+  audioSpecificConfig: Uint8Array;
+  /** Target bitrate, for `esds`. Advisory; 0 is legal and means "unknown". */
+  bitrate?: number;
+  /**
+   * Priming samples to trim on playback, written as an edit list. Defaults to
+   * {@link AAC_ENCODER_DELAY_SAMPLES}; `0` writes no edit list at all, which is
+   * the shape a reader must not assume anything about.
+   */
+  encoderDelaySamples?: number;
+}
+
+/**
+ * `edts`/`elst` — "start this track `mediaTime` samples in".
+ *
+ * The standard gapless-playback mechanism, and the only one every demuxer honours.
+ * `segment_duration` is **0** because a fragmented file's movie duration is not
+ * known when its `moov` is written, and rewriting the `moov` at the end is exactly
+ * the layout that recovers zero frames from a crash (§12.2). Measured with both
+ * AVFoundation and libavformat: a zero-duration edit is honoured by both, and
+ * neither double-trims a decoder that already applies a default AAC delay.
+ */
+function editList(mediaTimeSamples: number): Uint8Array {
+  return box(
+    'edts',
+    fullBox(
+      'elst',
+      0,
+      0,
+      u32(1), // entry_count
+      u32(0), // segment_duration — unknown until the fragments stop arriving
+      i32(mediaTimeSamples), // media_time, in media timescale units
+      i16(1), // media_rate_integer
+      i16(0), // media_rate_fraction
+    ),
+  );
+}
+
+/**
+ * MPEG-4 descriptors, tag + length + payload.
+ *
+ * The length is written in the four-byte form (`0x80 0x80 0x80 n`) that ffmpeg's
+ * and Apple's muxers both emit. The one-byte form is equally legal and half the
+ * size; matching what every file on the user's disk already looks like is worth
+ * three bytes.
+ */
+function descriptor(tag: number, ...payload: readonly Uint8Array[]): Uint8Array {
+  const body = concat(payload);
+  if (body.byteLength > 0x0f_ff_ff_ff) throw new RangeError('descriptor payload is too large');
+  return concat([
+    u8(tag),
+    u8(0x80 | ((body.byteLength >>> 21) & 0x7f)),
+    u8(0x80 | ((body.byteLength >>> 14) & 0x7f)),
+    u8(0x80 | ((body.byteLength >>> 7) & 0x7f)),
+    u8(body.byteLength & 0x7f),
+    body,
+  ]);
+}
+
+/** `esds` — ISO/IEC 14496-1 §7.2.6.5, as an MP4 sample-entry extension. */
+function esds(spec: AudioInitSegmentSpec): Uint8Array {
+  const bitrate = Math.max(0, Math.round(spec.bitrate ?? 0));
+  return fullBox(
+    'esds',
+    0,
+    0,
+    descriptor(
+      0x03, // ES_Descriptor
+      u16(1), // ES_ID, matching track_ID
+      u8(0), // streamPriority, no URL, no OCR, no dependency
+      descriptor(
+        0x04, // DecoderConfigDescriptor
+        u8(0x40), // objectTypeIndication: MPEG-4 Audio
+        u8((0x05 << 2) | 0x01), // streamType: audio, upStream 0, reserved 1
+        u24(0), // bufferSizeDB — unknown while fragments are still arriving
+        u32(bitrate), // maxBitrate
+        u32(bitrate), // avgBitrate
+        descriptor(0x05, spec.audioSpecificConfig), // DecoderSpecificInfo
+      ),
+      descriptor(0x06, u8(0x02)), // SLConfigDescriptor: predefined = MP4
+    ),
+  );
+}
+
+function audioSampleEntry(spec: AudioInitSegmentSpec): Uint8Array {
+  return box(
+    'mp4a',
+    ZERO(6), // reserved
+    u16(1), // data_reference_index
+    ZERO(8), // reserved: version, revision, vendor
+    u16(spec.channels),
+    u16(16), // samplesize
+    u16(0), // pre_defined
+    u16(0), // reserved
+    // 16.16 fixed point. Every rate we can capture is far below the 65535 Hz at
+    // which this field would overflow; AAC's real rate is in the `esds` anyway.
+    u32(Math.min(0xffff, Math.round(spec.sampleRate)) * 0x1_0000),
+    esds(spec),
+  );
+}
+
+/**
+ * `ftyp` for an audio-only part.
+ *
+ * Same fragmented-MP4 brands as {@link ftyp}, minus `avc1` and plus `M4A `: a file
+ * that claims a video brand it does not contain is a file some players decline to
+ * open, and `.m4a` is the extension §2.1 gives these.
+ */
+export function audioFtyp(): Uint8Array {
+  return box(
+    'ftyp',
+    fourcc('iso5'),
+    u32(512),
+    fourcc('isom'),
+    fourcc('iso2'),
+    fourcc('iso5'),
+    fourcc('iso6'),
+    fourcc('mp41'),
+    fourcc('M4A '),
+  );
+}
+
+/**
+ * `ftyp` + `moov` for an audio part — the same empty-`moov`-plus-`mvex` shape the
+ * video initialisation segment uses, and for the same crash reason: the file is a
+ * readable MP4 from the instant it exists rather than only once a `moov` is
+ * written at the end (§12.2).
+ */
+export function audioInitSegment(spec: AudioInitSegmentSpec): Uint8Array {
+  if (spec.audioSpecificConfig.byteLength === 0) {
+    throw new RangeError('an audio part needs an AudioSpecificConfig to describe its samples');
+  }
+  const timescale = Math.round(spec.sampleRate);
+  if (!Number.isInteger(timescale) || timescale <= 0) {
+    throw new RangeError(`audio sample rate out of range: ${String(spec.sampleRate)}`);
+  }
+
+  const delaySamples = Math.max(
+    0,
+    Math.round(spec.encoderDelaySamples ?? AAC_ENCODER_DELAY_SAMPLES),
+  );
+  const trak = box(
+    'trak',
+    fullBox(
+      'tkhd',
+      0,
+      0x0000_07, // enabled | in movie | in preview
+      u32(0), // creation_time
+      u32(0), // modification_time
+      u32(1), // track_ID
+      u32(0), // reserved
+      u32(0), // duration — unknown while fragments are still arriving
+      ZERO(8), // reserved
+      u16(0), // layer
+      u16(0), // alternate_group
+      u16(0x0100), // volume 1.0 — this is a sound track
+      u16(0), // reserved
+      UNITY_MATRIX,
+      u32(0), // width
+      u32(0), // height
+    ),
+    ...(delaySamples > 0 ? [editList(delaySamples)] : []),
+    box(
+      'mdia',
+      fullBox(
+        'mdhd',
+        0,
+        0,
+        u32(0), // creation_time
+        u32(0), // modification_time
+        // The media timescale **is** the sample rate, so every duration in this
+        // file is an exact sample count and no rounding enters the timeline.
+        u32(timescale),
+        u32(0), // duration
+        u16(0x55c4), // language: 'und'
+        u16(0), // pre_defined
+      ),
+      fullBox(
+        'hdlr',
+        0,
+        0,
+        u32(0), // pre_defined
+        fourcc('soun'),
+        ZERO(12), // reserved
+        encoder.encode('SoundHandler\0'),
+      ),
+      box(
+        'minf',
+        fullBox('smhd', 0, 0, i16(0), u16(0)),
+        box('dinf', fullBox('dref', 0, 0, u32(1), fullBox('url ', 0, 1))),
+        box(
+          'stbl',
+          fullBox('stsd', 0, 0, u32(1), audioSampleEntry(spec)),
+          fullBox('stts', 0, 0, u32(0)),
+          fullBox('stsc', 0, 0, u32(0)),
+          fullBox('stsz', 0, 0, u32(0), u32(0)),
+          fullBox('stco', 0, 0, u32(0)),
+        ),
+      ),
+    ),
+  );
+
+  const moov = box(
+    'moov',
+    fullBox(
+      'mvhd',
+      0,
+      0,
+      u32(0), // creation_time
+      u32(0), // modification_time
+      u32(MOVIE_TIMESCALE),
+      u32(0), // duration
+      u32(0x0001_0000), // rate 1.0
+      u16(0x0100), // volume 1.0
+      u16(0), // reserved
+      ZERO(8), // reserved
+      UNITY_MATRIX,
+      ZERO(24), // pre_defined
+      u32(2), // next_track_ID
+    ),
+    trak,
+    box(
+      'mvex',
+      fullBox(
+        'trex',
+        0,
+        0,
+        u32(1), // track_ID
+        u32(1), // default_sample_description_index
+        u32(0), // default_sample_duration
+        u32(0), // default_sample_size
+        u32(0), // default_sample_flags
+      ),
+    ),
+  );
+
+  return concat([audioFtyp(), moov]);
 }
 
 /**
