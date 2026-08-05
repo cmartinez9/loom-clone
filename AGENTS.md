@@ -31,7 +31,7 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break the capture writers eight ways; each must fail a gate
+npm run verify:mutation   # break the capture path one way at a time; each must fail a gate
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -217,10 +217,11 @@ opening one lights the hardware indicator and that should follow from a user ask
   late. `videoTrack()` in `session.ts` is the get-or-create that closes it, and
   `held-frames-dropped-while-a-part-opens` in `npm run verify:mutation` keeps it
   closed.
-- **Every track announcement is a read-modify-write of one `recording.json`.** Three
-  encoders announce themselves within milliseconds of each other, so `RecorderSession`
-  serializes them on `metaChain`; without it the second write drops the first track,
-  which is exactly what happened and what the smoke script caught.
+- **Every track announcement is a read-modify-write of one `recording.json`.** Every
+  encoder — three, or four with a camera — announces itself within milliseconds of the
+  others, so `RecorderSession` serializes them on `metaChain`; without it the second
+  write drops the first track, which is exactly what happened and what the smoke
+  script caught.
 - **An audio failure never fails a recording.** §7.3: a microphone that is refused,
   vanishes or cannot be encoded costs its own track and nothing else. The screen is
   what the user pressed record for.

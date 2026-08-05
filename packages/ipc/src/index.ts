@@ -321,8 +321,8 @@ export interface VideoTrackFacts {
  * Every part of a video track needs its own `startTimeSec` (§2.3), and the numbers
  * that produce it — the first frame, the last one, when capture actually stopped,
  * and the track's epoch offset — are only ever in the renderer. Main places them on
- * the recording clock with `alignVideoPart`; like the audio measurements, it cannot
- * recompute them, because the encoded stream no longer carries the evidence.
+ * the recording clock with `videoPartStartSec`; like the audio measurements, it
+ * cannot recompute them, because the encoded stream no longer carries the evidence.
  */
 export interface VideoPartReport {
   track: VideoTrackKey;

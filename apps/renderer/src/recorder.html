@@ -3,8 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <!--
-      Same strict CSP as the library. No `media-src`: the HUD shows a timer and a
-      button. The live camera preview arrives with phase 4 and will need one.
+      Same strict CSP as the library. No `media-src`: the HUD shows a timer, a
+      button and a line of text. Phase 4's camera is a track, not a preview; the
+      live camera preview is later surface work and will need one.
     -->
     <meta
       http-equiv="Content-Security-Policy"

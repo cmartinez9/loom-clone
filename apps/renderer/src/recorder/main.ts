@@ -1,11 +1,13 @@
 /**
  * The recorder HUD. Architecture report §1.2.
  *
- * The HUD is deliberately small: start, stop, a timer and an honest count. It starts
- * a recording on `DEFAULT_CAPTURE_OPTIONS`, so phase 3's microphone and system audio
- * are captured without this window asking for a device or showing a level. Source
- * and device pickers, audio meters and the live camera preview are surface work for
- * the phase that builds them; the camera itself is phase 4.
+ * The HUD is deliberately small: start, stop, a timer, an honest count and §7.4's
+ * camera notice. It starts a recording on `DEFAULT_CAPTURE_OPTIONS`, so phase 3's
+ * microphone and system audio are captured without this window asking for a device
+ * or showing a level — and no camera is opened, because `webcamDeviceId` defaults to
+ * `null` and nothing here overrides it. Source and device pickers, a camera toggle,
+ * audio meters and the live camera preview are surface work for the phase that
+ * builds them; phase 4 built the camera *track*, not the control that turns it on.
  *
  * **This is the window `setContentProtection(true)` exists for.** It sets
  * `NSWindowSharingNone`, which is how our own UI stays out of the recording. The

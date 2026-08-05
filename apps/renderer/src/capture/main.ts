@@ -6,7 +6,9 @@
  * ```
  *
  * The audio half of this same page — the microphone and the system loopback — is
- * `./audio.ts`, which carries the two rules that belong only to audio.
+ * `./audio.ts`, which carries the two rules that belong only to audio. The camera is
+ * `./webcam.ts`, which carries the ones that belong only to a device that can be
+ * unplugged and plugged back in (§7.4).
  *
  * No UI, no framework, no DOM output. It exists because Electron already reaches
  * ScreenCaptureKit through `getDisplayMedia`, so a native helper would buy only
@@ -94,8 +96,8 @@ interface Session {
    * The first frame's timestamp, which is the recording clock's origin.
    *
    * Main learns it from the first chunk it is handed, so this is not the only
-   * record of it — but the screen's part is described the same way every other
-   * video part is (`alignVideoPart`), and that function takes a first and a last.
+   * record of it — but the screen's part is reported the same way every other video
+   * part is (`VideoPartReport`), and that report carries a first and a last.
    */
   firstFrameUs: number | null;
   /**

@@ -16,7 +16,7 @@
  * removed — and it must measure zero visible pixels of banner.
  */
 
-import { app, BrowserWindow } from 'electron';
+import { app, type BrowserWindow } from 'electron';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
