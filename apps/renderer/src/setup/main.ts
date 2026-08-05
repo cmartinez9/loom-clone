@@ -11,9 +11,9 @@
  *
  * 1. **It will not show a tick it has not earned.** Accessibility renders as
  *    *granted but unverified* when macOS trusts the app and nothing has proven a
- *    click actually arrives. That is the state this build is genuinely in until
- *    phase 5's sampler is wired up, and pretending otherwise is the exact failure the
- *    captain's decision was written to prevent.
+ *    click actually arrives. The tick is spent only on `concludeAccessibility`'s
+ *    `live` — phase 5's sampler having watched a real tap deliver — because TCC's
+ *    word alone is the exact failure the captain's decision was written to prevent.
  * 2. **It will not present an untrustworthy answer as an answer.** A dev binary
  *    inherits its terminal's grants and reports `granted` for permissions it does not
  *    have (research report §7, trap 6). When the report says so, this window says so.

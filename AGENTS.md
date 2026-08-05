@@ -76,11 +76,11 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
-                   loom:// protocol, IPC.
-apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture page
-                   (screen in `capture/main.ts`, camera in `capture/webcam.ts`, the
-                   two audio tracks in `capture/audio.ts`) and the preview loop
-                   today; overlay and editor later.
+                   PermissionManager, loom:// protocol, IPC.
+apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
+                   capture page (screen in `capture/main.ts`, camera in
+                   `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`)
+                   and the preview loop today; overlay and editor later.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -443,7 +443,8 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   trap 6). The one way to shed that inheritance in a test is
   `loom-input-sampler spawn-disclaimed`, which makes the child answer for its own code
   identity — that is how the phase-5 gate exercises "Accessibility revoked" on a
-  machine whose terminal is trusted. See also the carried-forward obligations below.
+  machine whose terminal is trusted. For the app itself that is
+  `npm run verify:permissions`; § Phase 2 gate status below is its standing record.
 - **A permission that fails silently must be reported, never inferred.** Clicks need
   Accessibility, and without it `CGEventTapCreate` has been seen both to return NULL
   and to return a port that reports success and never fires — so the sampler gates on

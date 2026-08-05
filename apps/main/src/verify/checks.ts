@@ -43,9 +43,9 @@ export interface CheckResult {
   id: string;
   title: string;
   /**
-   * The carried-forward obligation this closes, quoted from the phase 1 handover in
-   * `AGENTS.md` / architecture report §11. Present only on the checks that exist to
-   * close one.
+   * The carried-forward obligation this closes, in phase 1's own words (architecture
+   * report §11; `AGENTS.md` § Phase 2 gate status is where their state is kept).
+   * Present only on the checks that exist to close one.
    */
   obligation?: string;
   status: CheckStatus;
