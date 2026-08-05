@@ -48,6 +48,10 @@ const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
 const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
 const EDL_HISTORY = 'packages/edl/test/history.test.ts';
 const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
+/** Phase 11's gate: the golden-frame test, extended to annotations. */
+const PHASE11 = 'test/phase11-golden.test.ts';
+const EDL_ANNOTATIONS = 'packages/edl/test/annotations.test.ts';
+const COMPOSITOR_GEOMETRY = 'packages/compositor/test/annotation-geometry.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -310,6 +314,87 @@ const MUTATIONS = [
     find: '      removeTrackKeys(fields, remove, op);',
     replace: '      removeTrackKeys(fields, undefined, op);',
     mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
+  },
+  // ---- phase 11: annotations, and the golden-frame gate over them -----------
+  //
+  // The acceptance criterion is *"ship a control proving the extension would catch a
+  // divergence — perturb an annotation's rendering and show the test goes red"*.
+  // These are that control, at the same discipline as every mutation above: the
+  // production source on disk is broken and `test/phase11-golden.test.ts` has to
+  // notice. Two of the five are privacy defects, which is why they are here and not
+  // only in a unit test — the failure they model publishes something.
+  {
+    name: 'annotations-ignore-the-zoom-they-are-anchored-in',
+    breaks:
+      'a source-anchored annotation lands on the pixels the screen pass drew that ' +
+      'part of the source onto. Dropping the pan term leaves the redaction where it ' +
+      'was before the zoom while the content slides out from under it — the blur is ' +
+      'still visibly present, a few centimetres from the thing it was hiding.',
+    file: 'packages/compositor/src/geometry.ts',
+    find: '    originX: content.x - source.x * scaleX,',
+    replace: '    originX: content.x,',
+    mustFail: [PHASE11, COMPOSITOR_GEOMETRY],
+  },
+  {
+    name: 'the-blur-pass-is-a-single-tap',
+    breaks:
+      'the blur is a real Gaussian. A single centre tap is the identity, so the ' +
+      'region composites back exactly what was under it: a redaction that renders as ' +
+      'nothing, on a frame that looks finished.',
+    file: 'packages/compositor/src/annotation-shaders.ts',
+    find: '    if (i > u_taps) break;',
+    replace: '    if (i > 0) break;',
+    mustFail: [PHASE11],
+  },
+  {
+    name: 'an-annotation-track-ignores-its-own-window',
+    breaks:
+      "§3.5's window reaching the annotation it gates. This is the mute-span bug one " +
+      'target along: a parked track — enabled, with an empty or elapsed `activeRanges` ' +
+      '— goes on drawing over every frame at full strength, and the crossfade at a ' +
+      'range edge becomes a cut. The `continue` above it is a second, redundant guard, ' +
+      'so breaking that instead changes no pixel and would be an equivalent mutant.',
+    file: 'packages/edl/src/resolve.ts',
+    find: '      span.resolved.weight = w;',
+    replace: '      span.resolved.weight = 1;',
+    mustFail: [PHASE11, EDL_ANNOTATIONS],
+  },
+  {
+    name: 'the-window-crossfade-never-reaches-the-annotation',
+    breaks:
+      "the other end of §3.5's window: the track's weight is what carries `blendMs` " +
+      'into an annotation, and without the multiplication a crossfade at a range edge ' +
+      'becomes a cut. Invisible to a check that only asks whether an annotation drew, ' +
+      'which is why the gate reads the weight back out of an opaque white span.',
+    file: 'packages/edl/src/annotations.ts',
+    find: '  out.opacity = Math.max(0, Math.min(1, opacity)) * annotation.weight;',
+    replace: '  out.opacity = Math.max(0, Math.min(1, opacity));',
+    mustFail: [PHASE11, EDL_ANNOTATIONS],
+  },
+  {
+    name: 'annotation-colour-is-linearised-on-one-side',
+    breaks:
+      "annotation colour being read in the target's own encoding. The whole pipeline " +
+      'is display-encoded — the screen pass uploads with no colour conversion into a ' +
+      'non-sRGB RGBA8 target — so linearising here puts every annotation a gamma curve ' +
+      'away from the picture it sits on, and puts a mask a gamma curve away from the ' +
+      'colour the document asked for.',
+    file: 'packages/edl/src/annotations.ts',
+    find: '    return value / 255;',
+    replace: '    return (value / 255) ** 2.2;',
+    mustFail: [PHASE11, EDL_ANNOTATIONS],
+  },
+  {
+    name: 'a-blur-with-an-unknown-region-draws-nothing',
+    breaks:
+      'failing closed. With the check gone, a blur whose `center` channel is missing ' +
+      'takes the default region instead of refusing the frame — so the compositor ' +
+      'redacts the middle of the picture, leaves the thing the user hid in plain ' +
+      'sight, and reports success.',
+    file: 'packages/edl/src/annotations.ts',
+    find: '    if (!Number.isFinite(cx) || !Number.isFinite(cy)) {',
+    replace: '    if (false) {',
+    mustFail: [PHASE11, EDL_ANNOTATIONS],
   },
 ];
 

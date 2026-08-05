@@ -11,7 +11,43 @@
 
 export { Compositor, type CompositorFrames, type CompositorOptions } from './compositor.ts';
 
-export { contentRect, MIN_ZOOM, rectToNdc, sourceSampleRect, type Rect } from './geometry.ts';
+export { AnnotationPass, type AnnotationContext } from './annotations.ts';
+
+export {
+  BLUR_FRAGMENT_SHADER,
+  FULL_QUAD_VERTEX_SHADER,
+  KIND_ARROW,
+  KIND_ELLIPSE,
+  KIND_RECT,
+  MAX_BLUR_PASSES,
+  MAX_BLUR_TAPS,
+  MAX_PASS_SIGMA_PX,
+  REGION_FRAGMENT_SHADER,
+  SHAPE_FRAGMENT_SHADER,
+  SHAPE_VERTEX_SHADER,
+  TEXT_FRAGMENT_SHADER,
+  TEXT_VERTEX_SHADER,
+} from './annotation-shaders.ts';
+
+export {
+  FLOATS_PER_GLYPH,
+  layoutText,
+  MAX_TEXT_GLYPHS,
+  type GlyphMetric,
+  type TextAtlas,
+  type TextBox,
+  type TextLayoutResult,
+} from './text-atlas.ts';
+
+export {
+  contentRect,
+  MIN_ZOOM,
+  rectToNdc,
+  sourceSampleRect,
+  sourceToOutput,
+  type Rect,
+  type SourceToOutput,
+} from './geometry.ts';
 
 export {
   createRenderTarget,

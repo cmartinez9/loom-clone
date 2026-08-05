@@ -1,5 +1,5 @@
 /**
- * Track factories for the two targets phase 7 ships: manual zoom and the bubble.
+ * Track factories: manual zoom and the bubble (phase 7), annotations (phase 11).
  *
  * Decision 3 (`data/loom-clone-decisions.md`): *"**Manual keyframed zoom first**,
  * then automatic cursor-follow and auto-zoom-on-click layered onto the same
@@ -13,7 +13,8 @@
  * reachable from a headless test.
  */
 
-import type { Keyframe, SpringParams, Track, Vec2 } from '@loom/format';
+import type { Keyframe, Span, SpringParams, Track, Vec2 } from '@loom/format';
+import type { AnnotationKind } from './annotations.ts';
 
 /** §6.3's defaults — Cap's `ScreenMovementSpring`, and the numbers §12.5 measured. */
 export const DEFAULT_SPRING: SpringParams = { tension: 200, mass: 2.25, friction: 40 };
@@ -120,5 +121,74 @@ export function bubbleTrack(input: BubbleInput): Track {
       mirror: hold(input.mirror === true ? 1 : 0),
     },
     ...(input.shapePreset === undefined ? {} : { shapePreset: input.shapePreset }),
+  };
+}
+
+// ---- annotations (phase 11) --------------------------------------------------
+
+export interface AnnotationSpanInput {
+  id: string;
+  kind: AnnotationKind;
+  start: number;
+  end: number;
+  style?: Record<string, unknown>;
+  /** `center`/`size` for a box, `from`/`to` for an arrow, `opacity` for either. */
+  channels?: Record<string, { keys: Keyframe[]; spring?: SpringParams }>;
+}
+
+/**
+ * One annotation span.
+ *
+ * A thin constructor on purpose: the span *is* §3.3's `Span`, and the only thing
+ * this adds is that `type` comes from {@link AnnotationKind} rather than from a
+ * free string, so a typo is a compile error instead of a span the compositor
+ * silently ignores.
+ */
+export function annotationSpan(input: AnnotationSpanInput): Span {
+  return {
+    id: input.id,
+    start: input.start,
+    end: input.end,
+    type: input.kind,
+    ...(input.style === undefined ? {} : { style: input.style }),
+    ...(input.channels === undefined ? {} : { channels: input.channels }),
+  };
+}
+
+export interface AnnotationTrackInput {
+  id: string;
+  spans: Span[];
+  /** Defaults to {@link ALWAYS}. An **empty** array parks the track (§3.5). */
+  activeRanges?: [number, number][];
+  blendMs?: number;
+  enabled?: boolean;
+}
+
+/**
+ * An annotation track: `kind: 'object'`, `target: 'annotation'`, `domain: 'source'`.
+ *
+ * `domain` is written out rather than defaulted for the reason §3.2 gives — *"the
+ * field is per-track and explicit; there is no inference"* — and `source` is the
+ * meaning of an annotation for the same reason it is the meaning of a zoom: it is
+ * placed on the *content*, so a trim must carry it, not slide it.
+ *
+ * `activeRanges` is the track's window and it gates the spans inside it (§3.5). A
+ * span outside the window has no opinion, exactly as a mute span has none — the
+ * fix that restored that for audio is the same rule, and `resolve` has always
+ * applied it here.
+ */
+export function annotationTrack(input: AnnotationTrackInput): Track {
+  return {
+    id: input.id,
+    kind: 'object',
+    target: 'annotation',
+    domain: 'source',
+    origin: 'manual',
+    blend: 'replace',
+    blendMs: input.blendMs ?? 0,
+    activeRanges: input.activeRanges ?? ALWAYS,
+    enabled: input.enabled ?? true,
+    channels: {},
+    spans: input.spans,
   };
 }

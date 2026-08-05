@@ -267,6 +267,58 @@ describe('PreviewLoop', () => {
     expect((handed as unknown as CompositorFrames).screen).toBeNull();
   });
 
+  it('hands the compositor the text atlas it was constructed with, every frame', () => {
+    // The atlas is an object identity, not a value: `@loom/compositor/raster` is
+    // explicit that preview and export must share *one* raster, and the loop's job
+    // is to pass along whatever it was given rather than to fetch one of its own.
+    const atlas = { capHeight: 0.7 } as unknown as NonNullable<CompositorFrames['textAtlas']>;
+    const scheduler = new ManualScheduler();
+    const seen: unknown[] = [];
+    const loop = new PreviewLoop({
+      compositor: {
+        render: (frames) => {
+          seen.push(frames.textAtlas);
+        },
+        present: () => undefined,
+      },
+      screen: stubSource(),
+      durationSec: 10,
+      textAtlas: atlas,
+      scheduler,
+      now: () => scheduler.nowMs,
+    });
+
+    loop.start();
+    scheduler.tick();
+    scheduler.tick();
+    loop.stop();
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(atlas);
+    expect(seen[1]).toBe(atlas);
+  });
+
+  it('defaults the atlas to null rather than leaving it undefined', () => {
+    const scheduler = new ManualScheduler();
+    let handed: CompositorFrames | null = null;
+    const loop = new PreviewLoop({
+      compositor: {
+        render: (frames) => {
+          handed = frames;
+        },
+        present: () => undefined,
+      },
+      screen: stubSource(),
+      durationSec: 10,
+      scheduler,
+      now: () => scheduler.nowMs,
+    });
+    loop.start();
+    scheduler.tick();
+    loop.stop();
+    expect((handed as unknown as CompositorFrames).textAtlas).toBeNull();
+  });
+
   it('reuses one frames object and one state object across frames — §4.3', () => {
     const source = stubSource({ frameAt: () => fakeVideoFrame(0) });
     const scheduler = new ManualScheduler();

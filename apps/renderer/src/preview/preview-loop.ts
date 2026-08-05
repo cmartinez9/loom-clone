@@ -45,7 +45,7 @@
  *    *scheduling* difference and never a *state* difference.
  */
 
-import type { CompositorFrames } from '@loom/compositor';
+import type { CompositorFrames, TextAtlas } from '@loom/compositor';
 import { identityTimeline, resolve, type CompiledTimeline, type ResolvedState } from '@loom/edl';
 import type { Seconds } from '@loom/format';
 import { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
@@ -109,6 +109,15 @@ export interface PreviewLoopOptions {
   lookaheadSec?: number;
   /** How far behind the playhead frames are kept before being closed. */
   retainBehindSec?: number;
+  /**
+   * The glyph atlas `text` annotations are drawn from (phase 11).
+   *
+   * Held on the frames object rather than fetched per frame, and it must be the
+   * **same object** the exporter is given: `@loom/compositor/raster` explains why
+   * one raster shared between the two paths is what makes glyphs a §4.5
+   * non-difference rather than two canvases that probably agree.
+   */
+  textAtlas?: TextAtlas | null;
   scheduler?: FrameScheduler;
   now?: () => number;
   /** Reported when priming fails for a real reason (not a supersession). */
@@ -136,7 +145,7 @@ export class PreviewLoop {
   readonly #onError: (error: Error) => void;
   readonly #onStall: (info: { atSec: Seconds; forMs: number }) => void;
 
-  readonly #frames: CompositorFrames = { screen: null };
+  readonly #frames: CompositorFrames = { screen: null, textAtlas: null };
 
   /**
    * Owned by the `CompiledTimeline`, not by the loop: `resolve` returns the same
@@ -167,6 +176,7 @@ export class PreviewLoop {
     this.#retainBehindSec = options.retainBehindSec ?? 0.1;
     this.#ownsTimeline = options.timeline === undefined;
     this.#timeline = options.timeline ?? identityTimeline(Math.max(0, options.durationSec));
+    this.#frames.textAtlas = options.textAtlas ?? null;
     this.#onError = options.onError ?? (() => undefined);
     this.#onStall = options.onStall ?? (() => undefined);
     this.metrics = new FrameMetrics(4096, FRAME_BUDGET_MS);
