@@ -131,11 +131,14 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
   #nextFrame = 0;
   /** Outputs older than this are the tail of a seek and get closed on arrival. */
   #acceptFromMicros = Number.NEGATIVE_INFINITY;
+  /**
+   * PTS of the newest chunk submitted since the decoder was last reset, or
+   * `-Infinity` when nothing has been. An output past it cannot be one of ours.
+   */
+  #acceptThroughMicros = Number.NEGATIVE_INFINITY;
 
   /** Bumped by every `prime` and every `close`; stale work checks it and stops. */
   #generation = 0;
-  /** Bumped whenever the decoder is reset, so its in-flight outputs are closed. */
-  #outputGeneration = 0;
   #abort: AbortController | null = null;
   #inflight: Promise<void> | null = null;
 
@@ -210,7 +213,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
    * `misses` counter is for.
    */
   frameAt(t: Seconds): T | null {
-    const frame = this.#ring.frameAt(t);
+    const frame = this.#ring.frameAtMicros(this.#selectionMicros(t));
     if (frame === null) this.#stats.misses += 1;
     else this.#stats.hits += 1;
     return frame;
@@ -218,7 +221,21 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
 
   /** Close every frame the ring holds strictly before the one covering `beforeT`. */
   release(beforeT: Seconds): void {
-    this.#ring.releaseBefore(beforeT);
+    this.#ring.releaseBeforeMicros(this.#selectionMicros(beforeT));
+  }
+
+  /**
+   * The timestamp, in microseconds, of the frame the **index** puts on screen at
+   * `t` — `-Infinity` when `t` precedes the first frame.
+   *
+   * Every time-to-frame question this class asks goes through here, because §4.5
+   * puts frame selection on the list preview and export may never disagree about
+   * and `DemuxIndex.frameAtTime` is its one implementation. The ring is then asked
+   * for a frame by timestamp rather than being handed a time to search for itself.
+   */
+  #selectionMicros(t: Seconds): number {
+    const frame = this.index.frameAtTime(t);
+    return frame === NO_FRAME ? Number.NEGATIVE_INFINITY : this.index.ptsMicros(frame);
   }
 
   /**
@@ -283,7 +300,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
     if (this.#closed) return;
     this.#closed = true;
     this.#generation += 1;
-    this.#outputGeneration += 1;
+    this.#acceptThroughMicros = Number.NEGATIVE_INFINITY;
     this.#abort?.abort(new SupersededError());
     this.#abort = null;
     const decoder = this.#decoder;
@@ -345,9 +362,12 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
 
       for (let i = from; i <= to; i++) {
         const range = index.byteRange(i);
+        const micros = index.ptsMicros(i);
+        // Raised *before* the submit, because a decoder may answer synchronously.
+        if (micros > this.#acceptThroughMicros) this.#acceptThroughMicros = micros;
         decoder.decode({
           type: index.isKeyframe(i) ? 'key' : 'delta',
-          timestamp: index.ptsMicros(i),
+          timestamp: micros,
           duration: null,
           data: bytes.subarray(range.start - span.start, range.end - span.start),
         });
@@ -452,7 +472,9 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
     if (this.#decoder?.state !== 'configured') return true;
     if (first < this.#submittedFrom) return true;
     if (index.keyframeAtOrBefore(first) > this.#nextFrame) return true;
-    if (first >= this.#nextFrame || this.#ring.frameAt(t) !== null) return false;
+    if (first >= this.#nextFrame || this.#ring.frameAtMicros(this.#selectionMicros(t)) !== null) {
+      return false;
+    }
 
     // Submitted past `t` and the ring does not hold it. Two very different reasons,
     // and treating them alike is expensive in both directions: re-seeking while the
@@ -493,7 +515,9 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
   }
 
   #seekTo(keyframe: number): void {
-    this.#outputGeneration += 1;
+    // Nothing submitted to the old decoder is wanted any more; until the new run
+    // submits its first chunk, every arriving output belongs to the abandoned seek.
+    this.#acceptThroughMicros = Number.NEGATIVE_INFINITY;
     const existing = this.#decoder;
     if (existing !== null) {
       try {
@@ -535,7 +559,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
   #createDecoder(): VideoDecoderLike {
     return this.#decoderFactory({
       output: (frame: T) => {
-        this.#onFrame(frame, this.#outputGeneration);
+        this.#onFrame(frame);
       },
       error: (error: Error) => {
         this.#onDecoderError(error);
@@ -546,23 +570,31 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
   /**
    * The only place a decoded frame is ever held.
    *
-   * Three exits, all of which either transfer ownership to the ring or close the
-   * frame here. `outputGeneration` is captured when the decoder is built and
-   * compared when the frame arrives: an output that raced a `reset()` belongs to an
-   * abandoned seek and is closed rather than pushed.
+   * Four exits, all of which either transfer ownership to the ring or close the
+   * frame here.
    */
-  #onFrame(frame: T, outputGeneration: number): void {
+  #onFrame(frame: T): void {
     this.#outputs += 1;
     try {
-      this.#place(frame, outputGeneration);
+      this.#place(frame);
     } finally {
       // Whatever happened to the frame, something may be waiting to hear about it.
       this.#wake();
     }
   }
 
-  #place(frame: T, outputGeneration: number): void {
-    if (this.#closed || outputGeneration !== this.#outputGeneration) {
+  /**
+   * A decoder can only emit a frame it was given, so
+   * `[#acceptFromMicros, #acceptThroughMicros]` — the seek target, and the newest
+   * chunk submitted since the last reset — is exactly the set of timestamps that
+   * can legitimately arrive. Anything outside it survived the `reset()` that
+   * abandoned it, and pushing one of those would be worse than a leak: the ring
+   * takes it as its newest frame and then rejects every correct, older frame
+   * decoded behind it, so the preview holds the wrong picture with nothing to say
+   * about it (§10.2).
+   */
+  #place(frame: T): void {
+    if (this.#closed) {
       closeQuietly(frame);
       this.#stats.discarded += 1;
       return;
@@ -570,6 +602,11 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
     if (frame.timestamp + 0.5 < this.#acceptFromMicros) {
       // Decoding from a keyframe necessarily produces frames before the seek target
       // (§4.2: "discard outputs with pts < t - epsilon").
+      closeQuietly(frame);
+      this.#stats.discarded += 1;
+      return;
+    }
+    if (frame.timestamp - 0.5 > this.#acceptThroughMicros) {
       closeQuietly(frame);
       this.#stats.discarded += 1;
       return;
@@ -592,7 +629,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
     // is what stops that from becoming an infinite retry.
     const decoder = this.#decoder;
     this.#decoder = null;
-    this.#outputGeneration += 1;
+    this.#acceptThroughMicros = Number.NEGATIVE_INFINITY;
     if (decoder !== null) {
       try {
         decoder.close();

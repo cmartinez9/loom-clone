@@ -23,6 +23,9 @@
  *  - every scrub target composited the **frame the index says belongs there**, read
  *    back out of the framebuffer and decoded from the fixture's frame-number band;
  *  - playback found a decoded frame for the overwhelming majority of its frames;
+ *  - the composite never fell back to the background *while* a scrub was settling,
+ *    which is the window made entirely of misses — with a control proving the check
+ *    can see a background composite when there is one;
  *  - the fixture really is variable-frame-rate, with holds of half a second;
  *  - the run measured a meaningful number of frames rather than two.
  */
@@ -160,6 +163,8 @@ function describeRun(report: GateReport): string {
     `frames       peak-live=${String(report.peakLiveFrames)}/${String(report.ringCapacity)} ` +
       `at-end=${String(report.liveFramesAtEnd)} decoded=${String(report.decodedFrames)} seeks=${String(report.seeks)}`,
     `playback     hits=${String(report.playHits)} misses=${String(report.playMisses)}`,
+    `settle       samples=${String(report.settleSamples)} black=${String(report.settleBlackFrames)} ` +
+      `control-sees-black=${String(report.controlDetectsBlack)}`,
     `gpu          ${report.gpuCompositeMs === null ? 'no timer query' : `${report.gpuCompositeMs.toFixed(3)}ms`}`,
     `play samples ${report.playSamples
       .map((s) => `${s.atSec.toFixed(2)}s→${String(s.expectedFrame)}/${String(s.observedFrame)}`)
@@ -221,6 +226,16 @@ describe('phase 6 gate: 4K scrub and play', () => {
       }
       expect(report.decodedFrames, detail).toBeGreaterThan(50);
       expect(report.seeks, detail).toBeGreaterThan(1);
+
+      // ---- and a miss holds the previous picture rather than flashing black ----
+      // §4.3. A backward scrub clears the ring, so every frame composited until the
+      // new decode lands is a miss; checking only the settled frame would have let a
+      // preview that went black between every scrub target through unremarked.
+      expect(report.settleSamples, detail).toBeGreaterThanOrEqual(6);
+      expect(report.settleBlackFrames, detail).toBe(0);
+      // CONTROL: the same detector, shown the behaviour the hold replaced. Without
+      // this, a detector that could not see black would report zero just as happily.
+      expect(report.controlDetectsBlack, detail).toBe(true);
       // Playback advanced through the fixture rather than holding one frame: the
       // picture on screen matched the index, sample after sample, and moved forward.
       expect(report.playSamples.length, detail).toBeGreaterThanOrEqual(4);

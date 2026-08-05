@@ -97,6 +97,8 @@ export class Compositor {
   /** Preallocated uniform payloads — §4.3: nothing allocates in the loop. */
   readonly #contentScratch = new Float32Array(4);
   readonly #sourceScratch = new Float32Array(4);
+  /** One row, for the readback flip. Sized on first use and reused after that. */
+  #rowScratch = new Uint8Array(0);
   #frames = 0;
   #disposed = false;
 
@@ -153,6 +155,8 @@ export class Compositor {
     gl.useProgram(this.#program);
     gl.uniform1i(requireUniform(gl, this.#program, 'u_screen'), 0);
     gl.useProgram(null);
+
+    this.clearToBackground();
   }
 
   get outputSize(): readonly [number, number] {
@@ -186,14 +190,39 @@ export class Compositor {
     deleteRenderTarget(this.gl, this.#target);
     this.#target = next;
     this.#outputSize = [width, height];
+    this.clearToBackground();
+  }
+
+  /**
+   * Fill the render target with the letterbox background.
+   *
+   * Called once at construction and after every {@link resize}, because a `render`
+   * with no frame leaves the target alone and the first composite of all has no
+   * previous composite to leave.
+   */
+  clearToBackground(): void {
+    this.#assertLive();
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#target.framebuffer);
+    gl.viewport(0, 0, this.#outputSize[0], this.#outputSize[1]);
+    gl.clearColor(this.#background[0], this.#background[1], this.#background[2], 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
   /**
    * Composite one frame into the render target.
    *
-   * A `null` screen frame clears to the background and returns — §4.3: *"If
-   * `frameAt` misses, hold the previous frame and count it — do not block."* The
-   * previous frame is the loop's business; this class simply draws what it is given.
+   * A `null` screen frame **holds**: the target is left exactly as it was and
+   * nothing is drawn — §4.3: *"If `frameAt` misses, hold the previous frame and
+   * count it — do not block."* Holding belongs here rather than in the loop because
+   * what is held is pixels in the target, not a `VideoFrame` the loop could keep a
+   * reference to: the ring closes those on the next seek, and uploading a closed
+   * frame throws. Counting the miss is still the loop's business.
+   *
+   * Export never passes `null` — it composites the frame the index selects at each
+   * fixed timestamp — so this is a §4.5 *scheduling* difference and never a pixel
+   * one.
    */
   render(frames: CompositorFrames, state: ResolvedState): void {
     this.#assertLive();
@@ -203,6 +232,9 @@ export class Compositor {
     if (frames.cursor != null) {
       throw new GlError('cursor compositing lands in phase 5 (architecture report §8)');
     }
+
+    const screen = frames.screen;
+    if (screen === null) return;
 
     const gl = this.gl;
     const [width, height] = this.#outputSize;
@@ -215,43 +247,40 @@ export class Compositor {
     gl.clearColor(this.#background[0], this.#background[1], this.#background[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    const screen = frames.screen;
-    if (screen !== null) {
-      // A `VideoFrame`'s intrinsic size as an image source is its *display* size:
-      // crop and rotation are already applied. Sampling against coded size would
-      // shift the picture by the codec's padding on any source whose height is not
-      // a multiple of 16 — 2234 is not.
-      const sourceWidth = screen.displayWidth;
-      const sourceHeight = screen.displayHeight;
+    // A `VideoFrame`'s intrinsic size as an image source is its *display* size:
+    // crop and rotation are already applied. Sampling against coded size would
+    // shift the picture by the codec's padding on any source whose height is not
+    // a multiple of 16 — 2234 is not.
+    const sourceWidth = screen.displayWidth;
+    const sourceHeight = screen.displayHeight;
 
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.#screenTexture);
-      // The canonical zero-copy path on macOS: §12.4 measured VideoFrame → texture
-      // at 0.000 ms because ANGLE binds the frame's IOSurface rather than copying.
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, screen);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.#screenTexture);
+    // The canonical zero-copy path on macOS: §12.4 measured VideoFrame → texture
+    // at 0.000 ms because ANGLE binds the frame's IOSurface rather than copying.
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, screen);
 
-      const source = sourceSampleRect(state.zoom);
-      const content = rectToNdc(
-        contentRect([sourceWidth, sourceHeight], this.#outputSize),
-        this.#outputSize,
-      );
+    const source = sourceSampleRect(state.zoom);
+    const content = rectToNdc(
+      contentRect([sourceWidth, sourceHeight], this.#outputSize),
+      this.#outputSize,
+    );
 
-      this.#contentScratch[0] = content.x;
-      this.#contentScratch[1] = content.y;
-      this.#contentScratch[2] = content.width;
-      this.#contentScratch[3] = content.height;
-      this.#sourceScratch[0] = source.x;
-      this.#sourceScratch[1] = source.y;
-      this.#sourceScratch[2] = source.width;
-      this.#sourceScratch[3] = source.height;
+    this.#contentScratch[0] = content.x;
+    this.#contentScratch[1] = content.y;
+    this.#contentScratch[2] = content.width;
+    this.#contentScratch[3] = content.height;
+    this.#sourceScratch[0] = source.x;
+    this.#sourceScratch[1] = source.y;
+    this.#sourceScratch[2] = source.width;
+    this.#sourceScratch[3] = source.height;
 
-      gl.useProgram(this.#program);
-      gl.uniform4fv(this.#uContent, this.#contentScratch);
-      gl.uniform4fv(this.#uSource, this.#sourceScratch);
-      gl.bindVertexArray(this.#vao);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      gl.bindVertexArray(null);
-    }
+    gl.useProgram(this.#program);
+    gl.uniform4fv(this.#uContent, this.#contentScratch);
+    gl.uniform4fv(this.#uSource, this.#sourceScratch);
+    gl.bindVertexArray(this.#vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
 
     this.gpuTimer.end();
     this.#frames += 1;
@@ -306,16 +335,22 @@ export class Compositor {
     const [width, height] = this.#outputSize;
     const bytes = width * height * 4;
     const buffer = out !== undefined && out.byteLength >= bytes ? out : new Uint8Array(bytes);
-    const scratch = new Uint8Array(bytes);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.#target.framebuffer);
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, scratch);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, buffer);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    // The flip is in place, through one retained row, so that `out` actually saves
+    // an allocation: an export loop reads back every frame, and a full-frame scratch
+    // would be ~30 MB of churn per frame at 4K.
     const stride = width * 4;
-    for (let row = 0; row < height; row++) {
-      buffer.set(
-        scratch.subarray((height - 1 - row) * stride, (height - row) * stride),
-        row * stride,
-      );
+    if (this.#rowScratch.length !== stride) this.#rowScratch = new Uint8Array(stride);
+    const row = this.#rowScratch;
+    for (let top = 0, bottom = height - 1; top < bottom; top++, bottom--) {
+      const topAt = top * stride;
+      const bottomAt = bottom * stride;
+      row.set(buffer.subarray(topAt, topAt + stride));
+      buffer.copyWithin(topAt, bottomAt, bottomAt + stride);
+      buffer.set(row, bottomAt);
     }
     return buffer;
   }

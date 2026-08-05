@@ -64,18 +64,18 @@ describe('FrameRing capacity', () => {
   });
 });
 
-describe('FrameRing.frameAt', () => {
+describe('FrameRing.frameAtMicros', () => {
   it('is hold-last-frame, borrowed not owned', () => {
     const { ring: r, census } = ring(8);
     for (const [i, micros] of [0, 100_000, 133_000, 633_000].entries()) {
       r.push(census.make(micros, i));
     }
-    expect(r.frameAt(0)?.payload).toBe(0);
-    expect(r.frameAt(0.099)?.payload).toBe(0);
-    expect(r.frameAt(0.1)?.payload).toBe(1);
-    expect(r.frameAt(0.4)?.payload).toBe(2);
-    expect(r.frameAt(0.633)?.payload).toBe(3);
-    expect(r.frameAt(99)?.payload).toBe(3);
+    expect(r.frameAtMicros(0)?.payload).toBe(0);
+    expect(r.frameAtMicros(99_000)?.payload).toBe(0);
+    expect(r.frameAtMicros(100_000)?.payload).toBe(1);
+    expect(r.frameAtMicros(400_000)?.payload).toBe(2);
+    expect(r.frameAtMicros(633_000)?.payload).toBe(3);
+    expect(r.frameAtMicros(99_000_000)?.payload).toBe(3);
     // Borrowed: reading never closes.
     expect(census.closedCount).toBe(0);
   });
@@ -83,29 +83,40 @@ describe('FrameRing.frameAt', () => {
   it('returns null before the oldest frame it holds', () => {
     const { ring: r, census } = ring(4);
     r.push(census.make(5_000_000, 0));
-    expect(r.frameAt(4.999)).toBeNull();
-    expect(r.frameAt(5)).not.toBeNull();
+    expect(r.frameAtMicros(4_999_000)).toBeNull();
+    expect(r.frameAtMicros(5_000_000)).not.toBeNull();
+  });
+
+  it('is exact in microseconds, so it cannot disagree with the index that fed it', () => {
+    // The index resolves `t` to a frame and hands the ring that frame's own
+    // timestamp; anything looser here would be a second frame-selection rule,
+    // agreeing with `DemuxIndex.frameAtTime` only at one timescale (§4.5).
+    const { ring: r, census } = ring(4);
+    r.push(census.make(1_000_000, 0));
+    r.push(census.make(1_000_011, 1));
+    expect(r.frameAtMicros(1_000_010)?.payload).toBe(0);
+    expect(r.frameAtMicros(1_000_011)?.payload).toBe(1);
   });
 });
 
-describe('FrameRing.releaseBefore', () => {
+describe('FrameRing.releaseBeforeMicros', () => {
   it('keeps the frame covering t and closes everything older', () => {
     const { ring: r, census } = ring(8);
     for (let i = 0; i < 6; i++) r.push(census.make(i * 100_000, i));
 
-    expect(r.releaseBefore(0.25)).toBe(2);
+    expect(r.releaseBeforeMicros(200_000)).toBe(2);
     expect(r.size).toBe(4);
-    // Frame 2 covers t = 0.25 and survives; 0 and 1 are gone.
-    expect(r.frameAt(0.25)?.payload).toBe(2);
+    // Frame 2 is the one on screen at 0.2 s and survives; 0 and 1 are gone.
+    expect(r.frameAtMicros(200_000)?.payload).toBe(2);
     expect(census.open.map((f) => f.payload)).toEqual([2, 3, 4, 5]);
   });
 
   it('never empties the ring, so hold-last-frame survives a release past the end', () => {
     const { ring: r, census } = ring(8);
     for (let i = 0; i < 4; i++) r.push(census.make(i * 100_000, i));
-    r.releaseBefore(1000);
+    r.releaseBeforeMicros(1_000_000_000);
     expect(r.size).toBe(1);
-    expect(r.frameAt(1000)?.payload).toBe(3);
+    expect(r.frameAtMicros(1_000_000_000)?.payload).toBe(3);
   });
 });
 

@@ -29,6 +29,9 @@ export class GpuTimer {
   readonly #gl: WebGL2RenderingContext;
   readonly #ext: TimerExtension | null;
   #query: WebGLQuery | null = null;
+  /** A `beginQuery` is open and its `endQuery` is still owed. */
+  #open = false;
+  /** A query has been ended and its result not yet collected. */
   #inFlight = false;
   #lastMs: number | null = null;
   #disjointDrops = 0;
@@ -50,6 +53,7 @@ export class GpuTimer {
     return this.#disjointDrops;
   }
 
+  /** Open a query, unless the previous one is still waiting for its result. */
   begin(): void {
     const ext = this.#ext;
     if (ext === null || this.#inFlight) return;
@@ -58,12 +62,22 @@ export class GpuTimer {
     const query = this.#query;
     if (query === null) return;
     gl.beginQuery(ext.TIME_ELAPSED_EXT, query);
+    this.#open = true;
     this.#inFlight = true;
   }
 
+  /**
+   * Close the query {@link begin} opened, and nothing otherwise.
+   *
+   * The pairing is with `beginQuery`, not with the measurement: a result takes a
+   * frame or two to arrive, so most frames skip `begin` and must skip `end` too.
+   * `endQuery` with no query bound to the target is an `INVALID_OPERATION` — once
+   * per frame, forever, on the ordinary path.
+   */
   end(): void {
     const ext = this.#ext;
-    if (ext === null || !this.#inFlight) return;
+    if (ext === null || !this.#open) return;
+    this.#open = false;
     this.#gl.endQuery(ext.TIME_ELAPSED_EXT);
   }
 
@@ -90,6 +104,11 @@ export class GpuTimer {
   }
 
   dispose(): void {
+    const ext = this.#ext;
+    if (this.#open && ext !== null) {
+      this.#open = false;
+      this.#gl.endQuery(ext.TIME_ELAPSED_EXT);
+    }
     if (this.#query !== null) {
       this.#gl.deleteQuery(this.#query);
       this.#query = null;

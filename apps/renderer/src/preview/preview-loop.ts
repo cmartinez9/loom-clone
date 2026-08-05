@@ -29,7 +29,10 @@
  *  - **Nothing allocates in the loop.** The state object, the frames object and the
  *    metrics buffer are built once in the constructor and mutated in place.
  *  - **Decode runs ahead, never inline.** `prime` is fire-and-forget with a `catch`;
- *    the loop never awaits it. A miss holds the previous frame and is counted.
+ *    the loop never awaits it. A miss is counted here and *held* by the compositor,
+ *    which leaves the previous composite in the render target. The loop cannot do
+ *    the holding itself: the frame it would keep is the ring's, and the next seek
+ *    closes it.
  *  - **`prime()` is cancelable.** Scrubbing just calls `seek`, which primes at the
  *    new time; `SourceReader` aborts the old read and abandons the old seek.
  *  - **Expensive optional passes are skipped while scrubbing.** There are none yet

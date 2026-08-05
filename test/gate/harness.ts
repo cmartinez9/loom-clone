@@ -24,6 +24,12 @@
  *  3. **Warmup is measured and reported separately**, rather than being quietly
  *     excluded. Shader link and the first 4K texture upload are one-time costs; the
  *     numbers are in the report either way.
+ *  4. **The composite is sampled all the way through each scrub's settle window**,
+ *     not only once it has settled. That window is composited entirely out of
+ *     `frameAt` misses, so it is where §4.3's "a miss holds the previous frame"
+ *     either happens or does not — and a run that flashed the background through
+ *     every backward scrub would otherwise pass 1, 2 and 3 unchanged. The detector
+ *     has a control of its own at the end of the run.
  */
 
 import { Compositor, contentRect, describeRenderer } from '@loom/compositor';
@@ -44,6 +50,16 @@ const MEDIA_PATH = 'media/screen.000.h264';
 const WARMUP_FRAMES = 12;
 const SCRUB_TARGETS = 12;
 const SETTLE_TIMEOUT_MS = 4000;
+/** Side of the block sampled to tell a picture from the letterbox background. */
+const PROBE_PX = 8;
+/**
+ * Mean luma at or below this is the background, not a picture.
+ *
+ * The fixture paints every frame at 42% lightness under at most a 22% black
+ * overlay, so the darkest legitimate composite reads about 57; the background is
+ * exactly 0. The threshold sits far from both.
+ */
+const BLACK_LUMA = 8;
 
 const logs: string[] = [];
 function log(message: string): void {
@@ -233,6 +249,30 @@ async function run(): Promise<GateReport> {
 
   const pixels = new Uint8Array(VIEWPORT[0] * VIEWPORT[1] * 4);
 
+  // A whole-frame readback is a synchronous GPU stall and cannot run on every tick
+  // of a settle window without becoming the thing that blows the budget it is
+  // watching. Eight by eight pixels at the middle of the picture is enough to tell
+  // a composite from the background, and reads the compositor's own target rather
+  // than the canvas, so it sees exactly what `render` left behind.
+  const probe = new Uint8Array(PROBE_PX * PROBE_PX * 4);
+  const content = contentRect(FIXTURE_SIZE, VIEWPORT);
+  const centreLuma = (): number => {
+    const x = Math.round(content.x + content.width / 2 - PROBE_PX / 2);
+    // `readPixels` is bottom-up; the centre of the picture is the centre either way.
+    const y = Math.round(VIEWPORT[1] - content.y - content.height / 2 - PROBE_PX / 2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, compositor.framebuffer);
+    gl.readPixels(x, y, PROBE_PX, PROBE_PX, gl.RGBA, gl.UNSIGNED_BYTE, probe);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let total = 0;
+    for (let i = 0; i < probe.length; i += 4) {
+      const r = probe[i] ?? 0;
+      const g = probe[i + 1] ?? 0;
+      const b = probe[i + 2] ?? 0;
+      total += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+    return total / (PROBE_PX * PROBE_PX);
+  };
+
   // ---- warmup: shader link is done, but the first 4K upload and the first decode
   // are one-time costs and belong in the report rather than in the budget.
   loop.seek(0);
@@ -241,8 +281,17 @@ async function run(): Promise<GateReport> {
   const warmup = snapshot(loop.metrics);
   loop.metrics.reset();
 
+  // "The picture went black" only means something once there is a picture.
+  const litAt = performance.now();
+  while (centreLuma() <= BLACK_LUMA && performance.now() - litAt < SETTLE_TIMEOUT_MS) {
+    await clock.after(1);
+  }
+  log(`first picture composited after ${(performance.now() - litAt).toFixed(0)} ms of warmup`);
+
   // ---- scrub -------------------------------------------------------------
   const scrubChecks: ScrubCheck[] = [];
+  let settleSamples = 0;
+  let settleBlackFrames = 0;
   for (let i = 0; i < SCRUB_TARGETS; i++) {
     // Deliberately not monotonic: forward jumps, backward jumps and a re-visit,
     // which is what a hand on a scrubber produces and what makes the reader seek.
@@ -256,9 +305,14 @@ async function run(): Promise<GateReport> {
     // Poll the ring rather than `frameAt`, so waiting does not pollute the hit and
     // miss counters the report uses to prove the preview was not blank.
     while (performance.now() - startedAt < SETTLE_TIMEOUT_MS) {
-      const held = reader.ring.frameAt(targetSec);
+      const held = reader.ring.frameAtMicros(expectedMicros);
       if (held !== null && held.timestamp === expectedMicros) break;
       await clock.after(1);
+      // Every frame of the window a seek leaves the ring empty, not just the one at
+      // the end of it: §4.3 says a miss holds the previous picture, and the whole
+      // point of the settle window is that it is composited entirely out of misses.
+      settleSamples += 1;
+      if (centreLuma() <= BLACK_LUMA) settleBlackFrames += 1;
     }
     const settleMs = performance.now() - startedAt;
     // One more frame so the composite reflects the settled ring, then read back.
@@ -302,6 +356,18 @@ async function run(): Promise<GateReport> {
   const play = snapshot(loop.metrics);
   loop.stop();
 
+  // ---- the control for the count above -----------------------------------
+  // Phase 6's first cut cleared the render target before it discovered it had no
+  // frame to draw, so every miss presented the background and a backward scrub
+  // flashed black. Reproduce exactly that sequence — clear, present — and require
+  // the detector to see it. Run last, and with the loop stopped, so the black it
+  // deliberately leaves behind cannot be mistaken for a hold by anything after it.
+  const litLuma = centreLuma();
+  compositor.clearToBackground();
+  compositor.present();
+  const controlDetectsBlack = litLuma > BLACK_LUMA && centreLuma() <= BLACK_LUMA;
+  log(`control: lit ${litLuma.toFixed(1)} then cleared, detected=${String(controlDetectsBlack)}`);
+
   const stats = reader.stats;
   const peakLiveFrames = Math.max(loop.peakLiveFrames, stats.peakLive);
   reader.close();
@@ -339,6 +405,9 @@ async function run(): Promise<GateReport> {
     scrub,
     play,
     scrubChecks,
+    settleSamples,
+    settleBlackFrames,
+    controlDetectsBlack,
     playSamples,
     playHits: stats.hits - hitsBefore,
     playMisses: stats.misses - missesBefore,
@@ -395,6 +464,9 @@ run().then(
       scrub: EMPTY_METRICS,
       play: EMPTY_METRICS,
       scrubChecks: [],
+      settleSamples: 0,
+      settleBlackFrames: 0,
+      controlDetectsBlack: false,
       playSamples: [],
       playHits: 0,
       playMisses: 0,

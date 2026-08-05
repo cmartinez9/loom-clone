@@ -79,6 +79,20 @@ export interface GateReport {
   scrub: PhaseMetrics;
   play: PhaseMetrics;
   scrubChecks: ScrubCheck[];
+  /**
+   * Composites sampled *while* each scrub was settling, not once it had settled.
+   * That window is where §4.3's "a miss holds the previous frame" is decided.
+   */
+  settleSamples: number;
+  /** Of those, composites that came back as bare background. Must be zero. */
+  settleBlackFrames: number;
+  /**
+   * CONTROL. The behaviour the hold replaced — clearing the target before
+   * discovering there was no frame to draw — reproduced and seen by the same
+   * detector. Without it, "zero black frames" and "the detector is blind" read
+   * identically.
+   */
+  controlDetectsBlack: boolean;
   /** Frames read back mid-playback, proving the picture advances rather than holds. */
   playSamples: PlaySample[];
   /** `frameAt` hits and misses during playback; a black preview would be all misses. */

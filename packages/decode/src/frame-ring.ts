@@ -15,11 +15,19 @@
  *    one, so the ledger never records capacity + 1 even transiently — which is what
  *    makes the gate's assertion an equality-grade statement and not an
  *    approximation.
- *  - **`frameAt` lends.** The returned frame belongs to the ring and is valid until
- *    the next `releaseBefore`, `clear` or `close`. The preview loop renders from it
- *    inside the same turn; nothing stores it.
+ *  - **`frameAtMicros` lends.** The returned frame belongs to the ring and is valid
+ *    until the next `releaseBeforeMicros`, `clear` or `close`. The preview loop
+ *    renders from it inside the same turn; nothing stores it.
  *  - **Every exit path closes.** Eviction, release, clear, close and the
  *    stale-push rejection all go through {@link FrameRing.#discard}.
+ *
+ * The ring is keyed in **microseconds**, never in seconds, and that is not a unit
+ * preference. *Which* frame is on screen at a time `t` is on §4.5's "preview and
+ * export must not differ" list, so it has exactly one implementation —
+ * `DemuxIndex.frameAtTime`, which compares in the index's own timescale.
+ * `SourceReader` resolves `t` there and asks the ring for that frame's timestamp;
+ * a ring that took seconds would be a second implementation of the same rule,
+ * agreeing with the first only while the timescale happened to be microseconds.
  *
  * Pushes must be in ascending timestamp order, which is what `VideoDecoder` emits.
  * A frame that is not newer than the newest held frame is a stale output from a
@@ -37,7 +45,7 @@ export interface FrameRingStats {
   evicted: number;
   /** Frames dropped because they were not newer than the newest held frame. */
   rejected: number;
-  /** Frames closed by `releaseBefore`. */
+  /** Frames closed by `releaseBeforeMicros`. */
   released: number;
 }
 
@@ -122,15 +130,22 @@ export class FrameRing<T extends ClosableFrame = VideoFrame> {
   }
 
   /**
-   * The frame on screen at `tSec`: the newest held frame whose timestamp ≤ `t`.
+   * The frame to draw for the one the index selected: the newest held frame whose
+   * timestamp is at or before `micros`.
+   *
+   * `micros` is a *frame's* presentation timestamp, resolved by
+   * `DemuxIndex.frameAtTime` — not an arbitrary playhead time. The comparison is
+   * therefore exact: both sides are the same integer microsecond stamp the chunk
+   * carried, and hold-last-frame has already been decided by the index. A ring that
+   * has not caught up yet returns the newest frame it does hold, which is the
+   * previous picture and is what the loop draws until decode lands.
    *
    * **Borrowed, not owned — do not close it** (§4.2). `null` means the ring holds
-   * nothing at or before `t`, which the preview loop treats as "hold the previous
+   * nothing at or before it, which the preview loop treats as "hold the previous
    * frame and count it" rather than as an error (§4.3).
    */
-  frameAt(tSec: number): T | null {
+  frameAtMicros(micros: number): T | null {
     if (this.#size === 0) return null;
-    const micros = tSec * 1_000_000 + 0.5;
     if (this.#peek(0).timestamp > micros) return null;
     let low = 0;
     let high = this.#size - 1;
@@ -142,22 +157,21 @@ export class FrameRing<T extends ClosableFrame = VideoFrame> {
     return this.#peek(low);
   }
 
-  /** True when {@link frameAt} would return a frame. */
-  covers(tSec: number): boolean {
-    return this.frameAt(tSec) !== null;
+  /** True when {@link frameAtMicros} would return a frame. */
+  coversMicros(micros: number): boolean {
+    return this.frameAtMicros(micros) !== null;
   }
 
   /**
-   * Close every frame strictly older than the one that covers `tSec`.
+   * Close every frame strictly older than the one at `micros`.
    *
-   * The frame covering `t` survives, because hold-last-frame means it is still the
+   * The frame at `micros` survives, because hold-last-frame means it is still the
    * right thing to draw until the next one arrives. Returns how many were closed.
    */
-  releaseBefore(tSec: number): number {
-    const micros = tSec * 1_000_000 + 0.5;
+  releaseBeforeMicros(micros: number): number {
     let closed = 0;
-    // Keep the last frame at or before `t`: stop as soon as the *second* frame is
-    // newer than `t`, because then the first is the one covering it.
+    // Keep the last frame at or before `micros`: stop as soon as the *second* frame
+    // is newer, because then the first is the one covering it.
     while (this.#size >= 2 && this.#peek(1).timestamp <= micros) {
       this.#discard(0);
       this.#head = (this.#head + 1) % this.capacity;

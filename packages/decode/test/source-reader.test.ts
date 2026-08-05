@@ -256,6 +256,44 @@ describe('SourceReader cancellation — §4.3, "prime() is cancelable"', () => {
   });
 });
 
+describe('SourceReader stale outputs — §10.2', () => {
+  it('closes an output that outlived the reset which abandoned it', async () => {
+    // A real `VideoDecoder.reset()` drops its pending outputs, and so does the fake,
+    // which is exactly why this has to be provoked by hand: the frame is delivered
+    // through the seam after the seek that abandoned it. Left unguarded it is worse
+    // than a leak — the ring would take it as its newest frame and then reject every
+    // correct, older frame decoded behind it, and the preview would hold the wrong
+    // picture with nothing to say about it.
+    const part = syntheticPart({ frameCount: 120, gopSize: 30 });
+    const census = new FrameCensus();
+    const seam: { output: ((frame: FakeFrame) => void) | null } = { output: null };
+    const build = fakeDecoderFactory({ census, payloadOf: (chunk) => frameNumberOf(chunk.data) });
+
+    const reader = new SourceReader<FakeFrame>({
+      bytes: bytesReader(part.bytes),
+      index: part.index,
+      config: CONFIG,
+      decoderFactory: (callbacks) => {
+        seam.output = callbacks.output;
+        return build(callbacks);
+      },
+    });
+    openReaders.push(reader);
+
+    await reader.prime(part.index.ptsSec(95), 0);
+    await reader.prime(part.index.ptsSec(5), 0);
+    if (seam.output === null) throw new Error('the seam never handed over its output callback');
+
+    const stale = census.make(part.index.ptsMicros(95), 95);
+    seam.output(stale);
+
+    expect(stale.closed).toBe(true);
+    expect(reader.ring.newestMicros).toBe(part.index.ptsMicros(5));
+    expect(reader.frameAt(part.index.ptsSec(5))?.payload).toBe(5);
+    expect(census.doubleClosed).toEqual([]);
+  });
+});
+
 describe('SourceReader failure paths', () => {
   it('propagates a byte-read failure instead of hanging', async () => {
     const failing: ByteRangeReader = {

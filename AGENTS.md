@@ -192,6 +192,12 @@ rewriting a growing JSON once a second for the length of the recording.
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
   ring has moved _past_ `t` or the decoder has gone idle. Getting either wrong turns
   every rendered frame into a seek that discards the decode it just started.
+- **`Compositor.render` does not clear when it is handed no frame — it returns.** §4.3's
+  "a miss holds the previous frame" is kept by leaving the render target alone; a clear
+  before the null check turns every backward scrub into a black flash. The loop cannot
+  hold instead, because the frame it would keep belongs to the ring and the seek closes
+  it. The target is filled with the background at construction and on `resize`, which is
+  where the first composite gets its background from.
 - **The phase 6 gate is `npm test`, in a real Electron renderer.** `test/gate/` builds
   a harness with esbuild, launches Electron, encodes a 4K VFR fixture with
   `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
