@@ -61,7 +61,7 @@ const STATE_CHIPS: Record<ProjectState, StateChip> = {
 
 const STATE_NOTES: Partial<Record<ProjectState, string>> = {
   recording: 'A recording was in progress when the app last closed.',
-  'needs-recovery': 'This will be repaired and truncated to the last complete second when opened.',
+  'needs-recovery': 'This will be repaired and truncated to the last complete frame when opened.',
   exported: 'The sources were deleted after the export was verified. This recording is final.',
 };
 
