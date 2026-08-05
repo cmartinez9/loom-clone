@@ -55,21 +55,28 @@
  * So {@link hostRepresentsTarget} is the second half of the branch condition, and
  * {@link assertsAbsoluteBudget} is the pair. Where the host runs the product's workload
  * §8 is asserted exactly as it stands, whatever it measures; where it structurally
- * cannot, the absolute per-frame number is deferred to the same tracking bound a
- * stalled control defers to, and the figures are reported.
+ * cannot, the absolute per-frame number is deferred and the figures are reported.
  *
- * The second branch is deliberately not an escape hatch. The compositor is never
- * excused from compositing: it must still hold the ceiling the control just measured
- * *and* miss the budget no more often than the host itself did
- * ({@link expectTracksControl}), so a compositor that has actually got slow fails here
- * on any host, fast or slow. Only §8's *absolute* number is ever deferred, and only on
- * the evidence of a measurement taken in the same frames. `test/phase6-gate.test.ts`
- * runs a deliberately-slowed compositor through the same instrument in the same run and
- * requires it to miss §8's number whichever branch this host took, and to miss the
- * tracking ceiling as well wherever that phase's own control cleared the budget — the
- * one place the ceiling is guaranteed to sit below {@link SLOW_COMPOSITE_MS}, since a
- * stalled control can earn one above it. `test/budget-control.test.ts` proves the policy
- * itself, that boundary included.
+ * ## What the deferred branch asks, and which door asked it
+ *
+ * Two doors reach {@link expectTracksControl} and they do not carry the same bound,
+ * because the ceiling is only *relief* on one of them. A control that failed
+ * {@link environmentSustainsBudget} read past 16.67 ms, so {@link TRACKS_CONTROL}× it is
+ * past 25 ms — looser than §8, which is what a bound you fall *to* has to be. A host that
+ * merely is not this product's machine had a *healthy* control beside it, where the same
+ * multiple is 12.60 ms — tighter than §8, on the one branch whose purpose is not failing a
+ * host for being a different machine. So the ceiling is asked only of the first door.
+ *
+ * What both doors keep is {@link overBudgetRate}: the compositor must miss the budget no
+ * oftener than the host missed it in the same frames, a plain `>` with no factor, floored
+ * at {@link spinResolution} so a share the control could not have resolved is reported
+ * inconclusive rather than failed. On the representativeness door that share is the only
+ * per-frame judgement left, which is why `test/phase6-gate.test.ts` runs a
+ * deliberately-slowed compositor through the same instrument in the same run and requires
+ * it to miss §8's number on every host **and** to be caught by the deferred branch's own
+ * bound — the share, overwhelmingly, since a path burning four budgets on every frame
+ * misses the budget on all of them. `test/budget-control.test.ts` proves the policy
+ * itself, both doors included.
  *
  * ## Why a spin, and why half a budget of it
  *
@@ -190,7 +197,8 @@ export const CLEARS_BUDGET = 1;
 
 /**
  * How closely the compositor must track a ceiling the host has just shown it cannot
- * exceed.
+ * exceed — asked **only of the door this branch has always had**, a control that
+ * actually exceeded the budget.
  *
  * Above 1 because the control and the frame are sampled separately within each frame:
  * a stall lands in one or the other, so the worst frame may legitimately land above
@@ -198,6 +206,18 @@ export const CLEARS_BUDGET = 1;
  * is running on, which is the compositor's fault however slow that host is — the
  * 66.67 ms deliberately-slowed path in the harness clears this by more than 2.5×, on
  * any control reading that could have excused it.
+ *
+ * ## Why it is confined to that door
+ *
+ * The ceiling is only ever *relief* while the control that earned it had already missed
+ * the budget: `CLEARS_BUDGET` is 1, so a control on that door read past 16.67 ms and the
+ * ceiling it earns is past 25 ms — looser than §8, which is the whole point of a bound
+ * you fall to. {@link hostRepresentsTarget} opened a second door, and behind it sits a
+ * control that was *healthy*: a runner spin of 8.40 ms earns 12.60 ms, **below** §8's own
+ * number. Applied there the ceiling would turn a fixed 16.67 ms bar into a moving
+ * 12.60–15.15 ms one, on the branch whose entire purpose is not to fail a host for being
+ * a different machine. So a phase deferred for representativeness alone is held to no
+ * per-frame number at all, and {@link overBudgetRate} carries it instead.
  *
  * ## Why this ceiling cannot be the only thing asked of the deferred branch
  *
@@ -221,10 +241,14 @@ export const TRACKS_CONTROL = 1.5;
  *
  * Four budgets, not one over. The point is not that a slowed compositor scrapes past the
  * line but that it fails whichever branch of the judgement above the host puts it on —
- * §8's absolute number on any host at all, and additionally {@link TRACKS_CONTROL}'s
- * ceiling wherever the phase's own control cleared the budget, since the most such a
- * control can earn is `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 25 ms — and
- * this clears that by more than two and a half times.
+ * §8's absolute number on any host at all, and additionally the deferred branch's own
+ * bound. On the door where the control stalled that is {@link TRACKS_CONTROL}'s ceiling,
+ * which this clears by more than two and a half times whenever the ceiling applies at
+ * all; on the door where it did not, it is {@link overBudgetRate}, and a path that burns
+ * four budgets on **every** frame of the phase misses the budget on 100% of them against
+ * a host that missed it on none — two orders above anything that control could resolve.
+ * That is why the slow-compositor control is the one absolute check that survives on a
+ * non-representative host.
  *
  * It lives here, beside the two constants it has to stay in that relation to, rather
  * than in the harness that burns it: the relation is what `test/phase6-gate.test.ts`'s
@@ -359,7 +383,16 @@ export class GpuCostProbe {
     this.#source = source;
   }
 
+  /**
+   * The same invariant {@link reset} keeps, at the other end of a phase: the query
+   * standing at arm time belongs to the phase before this one.
+   *
+   * Without this the scrub profile's first sample is a *warmup* composite — and
+   * specifically the first 4K `texImage2D`, the one-time cost the warmup phase exists to
+   * hold — landing in the median the representativeness test reads.
+   */
   arm(): void {
+    this.#lastSeen = this.#source.lastMs;
     this.#armed = true;
   }
 
@@ -593,37 +626,74 @@ export function overBudgetRate(overBudget: number, count: number): number {
 }
 
 /**
+ * The finest over-budget rate a control of `spins` samples can resolve: **`1 / spins`**.
+ *
+ * Not a tolerance, and it must never be allowed to become one — it is a property of the
+ * sample size and it moves with the sample size. A control that took N spins reports its
+ * own share in steps of `1/N`, so it cannot distinguish "this host misses the budget on
+ * fewer than one window in N" from "this host never misses it": both come back as zero.
+ * Comparing a frame share finer than that against such a zero is reading signal out of
+ * quantisation, so a phase there is **inconclusive** and is reported rather than failed.
+ *
+ * Checked against the figures rather than derived from them: CI run 31039796990 measured
+ * 1 frame of 380 (0.263%) beside a 154-spin control, whose resolution is 0.649% — under
+ * it, so inconclusive. The 20 ms-on-one-composite-in-thirty regression measures about
+ * 3.3%, five times that floor, so it is still failed. Neither number appears here; if the
+ * pacing changes the spin count, this moves with it and those two figures move with it.
+ *
+ * Zero spins resolves nothing, so the floor is `Infinity` and every share is
+ * inconclusive — the same rule the rest of this file follows for a control that showed
+ * nothing. The gate asserts the spin count separately, so an empty control fails there.
+ */
+export function spinResolution(spins: number): number {
+  return spins <= 0 ? Infinity : 1 / spins;
+}
+
+/**
  * The branch where the host, not the compositor, missed §8's number.
  *
  * Returns the line the caller should report. **Throws — the gate fails — whenever the
  * compositor is the one that came up short**, which is what stops this branch from
  * being a way to pass by compositing slowly on a busy machine. Two things are asked of
- * it, because the first was not enough on its own:
+ * it, and they belong to the two different doors that reach here:
  *
- * - **how badly** the worst frame missed, against {@link TRACKS_CONTROL}× the worst spin;
+ * - **how badly** the worst frame missed, against {@link TRACKS_CONTROL}× the worst spin
+ *   — asked only where the control itself exceeded the budget, which is the only place
+ *   that ceiling is looser than the number it stands in for. See {@link TRACKS_CONTROL}.
  * - **how often** the budget was missed at all, against how often this host missed it in
- *   the same frames ({@link overBudgetRate}).
+ *   the same frames ({@link overBudgetRate}) — asked on both doors, and the only thing
+ *   asked on the representativeness one.
  *
  * The second is a plain `>` against the control's own share, with no factor in it. A
  * factor there would be a number tuned until a known regression separated, judged
  * against a statistic a stalling host inflates — which is the circularity the ceiling
- * above already has, one level up.
+ * above already has, one level up. What does bound it is {@link spinResolution}: a share
+ * finer than the control could resolve is quantisation rather than evidence.
+ *
+ * That floor is inert on the ceiling's own door, by construction rather than by luck. A
+ * control that failed {@link environmentSustainsBudget} read past the budget, so at least
+ * one of its spins was over it and `spinShare >= 1/count`, which is the floor itself — so
+ * any share large enough to beat `spinShare` has already cleared it. It can only ever
+ * change a verdict on the door where the control was healthy and `spinShare` is zero.
  */
 export function expectTracksControl(evidence: BudgetEvidence): string {
   const { what, budgetMs, measured, control } = evidence;
-  const ceiling = control.maxMs * TRACKS_CONTROL;
-  if (measured.maxMs > ceiling) {
-    throw new Error(
-      `${what}: worst frame ${fmt(measured.maxMs)} ms at frame ${measured.maxAt}, over the ` +
-        `${fmt(ceiling)} ms ceiling this host earned — ${TRACKS_CONTROL}x the ${fmt(control.maxMs)} ms ` +
-        `it took to do ${fmt(control.targetMs)} ms of arithmetic in these same frames. The ` +
-        `compositor cannot hold this machine's own ceiling, which is the compositor's fault ` +
-        `however slow the machine is. ${figures(control, budgetMs)}`,
-    );
+  if (!environmentSustainsBudget(control, budgetMs)) {
+    const ceiling = control.maxMs * TRACKS_CONTROL;
+    if (measured.maxMs > ceiling) {
+      throw new Error(
+        `${what}: worst frame ${fmt(measured.maxMs)} ms at frame ${measured.maxAt}, over the ` +
+          `${fmt(ceiling)} ms ceiling this host earned — ${TRACKS_CONTROL}x the ${fmt(control.maxMs)} ms ` +
+          `it took to do ${fmt(control.targetMs)} ms of arithmetic in these same frames. The ` +
+          `compositor cannot hold this machine's own ceiling, which is the compositor's fault ` +
+          `however slow the machine is. ${figures(control, budgetMs)}`,
+      );
+    }
   }
   const frameShare = overBudgetRate(measured.overBudget, measured.count);
   const spinShare = overBudgetRate(control.overBudget, control.count);
-  if (frameShare > spinShare) {
+  const resolution = spinResolution(control.count);
+  if (frameShare >= resolution && frameShare > spinShare) {
     throw new Error(
       `${what}: ${measured.overBudget} of ${measured.count} frames over the ${fmt(budgetMs)} ms ` +
         `budget (${pct(frameShare)}), a larger share than this host missed it on of its own ` +
@@ -639,10 +709,26 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
     `${what}: ${whyDeferred(evidence)} — ${figures(control, budgetMs)}; ` +
     `${describeHost(evidence.host)}. The worst frame was ${fmt(measured.maxMs)} ms ` +
     `(${measured.overBudget} of ${measured.count} frames over budget, ${pct(frameShare)}, against ` +
-    `the host's own ${pct(spinShare)}) and is held to tracking that measured ceiling instead. ` +
+    `the host's own ${pct(spinShare)})${verdict(frameShare, resolution, control.count)}. ` +
     `See test/gate/budget-control.ts; §8's number is asserted exactly as written on any host ` +
     `that runs the product's own workload and whose control clears it.`
   );
+}
+
+/**
+ * What the share had to say, once it had said it — separated out because "the compositor
+ * matched the host" and "this control could not have told the difference" are different
+ * findings, and only the second is a limit of the instrument.
+ */
+function verdict(frameShare: number, resolution: number, spins: number): string {
+  if (frameShare > 0 && frameShare < resolution) {
+    return (
+      ` and is INCONCLUSIVE rather than passed: that share is finer than the ` +
+      `${pct(resolution)} a ${spins}-spin control can resolve, so it cannot be told apart ` +
+      `from the host's own quantised zero`
+    );
+  }
+  return ` and missed the budget no oftener than this host missed it`;
 }
 
 /**

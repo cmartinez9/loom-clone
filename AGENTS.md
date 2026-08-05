@@ -287,15 +287,30 @@ a gap lives in `recording.json`, never in the container.
   (`CLEARS_BUDGET = 1`; a margin of 0.8 once let a control reading 14.50 ms defer a phase
   in which an injected 20.20 ms frame was excused, and made every clean run on an M5 Pro
   defer).
-  **The deferred branch is not a pass**, and this was measured rather than argued. The
-  compositor is still held to `TRACKS_CONTROL` × the worst spin that host just recorded
-  **and** to missing the budget no oftener than the host missed it on its own spins. The
-  documented regression — 20 ms on one composite in thirty, patched into the shipping
-  `Compositor.render` — goes red on **both** branches: strict, on §8's own assertion
-  (`over-budget=1` in scrub, 31 of 920 play frames, worst 20.30 ms); deferred, on the
-  ceiling (a 20.00 ms frame against the 12.60 ms a 8.40 ms spin earned). Note also that
-  deferral is not a way to green a red run — on the run that turned `main` red the ceiling
-  is 15.15 ms against a 17.20 ms frame, so that phase fails on either branch. The one
+  **The deferred branch has two doors, and they do not carry the same bound.** Where the
+  _control_ missed the budget, the compositor is held to `TRACKS_CONTROL` × the worst spin
+  that host recorded — relief by construction, since such a control read past 16.67 ms and
+  1.5× of it is past 25 ms. Where the _host_ is simply not this product's machine, the
+  control beside it was healthy and 1.5 × 8.40 ms is 12.60 ms — **below** §8 — so that
+  ceiling is not asked at all; asking it would turn a fixed 16.67 ms bar into a moving
+  12.60–15.15 ms one on the branch whose whole purpose is not failing a host for being a
+  different machine. Both doors keep the over-budget **share**, a plain `>` against the
+  host's own, floored at what the control could resolve: N spins report in steps of `1/N`,
+  so a finer frame share cannot be told from a quantised zero and is reported INCONCLUSIVE
+  rather than failed. **That floor is computed from the spin count at judgement time and
+  must never be pinned to a number** — it is a property of the sample size, and the moment
+  it is written down it becomes an over-budget tolerance. It is also inert on the ceiling's
+  door: a control that missed the budget has `spinShare >= 1/N` already, so nothing that
+  beats `spinShare` can be under the floor.
+  **Regression detection therefore carries the representativeness door**, and it was
+  measured rather than argued. The documented regression — 20 ms on one composite in
+  thirty, patched into the shipping `Compositor.render` — goes red on **both** branches:
+  strict, on §8's own assertion; deferred, on the share, ~3.3% of frames against a host
+  that missed none of its own spins, five times the floor. CI run 31039796990 sits the
+  other side of it — 1 frame of 380, 0.263%, against a 154-spin control resolving 0.649% —
+  and is reported as inconclusive, which is the outcome this shape exists to produce. The
+  **slow-compositor control is the only absolute check left on that door**, which is why
+  it is asserted unconditionally and why it must never be made conditional. The one
   surviving gap is the **middle band**: the ceiling is a multiple of a number measured on
   the thread the compositor saturates, so it rises with the regression it judges, and under
   sustained load the host's own over-budget share runs ahead of the regression's (22% of

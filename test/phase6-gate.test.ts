@@ -336,21 +336,22 @@ function describeRun(report: GateReport): string {
 }
 
 /**
- * What the tracking ceiling made of the deliberately-slowed compositor, said out loud
+ * What the deferred branch made of the deliberately-slowed compositor, said out loud
  * without failing on it.
  *
- * Only ever called on the branch where the slow phase's own control was stalled, and
- * so where the ceiling that control earned may legitimately sit above the 66.67 ms the
- * slowed path burns. Which of the two happened is worth recording — a ceiling that
- * still caught the slowed path on a stalled host is the deferred branch working — but
- * neither outcome is a verdict on this commit, so both come back as a line rather than
- * as a thrown assertion.
+ * Only ever called on the branch where the slow phase's own control was stalled, and so
+ * where both of that branch's bounds may legitimately sit above what the slowed path
+ * burns: a spin past `SLOW_COMPOSITE_MS / TRACKS_CONTROL` earns a ceiling over 66.67 ms,
+ * and a host missing the budget on as many of its own spins lifts the share as well.
+ * Which of the two happened is worth recording — a bound that still caught the slowed
+ * path on a stalled host is the deferred branch working — but neither outcome is a
+ * verdict on this commit, so both come back as a line rather than a thrown assertion.
  */
 function trackingOutcome(evidence: BudgetEvidence): string {
   try {
-    return `that ceiling did not reach it: ${expectTracksControl(evidence)}`;
+    return `those bounds did not reach it: ${expectTracksControl(evidence)}`;
   } catch (error) {
-    return `that ceiling caught it anyway: ${error instanceof Error ? error.message : String(error)}`;
+    return `they caught it anyway: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
@@ -416,10 +417,14 @@ describe('phase 6 gate: 4K scrub and play', () => {
       //
       // Where both answer yes the four assertions below are exactly §8's, unchanged.
       // Where either does not, the shortfall is reported and the compositor is held to
-      // what that control measured instead — the ceiling it earned, and the share of
-      // windows it missed the budget on — which is the part that stops this being an
-      // escape hatch. `test/gate/budget-control.ts` argues it; the slow-compositor
-      // control below and `test/budget-control.test.ts` prove it.
+      // what that control measured instead — which of the two answered no decides what:
+      // a stalled control earns the ceiling it measured, a host that simply is not this
+      // product's machine earns no per-frame number at all, because 1.5x a *healthy*
+      // 8.40 ms spin is 12.60 ms and holding a runner to that is tighter than §8 rather
+      // than looser. Both doors keep the share of windows missed, floored at what that
+      // control could resolve, and that is the part that stops this being an escape
+      // hatch. `test/gate/budget-control.ts` argues it; the slow-compositor control
+      // below and `test/budget-control.test.ts` prove it.
       const shortfalls: string[] = [];
       const scrubHost: HostProfile = {
         hardwareDecode: report.environment.hardwareDecode,
@@ -483,29 +488,32 @@ describe('phase 6 gate: 4K scrub and play', () => {
         // frame, so `Compositor.render` returns before the timer query opens. Carried
         // for the failure message only — the branch below is keyed on the control alone,
         // deliberately. Representativeness decides whether §8's *absolute* number applies
-        // to a host, and the ceiling this branch requires is derived from that host's own
-        // spin rather than from §8, so consulting it here would only ever excuse the
-        // slowed path on a runner. This proof must not get weaker on the machine the
-        // deferral is for.
+        // to a host; what this proof needs is that the bound the deferred branch would
+        // actually use still catches a compositor that cannot composite, and consulting
+        // representativeness here would only ever excuse the slowed path on a runner.
+        // This proof must not get weaker on the machine the deferral is for.
         host: playHost,
       };
       if (environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)) {
-        // The host held the budget through this phase too, so the ceiling its control
-        // earned is at most `FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL` — 25 ms
-        // against 66.67 ms of injected burn. The deferred branch's bound is therefore
-        // proved here as well, and not only §8's absolute one.
+        // The host held the budget through this phase, so the ceiling is not the bound
+        // the deferred branch would use here — the *share* is, and it is what has to
+        // catch this. The slowed path burns four budgets on every frame of the phase, so
+        // it misses the budget on 100% of them beside a host that missed it on none:
+        // two orders above the `1/count` this control can resolve, and the only bound
+        // standing between a non-representative host and a catastrophically slow frame.
         expect(() => expectTracksControl(slowEvidence), detail).toThrow(
-          /cannot hold this machine's own ceiling/,
+          /a larger share than this host missed it on of its own spins/,
         );
       } else {
-        // And where this phase's own control was stalled, that tracking bound is
-        // reported rather than required of it. A control reading past
+        // And where this phase's own control was stalled, the deferred branch's bounds
+        // are reported rather than required of it. A control reading past
         // `SLOW_COMPOSITE_MS / TRACKS_CONTROL` — 44.44 ms, well inside what these
         // runners have done to a spin — earns a ceiling above the 66.67 ms this path
-        // burns, so demanding the throw would fail the gate for the host's stall,
-        // which is the one thing the environment control exists to stop. The absolute
-        // pair above still holds, and `test/budget-control.test.ts` pins both sides of
-        // that boundary so the branch cannot quietly widen.
+        // burns, and a host that missed the budget on as large a share of its own spins
+        // lifts the share too, so demanding the throw would fail the gate for the host's
+        // stall, which is the one thing the environment control exists to stop. The
+        // absolute pair above still holds, and `test/budget-control.test.ts` pins both
+        // sides of that boundary so the branch cannot quietly widen.
         shortfalls.push(
           `the slow-compositor control ran beside a host that could not sustain the budget in ` +
             `those frames (worst spin ${slow.control.maxMs.toFixed(2)} ms of a ` +

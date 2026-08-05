@@ -40,6 +40,7 @@ import {
   REPRESENTATIVE_GPU_MS,
   REPRESENTATIVE_GPU_SHARE,
   SLOW_COMPOSITE_MS,
+  spinResolution,
   TRACKS_CONTROL,
   UNKNOWN_HOST,
   type BudgetEvidence,
@@ -372,14 +373,110 @@ describe('the frame budget is enforced against a measured environment', () => {
     expect(SLOWED_MS).toBeGreaterThan(FRAME_BUDGET_MS);
 
     // And on the branch where the throw *is* required — the slow phase's own control
-    // cleared the budget — no reading can lift the ceiling that far: the most one can
-    // earn there is 25 ms, against 66.67 ms of burn.
-    const clearing = control({ maxMs: FRAME_BUDGET_MS * CLEARS_BUDGET });
+    // cleared the budget, so the ceiling is not this branch's bound there at all — the
+    // share is what catches it, and overwhelmingly: every frame of the phase against a
+    // host that missed none of its own spins.
+    const clearing = control({ count: 24, maxMs: FRAME_BUDGET_MS * CLEARS_BUDGET });
     expect(environmentSustainsBudget(clearing, FRAME_BUDGET_MS)).toBe(true);
-    expect(FRAME_BUDGET_MS * CLEARS_BUDGET * TRACKS_CONTROL).toBeLessThan(SLOWED_MS);
     expect(() =>
-      expectTracksControl(evidence({ maxMs: SLOWED_MS, overBudget: 24 }, clearing)),
-    ).toThrow(/cannot hold this machine's own ceiling/);
+      expectTracksControl(evidence({ count: 24, maxMs: SLOWED_MS, overBudget: 24 }, clearing)),
+    ).toThrow(/a larger share than this host missed it on of its own spins/);
+  });
+
+  /**
+   * **The two doors into the deferred branch, and why only one of them carries a ceiling.**
+   *
+   * The ceiling is relief only while the control that earned it had itself missed the
+   * budget: `CLEARS_BUDGET` is 1, so such a control read past 16.67 ms and 1.5x of it is
+   * past 25 ms — looser than §8, which is what a bound you fall *to* has to be.
+   * {@link hostRepresentsTarget} opened a second door and put a *healthy* control behind
+   * it, where 1.5 x 8.40 ms is 12.60 ms — below §8's own number. Asking that of a runner
+   * would turn a fixed 16.67 ms bar into a moving 12.60–15.15 ms one on the one branch
+   * whose whole purpose is not to fail a host for being a different machine.
+   */
+  it('asks the tracking ceiling only of a control that missed the budget itself', () => {
+    // The original door: relief, always, because the control was over the budget.
+    for (const c of [JUST_OVER, STALLED]) {
+      expect(environmentSustainsBudget(c, FRAME_BUDGET_MS)).toBe(false);
+      expect(c.maxMs * TRACKS_CONTROL).toBeGreaterThan(FRAME_BUDGET_MS);
+      expect(() =>
+        expectTracksControl(evidence({ maxMs: c.maxMs * TRACKS_CONTROL + 0.1 }, c)),
+      ).toThrow(/cannot hold this machine's own ceiling/);
+    }
+
+    // The representativeness door, with a healthy control: the ceiling it would have
+    // earned sits *below* §8, so it is not asked. A 14 ms frame — inside §8, over
+    // 1.5 x 8.40 ms — is reported rather than failed.
+    const tighter = HEALTHY.maxMs * TRACKS_CONTROL;
+    expect(tighter).toBeLessThan(FRAME_BUDGET_MS);
+    const inside = evidence({ maxMs: 14, overBudget: 0 }, HEALTHY, RUNNER_HOST);
+    expect(assertsAbsoluteBudget(inside)).toBe(false);
+    expect(inside.measured.maxMs).toBeGreaterThan(tighter);
+    expect(expectTracksControl(inside)).toContain('cannot run the workload §8 is about');
+  });
+
+  /**
+   * **The resolution floor: a property of the sample size, never a tolerance.**
+   *
+   * A control of N spins reports its own share in steps of `1/N`, so it cannot tell "this
+   * host misses the budget on fewer than one window in N" from "never" — both come back
+   * as zero. A frame share finer than that, compared against such a zero, is quantisation
+   * rather than evidence, so the phase is inconclusive and reported.
+   *
+   * The figures are a check on it and not its source. CI run 31039796990: 1 frame of 380
+   * (0.263%) beside a 154-spin control resolving 0.649% — under it, inconclusive. The
+   * 20 ms-on-one-composite-in-thirty regression: ~3.3%, five times that floor, still
+   * failed. Move the spin count and the floor moves with it, which is the whole point.
+   */
+  it('computes the share’s floor from the control’s own spin count', () => {
+    expect(spinResolution(154)).toBeCloseTo(1 / 154, 12);
+    expect(spinResolution(1000)).toBeCloseTo(1 / 1000, 12);
+    // Halve the sample and the floor doubles; nothing here is pinned to a number.
+    expect(spinResolution(77)).toBeCloseTo(spinResolution(154) * 2, 12);
+    // A control that took no spins resolves nothing, so nothing clears it.
+    expect(spinResolution(0)).toBe(Infinity);
+
+    // The run this whole round was built for: one frame of 380 against a 154-spin
+    // control. Under the floor, so it comes back as a line rather than a failure.
+    const ciControl = control({ count: 154, maxMs: 10.1, maxAt: 96, meanMs: 8.47 });
+    const ciRun = evidence(
+      { count: 380, maxMs: 17.2, maxAt: 186, overBudget: 1 },
+      ciControl,
+      RUNNER_HOST,
+    );
+    expect(assertsAbsoluteBudget(ciRun)).toBe(false);
+    expect(1 / 380).toBeLessThan(spinResolution(ciControl.count));
+    const reported = expectTracksControl(ciRun);
+    expect(reported).toContain('INCONCLUSIVE');
+    expect(reported).toContain('154-spin control can resolve');
+
+    // And the regression, on the same host and the same control: five times the floor,
+    // so it is signal and it fails.
+    expect(30 / 900).toBeGreaterThan(spinResolution(ciControl.count) * 4);
+    expect(() =>
+      expectTracksControl(
+        evidence({ count: 900, maxMs: 20.3, maxAt: 256, overBudget: 30 }, ciControl, RUNNER_HOST),
+      ),
+    ).toThrow(/a larger share than this host missed it on of its own spins/);
+  });
+
+  /**
+   * The floor cannot loosen the door the ceiling guards, and that is structural rather
+   * than lucky.
+   *
+   * A control that failed {@link environmentSustainsBudget} read past the budget, so at
+   * least one of its spins was over it and `spinShare >= 1/count` — which is the floor.
+   * Any frame share big enough to beat `spinShare` has therefore already cleared it, so
+   * the floor can only ever change a verdict where the control was healthy and its share
+   * is a quantised zero.
+   */
+  it('CONTROL: the floor is inert wherever the control itself missed the budget', () => {
+    for (const c of [JUST_OVER, STALLED, control({ count: 194, maxMs: 62.5, overBudget: 43 })]) {
+      expect(environmentSustainsBudget(c, FRAME_BUDGET_MS)).toBe(false);
+      // maxMs past the budget means at least one spin was counted over it.
+      expect(c.overBudget).toBeGreaterThanOrEqual(1);
+      expect(overBudgetRate(c.overBudget, c.count)).toBeGreaterThanOrEqual(spinResolution(c.count));
+    }
   });
 
   /**
@@ -584,46 +681,29 @@ describe('the frame budget is enforced against a host that runs the product', ()
     }).toThrow();
 
     // Non-representative host, on each of the two control readings a runner has actually
-    // produced beside a healthy spin. The absolute number is not asserted — and the
-    // tracking bound catches the regression anyway, on the ceiling: 1.5x a spin that
-    // stayed inside the budget cannot reach 20.30 ms.
-    for (const c of [HEALTHY, control({ count: 380, maxMs: 10.1, maxAt: 96, meanMs: 8.47 })]) {
+    // produced beside a healthy spin. No per-frame number is asserted there — and the
+    // share catches the regression anyway: 3.33% of frames against a host that missed
+    // none of its own spins, five times over what those controls can resolve.
+    for (const c of [HEALTHY, control({ count: 154, maxMs: 10.1, maxAt: 96, meanMs: 8.47 })]) {
       const deferred = evidence(regressed, c, RUNNER_HOST);
       expect(assertsAbsoluteBudget(deferred)).toBe(false);
       expect(environmentSustainsBudget(c, FRAME_BUDGET_MS)).toBe(true);
-      expect(() => expectTracksControl(deferred)).toThrow(/cannot hold this machine's own ceiling/);
+      expect(overBudgetRate(regressed.overBudget, regressed.count)).toBeGreaterThan(
+        spinResolution(c.count) * 4,
+      );
+      expect(() => expectTracksControl(deferred)).toThrow(
+        /a larger share than this host missed it on of its own spins/,
+      );
     }
 
-    // And where a host stall does lift that ceiling over the regression, the share still
-    // has it: the spin runs after the frame body, so none of the regression's own burn
-    // lands in it.
+    // And where a host stall opens the ceiling's door but lifts it over the regression,
+    // the share still has it: the spin runs after the frame body, so none of the
+    // regression's own burn lands in it.
     const stalled = control({ count: 204, maxMs: 23.7, maxAt: 114, meanMs: 8.54, overBudget: 2 });
     const underStall = evidence(regressed, stalled, RUNNER_HOST);
+    expect(environmentSustainsBudget(stalled, FRAME_BUDGET_MS)).toBe(false);
     expect(regressed.maxMs).toBeLessThan(stalled.maxMs * TRACKS_CONTROL);
     expect(() => expectTracksControl(underStall)).toThrow(/30 of 900 frames over/);
-  });
-
-  /**
-   * What the deferral does and does not buy, said out loud with the numbers.
-   *
-   * On the run that turned `main` red the deferred branch's ceiling — 1.5x a 10.10 ms
-   * spin, 15.15 ms — still sits below the 17.20 ms frame, so routing that phase away
-   * from §8's absolute number does **not** on its own turn that run green. That is the
-   * honest consequence of falling to a bound derived from the host's own spin, and it is
-   * pinned here rather than discovered on the next red build: representativeness decides
-   * *which* bound applies, and the bound it falls to is not a weaker one on a host whose
-   * control was healthy.
-   */
-  it('CONTROL: the deferred branch is not a pass, on the very run this was built for', () => {
-    const ciControl = control({ count: 380, maxMs: 10.1, maxAt: 96, meanMs: 8.47 });
-    const ciRun = evidence(
-      { count: 380, maxMs: 17.2, maxAt: 186, overBudget: 1 },
-      ciControl,
-      RUNNER_HOST,
-    );
-    expect(assertsAbsoluteBudget(ciRun)).toBe(false);
-    expect(ciRun.measured.maxMs).toBeGreaterThan(ciControl.maxMs * TRACKS_CONTROL);
-    expect(() => expectTracksControl(ciRun)).toThrow(/cannot hold this machine's own ceiling/);
   });
 
   it('reports which half deferred the phase, with the figures for both', () => {
@@ -660,6 +740,18 @@ describe('the frame budget is enforced against a host that runs the product', ()
     // Disarmed, nothing is recorded however many frames go by.
     feed([1, 2, 3]);
     expect(probe.snapshot()).toEqual(NO_GPU_PROFILE);
+
+    // And arming does not adopt the query standing at that moment — on the real harness
+    // that is a warmup composite, specifically the first 4K `texImage2D` the warmup
+    // phase exists to hold, and it would land in the median this test reads.
+    const warm = { lastMs: 24.5 as number | null };
+    const armed = new GpuCostProbe(warm);
+    armed.arm();
+    armed.sample();
+    expect(armed.snapshot()).toEqual(NO_GPU_PROFILE);
+    warm.lastMs = 0.31;
+    armed.sample();
+    expect(armed.snapshot()).toEqual({ count: 1, medianMs: 0.31, maxMs: 0.31 });
 
     probe.arm();
     // Three completed queries held across nine frames are three samples, and the median
