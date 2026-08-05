@@ -16,6 +16,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -28,7 +29,16 @@ import {
 import { loadAndUpgradeDocument, writeJsonAtomic } from '../src/fs/index.ts';
 import { withTempDir } from './helpers/temp.ts';
 
-const V1 = { schema: 'loom.settings/1', recordingsRoot: '/Users/x/Movies/Loom Clone' };
+/**
+ * The v1 input is a file, not a constant beside the assertions — `schema.ts` step 3
+ * asks for a fixture at the old version, and this is the first migration to need one.
+ * A file is a byte-exact record of what a v1 `settings.json` actually looked like; a
+ * constant would quietly follow the current types the day someone reshapes them, and
+ * the migration would then be tested against a document that never existed.
+ */
+const V1 = JSON.parse(
+  readFileSync(new URL('./fixtures/settings.v1.json', import.meta.url), 'utf8'),
+) as Record<string, unknown>;
 
 describe('loom.settings 1 -> 2', () => {
   it('is the version this build writes', () => {
@@ -49,7 +59,7 @@ describe('loom.settings 1 -> 2', () => {
 
   it('keeps the recordings root the user chose', () => {
     const outcome = migrateDocument(defaultRegistry(), 'loom.settings', V1);
-    expect(outcome.doc['recordingsRoot']).toBe(V1.recordingsRoot);
+    expect(outcome.doc['recordingsRoot']).toBe(V1['recordingsRoot']);
   });
 
   it('produces a document the validator accepts', () => {

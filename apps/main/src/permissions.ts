@@ -56,21 +56,15 @@ import type { ProjectStore } from './project-store.ts';
  * The sampler owns the hard half — running a native helper, building a real
  * `CGEventTap`, reading `tapIsEnabled` — and phase 5 was deliberately scoped to stop
  * there and leave the asking to phase 2. So this is a *port*, not a reimplementation:
- * when `@loom/sampler` lands (it is phase 5, unmerged at the time of writing), wiring
- * it up is one line in `index.ts`:
+ * `index.ts` passes `@loom/sampler`'s `probeInput` straight through, and that is the
+ * whole of the wiring. `probeInput` returns an `InputProbe` whose `clicks` is a
+ * `ClickTapState`, which has both fields below and more — so it satisfies this type
+ * structurally, with no adapter to keep in sync.
  *
- * ```ts
- * import { probeInput } from '@loom/sampler';
- * new PermissionManager({ store, clickTapProbe: probeInput });
- * ```
- *
- * `probeInput` returns an `InputProbe` whose `clicks` is a `ClickTapState`, which
- * has both fields below and more — so it satisfies this type structurally, with no
- * adapter to keep in sync.
- *
- * Until then the port is `null` and `tapLive` stays `null`, which reads as
- * **unverified** everywhere rather than as a pass. That is the intended state: this
- * build genuinely cannot tell whether clicks would arrive.
+ * It stays a port rather than an import so a test can run this class without
+ * spawning a native helper. With no port the probe is `null` and `tapLive` stays
+ * `null`, which reads as **unverified** everywhere rather than as a pass: a build
+ * that cannot ask whether clicks would arrive must not answer.
  */
 export type ClickTapProbe = () => Promise<{
   clicks: { axTrusted: boolean; tapEnabled: boolean };
@@ -78,7 +72,7 @@ export type ClickTapProbe = () => Promise<{
 
 export interface PermissionManagerOptions {
   store: ProjectStore;
-  /** Phase 5's `probeInput`. `null` until `@loom/sampler` is in the build. */
+  /** Phase 5's `probeInput`. `null` only where no native helper can run — tests. */
   clickTapProbe?: ClickTapProbe | null;
   /**
    * How the app quits and comes back. Injected because the real one ends the

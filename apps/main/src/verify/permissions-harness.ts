@@ -76,7 +76,7 @@ export interface HarnessOptions {
   permissions: PermissionManager;
   windows: WindowRegistry;
   appVersion: string;
-  /** Phase 5's sampler, adapted. `null` in a build without `@loom/sampler`. */
+  /** Phase 5's sampler, adapted. `index.ts` supplies it; `null` skips, never passes. */
   clickStream?: ClickStreamProbe | null;
   /**
    * How long the click check watches for events. Only meaningful with a
@@ -569,11 +569,11 @@ function lumaStats(image: NativeImage): { mean: number; distinct: number; empty:
  * The captain's open item: *"Post-grant event rate and latency are unmeasured.
  * Validate during the build."*
  *
- * Two halves, and only one of them exists in this build. `AXIsProcessTrusted()` is
- * read here, because that is phase 2's and it is what the captain's decision demands
- * be checked rather than assumed. The rate and latency need a live event stream,
- * which only `@loom/sampler`'s `InputSampler` produces — see {@link ClickStreamProbe}
- * for the adapter and why it is documented rather than shipped.
+ * Two halves. `AXIsProcessTrusted()` is read here, because that is phase 2's and it
+ * is what the captain's decision demands be checked rather than assumed. The rate and
+ * latency need a live event stream, which only `@loom/sampler`'s `InputSampler`
+ * produces; `index.ts` supplies it as a {@link ClickStreamProbe}. What is missing is
+ * the Accessibility grant, not the sampler.
  *
  * With no probe this reports `skipped` and names what is missing. It does not report
  * a pass from `axTrusted` alone: the whole reason this obligation exists is that the
