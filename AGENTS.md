@@ -281,6 +281,15 @@ a gap lives in `recording.json`, never in the container.
   that failed, the same single composite either way, beside a 2.00 ms p99 and a
   control that never exceeded 8.80 ms. Neither the budget nor the environment control
   can tell those apart, and neither should have to.
+  **And that, not host jitter, is what was actually reddening this gate.** The first
+  runs of the environment control on a real paravirtual runner found the host _healthy_:
+  a mean spin of 8.41 ms in both phases of both runs, so the strict branch applied and
+  §8 was asserted exactly as written, with the deferral path firing once in two runs.
+  The 17.60 ms play frame that started all of it did not reproduce either time — play
+  peaked at 9.10 ms with nothing over budget. So the environment awareness below was
+  built for a problem that was substantially a measurement artifact, and it should be
+  read as a backstop rather than as the thing keeping this gate green. Before assuming
+  a runner is too slow to hold §8, check what the control actually measured there.
   A genuine over-budget frame did eventually turn up on the fixed instrument — 17.60 ms
   of 360 beside a 5.50 ms p99, on a host that also stretched the warmup frame to 39 ms —
   and the decision taken was **not** to touch `FRAME_BUDGET_MS`, add a tolerance or
