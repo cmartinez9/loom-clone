@@ -1,9 +1,11 @@
 /**
  * The recorder HUD. Architecture report §1.2.
  *
- * Phase 1's HUD is deliberately small: start, stop, a timer and an honest count.
- * Source and device pickers, audio meters and the live camera preview belong to
- * the phases that have audio (3) and a camera (4) to point them at.
+ * The HUD is deliberately small: start, stop, a timer and an honest count. It starts
+ * a recording on `DEFAULT_CAPTURE_OPTIONS`, so phase 3's microphone and system audio
+ * are captured without this window asking for a device or showing a level. Source
+ * and device pickers, audio meters and the live camera preview are surface work for
+ * the phase that builds them; the camera itself is phase 4.
  *
  * **This is the window `setContentProtection(true)` exists for.** It sets
  * `NSWindowSharingNone`, which is how our own UI stays out of the recording. The

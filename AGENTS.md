@@ -47,8 +47,11 @@ npx electron scripts/screenshot.cjs --out shots --theme light   # capture the re
 
 ```
 packages/format/   the on-disk format: schemas, types, validation, migrations,
-                   writeAtomic, the edit journal.  `@loom/format` is PURE (no node,
-                   no DOM); `@loom/format/fs` is the filesystem half.
+                   writeAtomic, the edit journal, and `src/sync/` — the A/V
+                   alignment arithmetic, which lives here rather than in a package
+                   §1.3 does not list because every function in it is a reading of
+                   a §2.3 field.  `@loom/format` is PURE (no node, no DOM);
+                   `@loom/format/fs` is the filesystem half.
 packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it with.
                    `@loom/mux` is PURE; `@loom/mux/fs` owns the file descriptor and,
                    like `@loom/format/fs`, has exactly one caller.

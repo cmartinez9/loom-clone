@@ -7,8 +7,8 @@
  * The automated gate replays encoded frames from a fixture, because a CI runner has
  * no display, no GPU and no Screen Recording grant. That covers everything from the
  * IPC boundary down. This covers the part above it: `MediaStreamTrackProcessor` →
- * `VideoEncoder` → IPC, driven by the same `RecorderSession` the app runs, on a real
- * machine.
+ * `VideoEncoder`/`AudioEncoder` → IPC, driven by the same `RecorderSession` the app
+ * runs, on a real machine.
  *
  * ## Which mode to run, and what each one is worth
  *

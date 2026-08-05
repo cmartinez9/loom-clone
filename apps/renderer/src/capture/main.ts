@@ -5,6 +5,9 @@
  * getDisplayMedia → MediaStreamTrackProcessor → VideoEncoder → encoded chunks → main
  * ```
  *
+ * The audio half of this same page — the microphone and the system loopback — is
+ * `./audio.ts`, which carries the two rules that belong only to audio.
+ *
  * No UI, no framework, no DOM output. It exists because Electron already reaches
  * ScreenCaptureKit through `getDisplayMedia`, so a native helper would buy only
  * crash isolation — which a dedicated hidden window gives for free, with main
@@ -15,9 +18,9 @@
  * 1. **`MediaStreamTrackProcessor` + `VideoEncoder`, never `MediaRecorder`.** The
  *    research scout measured `MediaRecorder` dropping 40–80% of frames on a screen
  *    track (§5.5). That is not a tuning problem; it is the wrong API.
- * 2. **Nothing raw crosses IPC.** What leaves this page is `EncodedVideoChunk`
- *    bytes. A single 3456×2234 NV12 frame is 11.6 MB; at 30 fps that would be
- *    347 MB/s of structured-clone traffic to accomplish nothing (§1.4).
+ * 2. **Nothing raw crosses IPC.** What leaves this page is `EncodedVideoChunk` and
+ *    `EncodedAudioChunk` bytes. A single 3456×2234 NV12 frame is 11.6 MB; at 30 fps
+ *    that would be 347 MB/s of structured-clone traffic to accomplish nothing (§1.4).
  * 3. **Every frame is closed, in a `finally`.** WebCodecs frames are manually
  *    reference-counted, and a leaked one exhausts the pool and then simply stops
  *    producing frames — no error, no throw, just a capture that quietly stops

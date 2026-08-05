@@ -1,5 +1,6 @@
 /**
- * The mutation proof for the phase 1 gate.
+ * The mutation proof for the capture gates: phase 1's crash gate and phase 3's A/V
+ * sync gate.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *

@@ -119,9 +119,9 @@ export interface ProjectApi {
 // ---------------------------------------------------------------- recorder
 
 /**
- * What to capture. Phase 1 is **screen video only**; microphone and system audio
- * (phase 3) and the webcam (phase 4) add fields here rather than a second options
- * type, because they are options on one capture, not three captures.
+ * What to capture: screen video, the microphone and the system's audio output. The
+ * webcam (phase 4) adds fields here rather than a second options type, because they
+ * are options on one capture, not three captures.
  */
 export interface CaptureOptions {
   /** Electron display id. `null` records the primary display. */
