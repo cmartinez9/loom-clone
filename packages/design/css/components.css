@@ -1,0 +1,277 @@
+/* ============================================================================
+   loom-clone — Pressroom component primitives
+
+   The design scout shipped two files: `tokens.css` (values) and `type.css`
+   (faces + scale). The primitives below were drawn in the Direction A mockups
+   against that direction's private variable names (`--ink`, `--paper-raised`,
+   `--vermilion`). This file is those same primitives rebuilt on the semantic
+   roles in `tokens.css`, which is the authoritative token file and the only one
+   with a dark theme.
+
+   The two rules that make this language what it is, restated because they are
+   easy to erode:
+
+     1. A SHADOW MEANS "THIS FLOATS ABOVE YOUR DESKTOP", AND NOTHING ELSE.
+        The recording bar, the draw palette and popovers get `--lift`. Nothing
+        inside a window ever does. Panels are defined by keylines.
+     2. NOTHING ON THE INPUT PATH ANIMATES.
+        Press, toggle, scrub, playhead and waveform redraw are `--t-instant`.
+        Duration is spent only on things arriving or leaving.
+
+   Banned outright, as a review criterion rather than a preference:
+   colour-blend gradients, `backdrop-filter`, blurred shadows, blue-black
+   neutrals, emoji as iconography. See `data/loom-design/report.md` §8.
+   ============================================================================ */
+
+/* ---------- keylined object ---------- */
+.obj {
+  background: var(--bg-raised);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-md);
+}
+/* Elevation, and only for things that float above the desktop. */
+.obj-float {
+  box-shadow: var(--lift);
+}
+
+/* ---------- button ---------- */
+.btn {
+  height: var(--ctrl);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-sm);
+  font: var(--w-med) var(--ui) / var(--ui-lh) var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--t-hover) var(--e-soft);
+}
+.btn:hover:not(:disabled) {
+  background: var(--bg-sunken);
+}
+.btn:active:not(:disabled) {
+  background: var(--bg-deep);
+  transition-duration: var(--t-instant);
+}
+.btn:disabled {
+  color: var(--fg-subtle);
+  cursor: default;
+}
+.btn-sm {
+  height: 26px;
+  padding: 0 var(--sp-2);
+  font-size: var(--ui-sm);
+}
+
+/* Selection is ink inverted — the letterpress move, and the only "primary". */
+.btn-primary {
+  background: var(--select-bg);
+  color: var(--select-fg);
+  border-color: var(--keyline);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--fg-muted);
+}
+.btn-primary:active:not(:disabled) {
+  background: var(--select-bg);
+}
+
+/* Vermilion is the record light. It is spent on record and on destroy, nowhere else. */
+.btn-rec {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--keyline);
+}
+.btn-rec:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.btn-rec:active:not(:disabled) {
+  background: var(--accent-press);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-sunken);
+  border-color: var(--divider);
+}
+
+/* Icon-only control. Square, so a row of them keeps a rhythm. */
+.btn-icon {
+  width: var(--ctrl);
+  padding: 0;
+  justify-content: center;
+}
+.btn-icon.btn-sm {
+  width: 26px;
+}
+
+/* ---------- segmented control ---------- */
+.seg {
+  display: inline-flex;
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+.seg > button {
+  height: 28px;
+  padding: 0 var(--sp-3);
+  background: transparent;
+  color: var(--fg);
+  border: 0;
+  border-right: var(--line-thin) solid var(--divider);
+  font: var(--w-med) var(--ui) / var(--ui-lh) var(--font-ui);
+  cursor: pointer;
+  transition: background var(--t-hover) var(--e-soft);
+}
+.seg > button:last-child {
+  border-right: 0;
+}
+.seg > button:hover {
+  background: var(--bg-sunken);
+}
+.seg > button[aria-pressed='true'] {
+  background: var(--select-bg);
+  color: var(--select-fg);
+}
+
+/* ---------- toggle ---------- */
+.tgl {
+  width: 40px;
+  height: 23px;
+  flex: none;
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-pill);
+  background: var(--bg-sunken);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--t-tap) var(--e-soft);
+}
+.tgl::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--fg);
+  transition: transform var(--t-tap) var(--e-snap);
+}
+.tgl[aria-checked='true'] {
+  background: var(--ok);
+}
+.tgl[aria-checked='true']::after {
+  transform: translateX(17px);
+  background: var(--bg-raised);
+}
+
+/* ---------- chip: a small stated fact, not a badge ---------- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border: var(--line-thin) solid var(--keyline);
+  border-radius: var(--r-pill);
+  background: var(--bg-raised);
+  font-family: var(--font-ui);
+  font-size: var(--ui-xs);
+  line-height: var(--ui-xs-lh);
+  font-weight: var(--w-bold);
+  font-stretch: 112%;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.chip-accent {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent-press);
+}
+.chip-ok {
+  background: var(--ok-wash);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.chip-audio {
+  background: var(--audio-wash);
+  border-color: var(--audio);
+  color: var(--audio);
+}
+.chip-muted {
+  border-color: var(--divider);
+  color: var(--fg-subtle);
+}
+
+/* ---------- the live dot ----------
+   Opacity only: compositor-only, never triggers layout or paint while capture
+   is running. */
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: live-pulse 1.6s var(--e-soft) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
+
+/* ---------- icons ----------
+   `icon()` emits an <svg> sized in the call; these rules only place it. */
+.ic {
+  display: block;
+  flex: none;
+}
+.ic-slot {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* ---------- the stage ----------
+   The one dark surface, and it does not flip with the theme. */
+.stage {
+  background: var(--stage);
+  color: var(--stage-fg);
+}
+
+/* ---------- window drag strip ----------
+   `titleBarStyle: 'hiddenInset'` leaves the traffic lights over our chrome, so
+   every window reserves this strip and marks its own controls no-drag. */
+.titlebar {
+  height: 38px;
+  flex: none;
+  -webkit-app-region: drag;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.no-drag,
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-app-region: no-drag;
+}

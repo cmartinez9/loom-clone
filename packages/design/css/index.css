@@ -1,0 +1,6 @@
+/* The whole design system in one import: faces and scale, then tokens, then the
+   component primitives. Order matters — `tokens.css` sets `body { font: … }` from
+   variables `type.css` declares. */
+@import './type.css';
+@import './tokens.css';
+@import './components.css';

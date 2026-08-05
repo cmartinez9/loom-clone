@@ -1,0 +1,49 @@
+# CI.
+#
+# macOS runner, because this is a macOS-only app (captain decision 4) and the
+# phase 0 gate — killing a process mid-write and proving no torn file — is a
+# statement about APFS and macOS process semantics, not about "some filesystem".
+# Running it on Linux would pass without testing the thing we claim.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Test
+        run: npm test
+
+      # Proves the shell actually builds into a runnable app, which is the other
+      # half of the phase 0 deliverable. Packaging (electron-builder) is not run
+      # here; `apps/main/test/identity.test.ts` asserts its contract instead.
+      - name: Build
+        run: npm run build

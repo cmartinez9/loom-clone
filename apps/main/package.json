@@ -1,0 +1,11 @@
+{
+  "name": "@loom/main",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Electron main process: window registry, ProjectStore (the sole disk writer), loom:// protocol, IPC.",
+  "dependencies": {
+    "@loom/format": "0.1.0",
+    "@loom/ipc": "0.1.0"
+  }
+}

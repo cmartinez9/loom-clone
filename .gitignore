@@ -47,3 +47,13 @@ yarn-error.log*
 
 # Claude Code
 .claude/settings.local.json
+
+# Electron build output
+dist/
+release/
+
+# no-mistakes
+.no-mistakes/
+
+# Screenshots from scripts/screenshot.cjs
+shots/

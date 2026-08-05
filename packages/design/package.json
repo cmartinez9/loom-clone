@@ -1,0 +1,16 @@
+{
+  "name": "@loom/design",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pressroom — the loom-clone design system: tokens, type, icons, self-hosted fonts.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./css": "./css/index.css",
+    "./css/*": "./css/*",
+    "./fonts/*": "./fonts/*"
+  }
+}

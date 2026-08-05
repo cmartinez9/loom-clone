@@ -1,0 +1,17 @@
+{
+  "name": "@loom/format",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The loom-clone on-disk project format: schemas, types, migrations, atomic writes, journal replay.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./fs": {
+      "types": "./src/fs/index.ts",
+      "default": "./src/fs/index.ts"
+    }
+  }
+}

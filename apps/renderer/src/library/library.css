@@ -1,0 +1,262 @@
+/* ============================================================================
+   Library window — Direction A, "Pressroom"
+
+   The reference is `data/loom-design/a-export.html`: a sheet of paper with a
+   serif masthead, mono facts, and objects defined by 1.5px ink keylines. There
+   is no gradient, no blur, no translucency and no shadow inside the window —
+   a shadow here would mean "this floats above your desktop", which a list row
+   does not.
+   ============================================================================ */
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sheet {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--sp-6) var(--sp-7);
+  max-width: 1040px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ---------- masthead ---------- */
+.masthead {
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-4);
+  margin-bottom: var(--sp-5);
+  border-bottom: var(--line) solid var(--keyline);
+}
+
+.kicker {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.kicker-dim {
+  color: var(--fg-subtle);
+}
+
+h1.t-d1 {
+  margin: 0 0 6px;
+}
+
+.lede {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--ui-lg);
+  line-height: 1.55;
+}
+
+/* Machine values are set in Martian Mono — the one place monospace is used as
+   UI chrome, and never for prose. */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+  margin: var(--sp-4) 0 0;
+}
+.facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.facts dt {
+  font-family: var(--font-ui);
+  font-size: var(--ui-xs);
+  line-height: var(--ui-xs-lh);
+  font-weight: var(--w-bold);
+  font-stretch: 112%;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+.facts dd {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: var(--num-sm);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  max-width: 46ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- toolbar ---------- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+
+/* ---------- rows ---------- */
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-3);
+  background: var(--bg-raised);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+/* The stage is the one dark surface, and it does not flip with the theme —
+   footage is judged against a constant ground in both modes. */
+.poster {
+  flex: none;
+  width: 104px;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  background: var(--stage);
+  color: var(--stage-fg-2);
+  border-right: var(--line) solid var(--keyline);
+}
+.row-damaged .poster {
+  color: var(--accent);
+}
+
+.row-body {
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-3) 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+.row-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.row-name {
+  font-size: var(--ui-lg);
+  font-weight: var(--w-bold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-family: var(--font-num);
+  font-size: var(--num-sm);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-subtle);
+}
+.row-meta .sep {
+  color: var(--fg-faint);
+}
+
+.row-note {
+  font-family: var(--font-ui);
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+  color: var(--fg-muted);
+  max-width: 62ch;
+}
+.row-damaged .row-note {
+  color: var(--accent-press);
+}
+
+.row-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3) 0 0;
+}
+
+/* Destruction is a line item, not a modal (design report §10). Asking for the
+   second click swaps this row's controls in place, with the consequence spelled
+   out beside them — no dialog to dismiss on reflex. */
+.confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3) 0 var(--sp-3);
+  border-left: var(--line-thin) solid var(--divider);
+  background: var(--accent-wash);
+  align-self: stretch;
+}
+.confirm-text {
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+  color: var(--accent-press);
+  max-width: 24ch;
+}
+
+.btn-danger {
+  color: var(--danger);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-wash);
+  border-color: var(--danger);
+}
+
+/* ---------- empty and error states ---------- */
+.empty {
+  border: var(--line) dashed var(--divider);
+  border-radius: var(--r-lg);
+  padding: var(--sp-6) var(--sp-5);
+  text-align: center;
+  color: var(--fg-muted);
+}
+.empty .t-d3 {
+  margin: 0 0 6px;
+  color: var(--fg);
+}
+.empty p {
+  margin: 0 auto;
+  max-width: 52ch;
+  font-size: var(--ui);
+  line-height: 1.6;
+}
+.empty .where {
+  display: inline-block;
+  margin-top: var(--sp-4);
+  font-family: var(--font-num);
+  font-size: var(--num-sm);
+  font-stretch: 78%;
+  color: var(--fg-subtle);
+}
+
+.failure {
+  border: var(--line) solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--danger-wash);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  color: var(--accent-press);
+  font-size: var(--ui);
+  line-height: 1.5;
+}

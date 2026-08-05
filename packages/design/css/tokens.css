@@ -1,0 +1,217 @@
+/* ============================================================================
+   loom-clone — design tokens (RECOMMENDED DIRECTION: "PRESSROOM")
+   Drop-in CSS custom properties. No build step, no preprocessor.
+
+   Usage:
+     <link rel="stylesheet" href="type.css">     <!-- @font-face + type scale -->
+     <link rel="stylesheet" href="tokens.css">   <!-- this file -->
+
+   Theme:
+     Follows the OS by default via prefers-color-scheme.
+     Force with <html data-theme="light"> or <html data-theme="dark">.
+
+   The one rule worth restating: THE STAGE IS ALWAYS DARK.
+   --stage-* never flips with the theme. Video is judged against a constant
+   ground in both modes, the way a lightbox is a constant regardless of the
+   room. Only the chrome around it changes.
+   ============================================================================ */
+
+:root {
+  /* ---------- raw ramps (do not use directly in components) ---------- */
+  --paper-100: #FBF8EF;
+  --paper-200: #F4F0E4;
+  --paper-300: #E8E2D1;
+  --paper-400: #DBD4BE;
+  --paper-500: #C8C0A9;
+
+  --ink-900: #17150E;
+  --ink-700: #2A2718;
+  --ink-600: #4A4639;
+  --ink-500: #837C68;
+  --ink-400: #B3AB94;
+
+  --night-900: #100E09;
+  --night-800: #17150F;
+  --night-700: #221F16;
+  --night-600: #2E2A1E;
+  --night-500: #3D3828;
+  --night-400: #55503C;
+
+  --vermilion-600: #A82E0A;
+  --vermilion-500: #DC3F12;
+  --vermilion-400: #F2542A;
+  --vermilion-100: #F7DED4;
+  --vermilion-900: #4A1706;
+
+  --pine-600: #164134;
+  --pine-500: #1E5745;
+  --pine-400: #2C7A61;
+  --pine-300: #58A98D;
+  --pine-100: #D6E5DE;
+
+  --ochre-600: #8F5F0F;
+  --ochre-500: #C1841A;
+  --ochre-400: #E0A233;
+  --ochre-100: #F2E4C6;
+
+  /* ---------- semantic roles — LIGHT ---------- */
+  --bg:            var(--paper-200);   /* app ground */
+  --bg-raised:     var(--paper-100);   /* panels, popovers, the recording bar */
+  --bg-sunken:     var(--paper-300);   /* headers, footers, rails */
+  --bg-deep:       var(--paper-400);   /* canvas mat, pressed states */
+
+  --fg:            var(--ink-900);     /* primary text, keylines */
+  --fg-muted:      var(--ink-600);     /* secondary text */
+  --fg-subtle:     var(--ink-500);     /* tertiary, disabled */
+  --fg-faint:      var(--ink-400);     /* ruler ticks, placeholders */
+
+  --keyline:       var(--ink-900);     /* the rule that defines an object */
+  --divider:       #C8C0A9;            /* rule inside an object */
+
+  --select-bg:     var(--ink-900);     /* selection is ink, inverted */
+  --select-fg:     var(--paper-100);
+
+  --accent:        var(--vermilion-500);  /* record. the brand. */
+  --accent-hover:  var(--vermilion-400);
+  --accent-press:  var(--vermilion-600);
+  --accent-fg:     #FFFFFF;
+  --accent-wash:   var(--vermilion-100);
+
+  --ok:            var(--pine-500);    /* armed, ready, confirmed, zoom keys */
+  --ok-wash:       var(--pine-100);
+  --audio:         var(--ochre-500);   /* waveforms and levels only */
+  --audio-wash:    var(--ochre-100);
+  --danger:        var(--vermilion-500);
+  --danger-wash:   var(--vermilion-100);
+
+  /* Hard offset shadow. Zero blur, ALWAYS.
+     A shadow means "this floats above your desktop" and nothing else.
+     Panels inside a window get keylines, never elevation. */
+  --lift-sm: 2px 2px 0 var(--keyline);
+  --lift:    3px 3px 0 var(--keyline);
+  --lift-lg: 5px 5px 0 var(--keyline);
+
+  /* ---------- the stage — theme-invariant ---------- */
+  --stage:       var(--night-800);
+  --stage-2:     var(--night-700);
+  --stage-3:     var(--night-600);
+  --stage-fg:    var(--paper-200);
+  --stage-fg-2:  #A79E86;
+  --stage-fg-3:  #6B6455;
+  --stage-rule:  var(--night-500);
+
+  /* ---------- form ---------- */
+  --r-xs: 4px; --r-sm: 7px; --r-md: 12px; --r-lg: 18px; --r-xl: 24px; --r-pill: 999px;
+  --line: 1.5px;        /* object-defining keyline */
+  --line-thin: 1px;     /* internal divider */
+
+  /* ---------- density ---------- */
+  --row:   30px;   /* timeline lane */
+  --ctrl:  30px;   /* standard control */
+  --ctrl-lg: 38px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+
+  /* ---------- motion ----------
+     HARD RULE: nothing on the input path animates.
+     Press, toggle, scrub, playhead, waveform redraw are all --t-instant.
+     Duration is spent only on things arriving or leaving. */
+  --t-instant: 0ms;
+  --t-tap:     90ms;
+  --t-hover:  120ms;
+  --t-enter:  180ms;
+  --t-panel:  240ms;
+
+  --e-out:  cubic-bezier(0.16, 1, 0.3, 1);      /* entering */
+  --e-soft: cubic-bezier(0.4, 0, 0.2, 1);       /* state crossfade */
+  --e-snap: cubic-bezier(0.34, 1.7, 0.44, 1);   /* record button + toggles ONLY */
+
+  color-scheme: light;
+}
+
+/* ---------- semantic roles — DARK ----------
+   Same five hues, same form language, same motion. Only the chrome inverts.
+   Keylines become a warm mid-grey: pure paper-on-night is too high-contrast to
+   put a 1.5px rule around every object. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        var(--night-900);
+    --bg-raised: var(--night-800);
+    --bg-sunken: var(--night-700);
+    --bg-deep:   var(--night-600);
+
+    --fg:        #EFEADC;
+    --fg-muted:  #A79E86;
+    --fg-subtle: #7A7360;
+    --fg-faint:  #55503C;
+
+    --keyline:   #554F3A;
+    --divider:   #35311F;
+
+    --select-bg: #EFEADC;
+    --select-fg: var(--night-900);
+
+    --accent:       var(--vermilion-400);
+    --accent-hover: #FF6A42;
+    --accent-press: var(--vermilion-500);
+    --accent-wash:  var(--vermilion-900);
+
+    --ok:         var(--pine-300);
+    --ok-wash:    var(--pine-600);
+    --audio:      var(--ochre-400);
+    --audio-wash: #4A3410;
+    --danger:     var(--vermilion-400);
+    --danger-wash:var(--vermilion-900);
+
+    /* In dark, the hard shadow is pure black — the keyline is too light to
+       read as a cast shadow. The offset and zero blur are unchanged. */
+    --lift-sm: 2px 2px 0 #000;
+    --lift:    3px 3px 0 #000;
+    --lift-lg: 5px 5px 0 #000;
+
+    color-scheme: dark;
+  }
+}
+
+/* Explicit override wins over the media query in both directions. */
+:root[data-theme="dark"] {
+  --bg: var(--night-900); --bg-raised: var(--night-800);
+  --bg-sunken: var(--night-700); --bg-deep: var(--night-600);
+  --fg: #EFEADC; --fg-muted: #A79E86; --fg-subtle: #7A7360; --fg-faint: #55503C;
+  --keyline: #554F3A; --divider: #35311F;
+  --select-bg: #EFEADC; --select-fg: var(--night-900);
+  --accent: var(--vermilion-400); --accent-hover: #FF6A42;
+  --accent-press: var(--vermilion-500); --accent-wash: var(--vermilion-900);
+  --ok: var(--pine-300); --ok-wash: var(--pine-600);
+  --audio: var(--ochre-400); --audio-wash: #4A3410;
+  --danger: var(--vermilion-400); --danger-wash: var(--vermilion-900);
+  --lift-sm: 2px 2px 0 #000; --lift: 3px 3px 0 #000; --lift-lg: 5px 5px 0 #000;
+  color-scheme: dark;
+}
+
+/* ---------- base ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--w-ui) var(--ui)/var(--ui-lh) var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus is one ring everywhere, and it is the keyline colour — not a browser blue. */
+:where(button, [role="button"], a, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+/* Respect the OS. A recorder is used by people who get motion sick from
+   the thing they are recording; do not add to it. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
