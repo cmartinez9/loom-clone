@@ -33,13 +33,14 @@
  */
 
 import {
+  BrowserWindow,
   desktopCapturer,
   ipcMain,
   screen,
   session,
   systemPreferences,
-  type BrowserWindow,
   type IpcMainEvent,
+  type IpcMainInvokeEvent,
   type WebContents,
 } from 'electron';
 import {
@@ -62,7 +63,7 @@ import {
   type RecordingId,
 } from '@loom/format';
 import type { ProjectStore } from '../project-store.ts';
-import type { WindowRegistry } from '../windows.ts';
+import type { WindowRegistry, WindowRole } from '../windows.ts';
 import { finalizedRecordingDoc, provisionalRecordingDoc } from './recording-doc.ts';
 
 /** Phase 1 captures the screen and nothing else. */
@@ -70,6 +71,32 @@ const TRACK = 'screen';
 
 /** A chunk larger than this is not a frame; it is a bug or an attack. */
 const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Chunks held while the part they belong to is still being created.
+ *
+ * The capture page sends `meta` and the first chunk for the *same* frame in the
+ * same tick, and opening a part is two awaits long, so the first chunk always
+ * arrives before there is a file to write it to. That chunk is the initial
+ * keyframe; discarding it would leave the part starting on a delta frame and
+ * nothing before the next keyframe — a second of footage — decodable. So they are
+ * held, in arrival order, and written the moment `beginMediaPart` resolves.
+ *
+ * The bound is what keeps a `meta` that never lands from turning into unbounded
+ * memory, which is also exactly the memory a `SIGKILL` would cost. Overrunning it
+ * ends the recording loudly rather than quietly dropping footage.
+ */
+const MAX_HELD_CHUNKS = 300;
+
+/**
+ * Windows that may drive a recording.
+ *
+ * The preload is shared by every window, so *which* window may use
+ * `recorder.start`/`stop` is decided here, against the sender — the same rule the
+ * capture channels get, for the same reason. The HUD is the control surface; the
+ * library is where a recording is asked for.
+ */
+const RECORDER_ROLES: readonly WindowRole[] = ['library', 'recorder-hud'];
 
 export interface RecorderSessionOptions {
   store: ProjectStore;
@@ -88,6 +115,8 @@ interface Active {
   /** Written before the first frame; replaced with real numbers at finalize. */
   provisional: RecordingDoc | null;
   part: number | null;
+  /** Chunks that arrived before the part was open, in the order they arrived. */
+  held: ChunkMsg[];
   firstPtsUs: number | null;
   lastEndUs: number;
   droppedFrames: number;
@@ -130,12 +159,14 @@ export class RecorderSession {
       this.options.windows.show('recorder-hud');
     });
 
-    ipcMain.handle(CHANNEL.recorderStart, async (_event, raw: unknown) => {
+    ipcMain.handle(CHANNEL.recorderStart, async (event, raw: unknown) => {
+      this.requireRecorderWindow(event);
       const id = await this.enqueue(() => this.start(captureOptions(raw)));
       return { recordingId: id };
     });
 
-    ipcMain.handle(CHANNEL.recorderStop, async () => {
+    ipcMain.handle(CHANNEL.recorderStop, async (event) => {
+      this.requireRecorderWindow(event);
       await this.enqueue(() => this.stop());
     });
 
@@ -217,6 +248,7 @@ export class RecorderSession {
         options,
         provisional: null,
         part: null,
+        held: [],
         firstPtsUs: null,
         lastEndUs: 0,
         droppedFrames: 0,
@@ -316,7 +348,10 @@ export class RecorderSession {
             endedEarly: endReason !== null,
             ...(endReason === null ? {} : { endReason }),
           },
-          active.droppedFrames + (report?.framesDropped ?? 0),
+          // The capture page is the only thing that counts drops, so its report is
+          // the number. `active.droppedFrames` is the last one it sent, and stands
+          // in only when no end report arrived at all.
+          report?.framesDropped ?? active.droppedFrames,
           new Date().toISOString(),
         ),
       );
@@ -449,6 +484,7 @@ export class RecorderSession {
     active.provisional = { ...provisional };
     active.part = meta.part;
     if (opened.file !== file) throw new Error('the part path moved under the recording document');
+    this.appendHeldChunks(active);
   }
 
   /**
@@ -458,10 +494,14 @@ export class RecorderSession {
    * holds, and blocking the IPC handler would build a queue in this process —
    * which is precisely the memory a `SIGKILL` takes. The rejection is not dropped;
    * the first failed write ends the recording.
+   *
+   * A chunk whose part is not open yet is held rather than discarded — see
+   * {@link MAX_HELD_CHUNKS}. The very first chunk of a recording is always one of
+   * these, and it is always the keyframe the part has to begin with.
    */
   private onChunk(raw: unknown): void {
     const active = this.active;
-    if (active?.part == null) return;
+    if (active === null) return;
     let chunk: ChunkMsg;
     try {
       chunk = chunkMessage(raw);
@@ -469,8 +509,35 @@ export class RecorderSession {
       this.failActive(error);
       return;
     }
-    if (chunk.track !== TRACK || chunk.part !== active.part) return;
+    if (chunk.track !== TRACK) return;
 
+    if (active.part === null) {
+      if (active.held.length >= MAX_HELD_CHUNKS) {
+        this.failActive(
+          new Error(
+            `${String(MAX_HELD_CHUNKS)} frames arrived before the part could be opened; ` +
+              'the capture page never produced a usable decoder configuration',
+          ),
+        );
+        return;
+      }
+      active.held.push(chunk);
+      return;
+    }
+    if (chunk.part !== active.part) return;
+    this.appendChunk(active, chunk);
+  }
+
+  /** Write, in arrival order, whatever came in while `beginMediaPart` was resolving. */
+  private appendHeldChunks(active: Active): void {
+    const held = active.held;
+    active.held = [];
+    for (const chunk of held) {
+      if (chunk.part === active.part) this.appendChunk(active, chunk);
+    }
+  }
+
+  private appendChunk(active: Active, chunk: ChunkMsg): void {
     active.firstPtsUs ??= chunk.timestampUs;
     active.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
 
@@ -643,6 +710,21 @@ export class RecorderSession {
     if (this.captureContentsId !== null && sender.id === this.captureContentsId) return true;
     const capture = this.options.windows.get('capture');
     return capture !== undefined && !capture.isDestroyed() && capture.webContents.id === sender.id;
+  }
+
+  /**
+   * Refuse a recording command from a window that has no business driving one.
+   *
+   * Same rule as {@link fromCaptureWindow}, and for the same reason: the preload
+   * hands `window.loom` to every window, so a capability is only ever as narrow as
+   * main makes it against the sender.
+   */
+  private requireRecorderWindow(event: IpcMainInvokeEvent): void {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const role = window === null ? undefined : this.options.windows.roleOf(window);
+    if (role === undefined || !RECORDER_ROLES.includes(role)) {
+      throw new Error('this window may not drive a recording');
+    }
   }
 
   /** The first write that fails ends the recording; later ones are already covered. */

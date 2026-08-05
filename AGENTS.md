@@ -31,7 +31,7 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break the capture writer four ways; each must fail the gate
+npm run verify:mutation   # break the capture writer five ways; each must fail the gate
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)

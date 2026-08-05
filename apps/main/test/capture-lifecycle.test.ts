@@ -290,6 +290,24 @@ describe('a recording that crashed', () => {
     expect(crashed.map((s) => s.id)).toEqual([id]);
   });
 
+  it('is still found when its own recovery pass was interrupted', async () => {
+    const id = await startRecording(30);
+    await store.close(id);
+    // `recoverBundle` writes `needs-recovery` before it repairs anything, so a
+    // launch that died in the middle of one — or a repair that failed on I/O —
+    // leaves exactly this. Excluding it here would mean nothing ever tried again,
+    // and the library would offer to repair on open something no code repairs.
+    await store.openProject(id);
+    await store.setState(id, 'needs-recovery');
+    await store.close(id);
+
+    expect((await store.listCrashed()).map((s) => s.id)).toEqual([id]);
+    const report = await store.recoverBundle(id);
+    expect(report.recovered).toBe(true);
+    expect(report.frameCount).toBe(30);
+    expect((await store.list()).find((s) => s.id === id)?.state).toBe('editable');
+  });
+
   it('recovers to editable and says how much came back', async () => {
     const id = await startRecording(60);
     await store.close(id);

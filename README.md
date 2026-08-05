@@ -17,8 +17,9 @@ killed.** Frames are encoded in a hidden renderer, cross IPC as encoded chunks, 
 are written by the main process as fragmented-MP4 fragments the instant they exist,
 so a `SIGKILL` costs at most the frame in flight. `npm test` proves it by killing a
 real recording mid-stream and measuring what comes back — the gate is 95%, measured
-at 98.7–99.4% — and `npm run verify:mutation` proves the gate itself by breaking the
-writer four ways and requiring the test to fail each time.
+at 96.4–99.4% across three kill points — and `npm run verify:mutation` proves the
+gate itself by breaking the writer five ways and requiring the test to fail each
+time.
 
 ## Requirements
 

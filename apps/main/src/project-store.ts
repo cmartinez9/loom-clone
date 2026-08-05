@@ -551,10 +551,20 @@ export class ProjectStore {
    * `state: "recording"` or `"finalizing"` found at launch means we crashed — the
    * state is written before the first frame precisely so this is *detected* rather
    * than inferred from what happens to be on disk (§7.1).
+   *
+   * `"needs-recovery"` is here too, and is the case people forget: {@link
+   * recoverBundle} writes that state *before* it repairs anything, so a launch that
+   * dies mid-recovery — or a repair that fails on I/O — leaves a bundle stuck in it.
+   * Excluding it would mean no later launch ever tried again, which is a bundle the
+   * library says will be repaired when opened and nothing repairs. Recovery is
+   * idempotent by construction (it rebuilds from the bytes on disk rather than from
+   * what it did last time), so retrying it costs a scan and nothing else.
    */
   async listCrashed(): Promise<RecordingSummary[]> {
     const summaries = await this.list();
-    return summaries.filter((s) => s.state === 'recording' || s.state === 'finalizing');
+    return summaries.filter(
+      (s) => s.state === 'recording' || s.state === 'finalizing' || s.state === 'needs-recovery',
+    );
   }
 
   /**

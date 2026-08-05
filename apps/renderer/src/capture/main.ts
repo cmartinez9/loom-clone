@@ -284,6 +284,12 @@ function onEncoded(chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadat
  * not emitted, and those frames are already on the user's screen-recording clock.
  * Dropping them to stop a few milliseconds sooner would be losing footage the
  * capture already succeeded at.
+ *
+ * `current.ending` is what makes this idempotent — a stop, a track that ended and
+ * an encoder error can all arrive at once, and only the first gets past it. The
+ * module-level `session` is cleared *after* the flush, because {@link onEncoded}
+ * routes on it: clearing it first would discard exactly the frames the flush
+ * exists to collect.
  */
 async function end(reason: CaptureEndReason, detail?: string | null): Promise<void> {
   const current = session;
@@ -291,7 +297,6 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
   if (current.ending !== null) return;
   current.ending = reason;
   current.endMessage = detail ?? null;
-  session = null;
 
   try {
     await current.reader.cancel().catch(() => undefined);
@@ -300,6 +305,7 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
   } catch (error) {
     current.endMessage ??= describe(error);
   } finally {
+    if (session === current) session = null;
     await release(current);
   }
 

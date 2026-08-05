@@ -149,20 +149,27 @@ export class MediaPartWriter {
    * Order matters: media bytes and their `fsync` first, then the sidecar. The
    * sidecar describes the media, so a sidecar durable ahead of the media it
    * describes would be a lie a reader could act on.
+   *
+   * The `finally` is not decoration. `ProjectStore` drops this writer from its map
+   * before calling us, so if the sidecar write threw and the descriptor were left
+   * open, nothing could ever reclaim it — not `close(id)`, not `abortAllMediaParts`.
+   * {@link abort} has always been safe this way; so is this.
    */
   async finalize(endTimestampUs?: number): Promise<FinalizedPart> {
-    const summary = await this.enqueue(async (handle) => {
-      const last = this.writer.flush(endTimestampUs);
-      if (last !== null) {
-        await this.writeAll(handle, last.bytes);
-        this.frames.push(last.frame);
-      }
-      await handle.sync();
-      await writeAtomic(this.options.indexPath, indexBytes(this.indexDoc()));
-      return this.summary();
-    });
-    await this.close();
-    return summary;
+    try {
+      return await this.enqueue(async (handle) => {
+        const last = this.writer.flush(endTimestampUs);
+        if (last !== null) {
+          await this.writeAll(handle, last.bytes);
+          this.frames.push(last.frame);
+        }
+        await handle.sync();
+        await writeAtomic(this.options.indexPath, indexBytes(this.indexDoc()));
+        return this.summary();
+      });
+    } finally {
+      await this.close();
+    }
   }
 
   /**
