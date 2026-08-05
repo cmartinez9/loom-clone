@@ -296,10 +296,15 @@ a gap lives in `recording.json`, never in the container.
   the host's share runs ahead of the regression's (22.16% against 3.75%) and the middle
   band survives. Do not close it with a factor on the share — that is the ceiling's own
   circularity one level up. It is safe to keep because it can only ever fire on a phase
-  that already missed §8. **A control paced per
-  frame is a bug**: half a budget per frame is a whole thread on a 120 Hz panel, and
-  the version that did that starved decode until every scrub target timed out at four
-  seconds. It is paced by the wall clock instead.
+  that already missed §8. **That surviving band is a known limit, not an oversight**: it
+  is reached only on a host saturated enough that §8's number is deferred anyway, and
+  closing it means matching the control's _exposure_ to the frame's own cost instead of
+  fixing it at half a budget — filed as `loom-gate-exposure-matched-control`, and the
+  only correct way in. Measured on a quiet host the gate fails that mutation in three
+  runs of four; before any of this it failed none of three.
+  **A control paced per frame is a bug**: half a budget per frame is a whole thread on a
+  120 Hz panel, and the version that did that starved decode until every scrub target
+  timed out at four seconds. It is paced by the wall clock instead.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
