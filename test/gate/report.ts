@@ -15,6 +15,14 @@ export interface PhaseMetrics {
   /** Frames measured. */
   count: number;
   maxMs: number;
+  /**
+   * Which frame of the phase {@link maxMs} was, or `-1` when nothing was measured.
+   *
+   * `FrameMetrics` has always tracked this — *"so a failure can name when it
+   * happened"* — and the report used to drop it, which is the difference between
+   * "the gate failed" and "the gate failed on the second frame of the phase".
+   */
+  maxAt: number;
   meanMs: number;
   p50Ms: number;
   p99Ms: number;

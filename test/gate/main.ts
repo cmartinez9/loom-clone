@@ -77,7 +77,7 @@ async function finish(report: GateReport, code: number): Promise<void> {
 
 /** A report for a failure that happened before the harness could produce one. */
 function failureReport(error: string): GateReport {
-  const empty = { count: 0, maxMs: 0, meanMs: 0, p50Ms: 0, p99Ms: 0, overBudget: 0 };
+  const empty = { count: 0, maxMs: 0, maxAt: -1, meanMs: 0, p50Ms: 0, p99Ms: 0, overBudget: 0 };
   return {
     ok: false,
     error,

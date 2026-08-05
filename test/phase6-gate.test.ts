@@ -212,9 +212,13 @@ function describeRun(report: GateReport): string {
       `${report.fixture.longestHoldSec.toFixed(2)}s, ${String(report.fixture.byteLength)} bytes)`,
     `viewport     ${report.viewport.join('x')}`,
     `warmup       n=${String(report.warmup.count)} max=${report.warmup.maxMs.toFixed(2)}ms`,
-    `scrub        n=${String(report.scrub.count)} max=${report.scrub.maxMs.toFixed(2)}ms ` +
+    // `@frame` says *which* frame the worst one was, which is what tells a phase-wide
+    // regression apart from one particular frame of the run doing something else.
+    `scrub        n=${String(report.scrub.count)} max=${report.scrub.maxMs.toFixed(2)}ms` +
+      `@${String(report.scrub.maxAt)} ` +
       `p99=${report.scrub.p99Ms.toFixed(2)}ms over-budget=${String(report.scrub.overBudget)}`,
-    `play         n=${String(report.play.count)} max=${report.play.maxMs.toFixed(2)}ms ` +
+    `play         n=${String(report.play.count)} max=${report.play.maxMs.toFixed(2)}ms` +
+      `@${String(report.play.maxAt)} ` +
       `p99=${report.play.p99Ms.toFixed(2)}ms over-budget=${String(report.play.overBudget)}`,
     `frames       peak-live=${String(report.peakLiveFrames)}/${String(report.ringCapacity)} ` +
       `at-end=${String(report.liveFramesAtEnd)} decoded=${String(report.decodedFrames)} seeks=${String(report.seeks)}`,

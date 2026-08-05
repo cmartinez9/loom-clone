@@ -16,7 +16,15 @@ import { describe, expect, it } from 'vitest';
 import { shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
 
-const EMPTY_METRICS = { count: 0, maxMs: 0, meanMs: 0, p50Ms: 0, p99Ms: 0, overBudget: 0 };
+const EMPTY_METRICS = {
+  count: 0,
+  maxMs: 0,
+  maxAt: -1,
+  meanMs: 0,
+  p50Ms: 0,
+  p99Ms: 0,
+  overBudget: 0,
+};
 
 /** A clean, passing report; each case below spoils exactly one thing. */
 function report(overrides: Partial<GateReport> = {}): GateReport {

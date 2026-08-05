@@ -262,6 +262,15 @@ a gap lives in `recording.json`, never in the container.
   unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
   re-measure, then decide. If a genuine frame over budget turns up on the fixed
   instrument, that is a decision to take with real numbers, not a threshold to adjust.
+  The instrument has since needed fixing a second time, the same way: **the gate's own
+  readback was the largest cost inside the window it was measuring.** A whole 1440p
+  frame out of the GPU is 14.7 MB synchronously plus an in-place flip of the same —
+  measured at 20.8, 29.6 and 97.8 ms on an M5 Pro where every actual frame of the run
+  cost 0.2–0.5 ms — and the gate did it eighteen times inside the scrub and play
+  windows, with a CPU-backed 30 MB `texImage2D` due on the next frame. Both readers
+  now read a slice (one row for the frame code, 8×8 px for the settle probe), which is
+  what the settle probe's own comment had said to do since phase 6. Anything added to
+  those windows has to be cheap, or it is not measuring the preview any more.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
