@@ -69,11 +69,12 @@ jobs:
       - name: Build
         run: npm run build
 
-  # A gate is only worth what its mutation proof says it is: break the capture path
-  # one way at a time — phase 1's crash gate, phase 3's A/V sync gate and phase 4's
-  # camera-unplug gate — and every one has to make a test fail. Kept off the per-push
-  # job because it re-runs the crash test ten times; a pull request is the point at
-  # which "do these gates still measure anything" has to be answered.
+  # A gate is only worth what its mutation proof says it is: break capture and the
+  # timeline model one way at a time — phase 1's crash gate, phase 3's A/V sync gate,
+  # phase 4's camera-unplug gate and phase 7's two — and every one has to make a test
+  # fail. Kept off the per-push job because it re-runs the crash test ten times; a
+  # pull request is the point at which "do these gates still measure anything" has to
+  # be answered.
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: macos-14

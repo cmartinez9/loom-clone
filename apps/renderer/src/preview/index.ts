@@ -1,9 +1,11 @@
 /**
- * Screen-only preview: the consumer that wires `@loom/decode` to `@loom/compositor`.
+ * Screen-only preview: the consumer that wires `@loom/decode` and `@loom/edl` to
+ * `@loom/compositor`.
  *
- * Architecture report §8, phase 6. The editor window that hosts this arrives with
- * phase 7; until then its only caller is the phase-6 gate harness, which is the
- * point — the gate exercises the shipping loop, not a copy of it.
+ * Architecture report §8, phase 6. Phase 7 landed the timeline model the loop now
+ * resolves through, but the editor window that hosts it is still ahead: until then
+ * its only caller is the phase-6 gate harness, which is the point — the gate
+ * exercises the shipping loop, not a copy of it.
  */
 
 export { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
