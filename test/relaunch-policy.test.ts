@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { CONTROL_PERIOD_MS, CONTROL_TARGET_MS } from './gate/budget-control.ts';
 import { shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
 
@@ -26,6 +27,17 @@ const EMPTY_METRICS = {
   overBudget: 0,
 };
 
+/** A control that found the host healthy: half a budget of arithmetic, taking it. */
+const HEALTHY_CONTROL = {
+  targetMs: CONTROL_TARGET_MS,
+  periodMs: CONTROL_PERIOD_MS,
+  count: 962,
+  maxMs: 8.6,
+  maxAt: 411,
+  meanMs: 8.4,
+  overBudget: 0,
+};
+
 /** A clean, passing report; each case below spoils exactly one thing. */
 function report(overrides: Partial<GateReport> = {}): GateReport {
   return {
@@ -35,6 +47,7 @@ function report(overrides: Partial<GateReport> = {}): GateReport {
       glRenderer: 'ANGLE (Apple, ANGLE Metal Renderer)',
       scheduler: 'raf',
       hardwareEncode: 'prefer-hardware',
+      hardwareDecode: 'yes',
       electron: '',
       chrome: '',
     },
@@ -56,6 +69,19 @@ function report(overrides: Partial<GateReport> = {}): GateReport {
     warmup: { ...EMPTY_METRICS, count: 12 },
     scrub: { ...EMPTY_METRICS, count: 112 },
     play: { ...EMPTY_METRICS, count: 962 },
+    control: {
+      scrub: { ...HEALTHY_CONTROL, count: 112, maxAt: 40 },
+      play: HEALTHY_CONTROL,
+    },
+    gpuCost: {
+      scrub: { count: 38, medianMs: 0.312, maxMs: 0.44 },
+      play: { count: 310, medianMs: 0.309, maxMs: 0.51 },
+    },
+    slowCompositor: {
+      injectedMs: 66.67,
+      frames: { ...EMPTY_METRICS, count: 24, maxMs: 67.2, maxAt: 3, overBudget: 24 },
+      control: { ...HEALTHY_CONTROL, count: 24, maxAt: 9 },
+    },
     scrubChecks: [],
     playSamples: [],
     settleSamples: 40,
@@ -89,6 +115,45 @@ describe('the gate relaunches only for a lost context', () => {
     ['black frames while settling', { settleBlackFrames: 7 }],
     ['a black-detection control that did not fire', { controlDetectsBlack: false }],
     ['mostly misses', { playHits: 10, playMisses: 900 }],
+    // The environment control is a *reading* too, on both of its branches. A host
+    // that could not hold the budget is reported once and a compositor that could not
+    // hold the ceiling that host earned fails once; neither buys another launch.
+    [
+      'on a host whose control could not hold the budget',
+      {
+        play: { ...EMPTY_METRICS, count: 962, maxMs: 21.4, overBudget: 2 },
+        control: {
+          scrub: { ...HEALTHY_CONTROL, count: 112, maxAt: 40 },
+          play: { ...HEALTHY_CONTROL, maxMs: 84.1, overBudget: 3 },
+        },
+      },
+    ],
+    [
+      'holding a slow-compositor control that did not fail',
+      { slowCompositor: { injectedMs: 0, frames: EMPTY_METRICS, control: HEALTHY_CONTROL } },
+    ],
+    // A host that cannot run the product's workload is a reading about the *host*, and
+    // the surest reading this gate takes: no hardware decoder does not become one on a
+    // second launch. It defers §8's absolute number to the tracking bound and reports
+    // the figures; relaunching for it would be re-rolling a machine, not a measurement.
+    [
+      'on a host with no hardware decoder and a CPU-backed composite',
+      {
+        environment: {
+          glRenderer: 'ANGLE (Apple, Apple Paravirtual device)',
+          scheduler: 'raf' as const,
+          hardwareEncode: 'prefer-software',
+          hardwareDecode: 'no' as const,
+          electron: '',
+          chrome: '',
+        },
+        gpuCost: {
+          scrub: { count: 30, medianMs: 3.309, maxMs: 6.1 },
+          play: { count: 290, medianMs: 3.28, maxMs: 7.4 },
+        },
+        play: { ...EMPTY_METRICS, count: 380, maxMs: 17.2, maxAt: 186, overBudget: 1 },
+      },
+    ],
     ['not ok', { ok: false }],
     ['an error', { error: 'no WebGL2 context; the gate cannot run' }],
     [

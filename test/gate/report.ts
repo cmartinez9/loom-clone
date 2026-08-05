@@ -3,13 +3,20 @@
  *
  * Shared by the harness that produces it, the Electron main that writes it out and
  * the vitest file that asserts on it. Dependency-free on purpose: it is imported
- * into three different bundles with three different module formats.
+ * into three different bundles with three different module formats. The one import
+ * below is `import type` and so is erased entirely — `ControlPhase` is declared beside
+ * the control that produces it, and re-exported here so a reader of the report shape
+ * has the whole document in one place.
  *
  * Architecture report §8, phase 6's gate: *"Scrub and play a 4K fixture with no
  * frame over 16 ms at 1440p viewport; live `VideoFrame` count never exceeds the ring
  * cap."* Both halves are here, and so is everything needed to tell a real pass from
  * a vacuous one — because a preview that renders nothing renders it very quickly.
  */
+
+import type { ControlPhase, GpuProfile, HardwareDecode } from './budget-control.ts';
+
+export type { ControlPhase, GpuProfile, HardwareDecode };
 
 export interface PhaseMetrics {
   /** Frames measured. */
@@ -52,6 +59,16 @@ export interface GateEnvironment {
   /** `'raf'` when `requestAnimationFrame` drove the loop, `'timer'` for the fallback. */
   scheduler: 'raf' | 'timer';
   hardwareEncode: string;
+  /**
+   * Whether this host has a hardware-backed decoder for the fixture's own config.
+   *
+   * Half of {@link GateReport.gpuCost}'s question and the structural half: every Mac
+   * this ships to has one, and a host without one hands the compositor CPU-backed
+   * frames, which is a different piece of work rather than a slower one. Probed with
+   * `VideoDecoder.isConfigSupported`, never inferred from the renderer string — a
+   * device name is exactly the tuned-to-one-host shortcut this must not become.
+   */
+  hardwareDecode: HardwareDecode;
   electron: string;
   chrome: string;
 }
@@ -68,6 +85,43 @@ export interface GateFixture {
   /** The longest hold between two frames. Proves the fixture is genuinely VFR. */
   longestHoldSec: number;
   encodeMs: number;
+}
+
+/**
+ * The measured environment control, and the proof that it is not an escape hatch.
+ *
+ * `test/gate/budget-control.ts` is the whole argument. In short: this is one half of
+ * the branch condition — the other is {@link GateReport.gpuCost} beside
+ * {@link GateEnvironment.hardwareDecode} — and §8's bound is the compositor's to meet
+ * on any host that runs the product's workload *and* whose control clears it. Where
+ * this control does not clear it, the shortfall is reported with the measured figure
+ * and the compositor is held to the ceiling that control just demonstrated.
+ */
+export interface GateBudgetControl {
+  /** Measured in the scrub phase's own frames. */
+  scrub: ControlPhase;
+  /** Measured in the play phase's own frames. */
+  play: ControlPhase;
+}
+
+/**
+ * CONTROL. A deliberately-slowed compositor path, measured by the same instrument in
+ * the same run, with the environment control still spinning beside it.
+ *
+ * The control above defers §8's absolute number on a host that cannot hold it. This is
+ * what keeps that honest: a compositor that cannot hold the budget must miss §8's number
+ * on every host, whichever branch that host took — and must miss the measured ceiling
+ * too wherever the host was well enough for that ceiling to be able to see it.
+ * `test/phase6-gate.test.ts` asserts the first on both branches and the second on the
+ * branch where it holds; `test/budget-control.test.ts` pins where that is.
+ */
+export interface GateSlowCompositor {
+  /** Milliseconds burned inside `render`, on top of the real composite. */
+  injectedMs: number;
+  /** What the shipping `PreviewLoop` measured while that was happening. */
+  frames: PhaseMetrics;
+  /** The environment control, measured in those same frames. */
+  control: ControlPhase;
 }
 
 export interface GateReport {
@@ -91,10 +145,27 @@ export interface GateReport {
   peakLiveFrames: number;
   /** Live frames once everything is closed. Must be zero. */
   liveFramesAtEnd: number;
-  /** Frames rendered before measuring — shader link, first 4K upload, FBO warm. */
+  /**
+   * Frames rendered before measuring — shader link, first 4K upload, FBO warm.
+   *
+   * Ends at the first composited picture, not at a frame count: the first upload is
+   * the cost this phase exists to hold, and it arrives when the decoder delivers.
+   */
   warmup: PhaseMetrics;
   scrub: PhaseMetrics;
   play: PhaseMetrics;
+  /** What this host could sustain, measured in the very frames above. */
+  control: GateBudgetControl;
+  /**
+   * What the composite cost the GPU, in those same frames.
+   *
+   * The other half of "is this host the product's workload" — see
+   * `test/gate/budget-control.ts`. A tenth of §8's whole frame is the line, and it is
+   * only ever consulted on a host already shown to have no hardware decoder.
+   */
+  gpuCost: { scrub: GpuProfile; play: GpuProfile };
+  /** CONTROL for that control: a compositor that cannot hold the budget. */
+  slowCompositor: GateSlowCompositor;
   scrubChecks: ScrubCheck[];
   /**
    * Composites sampled *while* each scrub was settling, not once it had settled.

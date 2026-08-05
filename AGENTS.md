@@ -39,6 +39,7 @@ node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame 
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 node scripts/smoke-capture.mjs --synthetic       # ...with a canvas and an oscillator instead
 node packages/sampler/native/build.mjs --force   # rebuild only the native sampler
+node scripts/gate-load.mjs 20 45                 # the only way to load the box for a gate run
 ./dist/native/loom-input-sampler probe           # what input capture can do right now
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
 ```
@@ -254,23 +255,48 @@ a gap lives in `recording.json`, never in the container.
   `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
   number is painted into every frame and read back out of the framebuffer, so a fast
   blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
-  passes. It judges the 16 ms budget on **the single worst frame, with no allowance**,
-  in both phases. That bound was once relaxed to a p99 plus a one-in-a-hundred
-  allowance on the strength of a CI run reporting a 19 ms frame — and the next round
-  proved that run came off a lost WebGL context returning stale pixels (below), so the
-  number was partly fabricated. **A measurement from an instrument since proven
-  unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
-  re-measure, then decide. If a genuine frame over budget turns up on the fixed
-  instrument, that is a decision to take with real numbers, not a threshold to adjust.
-  The instrument has since needed fixing a second time, the same way: **the gate's own
-  readback was the largest cost inside the window it was measuring.** A whole 1440p
-  frame out of the GPU is 14.7 MB synchronously plus an in-place flip of the same —
-  measured at 20.8, 29.6 and 97.8 ms on an M5 Pro where every actual frame of the run
-  cost 0.2–0.5 ms — and the gate did it eighteen times inside the scrub and play
-  windows, with a CPU-backed 30 MB `texImage2D` due on the next frame. Both readers
-  now read a slice (one row for the frame code, 8×8 px for the settle probe), which is
-  what the settle probe's own comment had said to do since phase 6. Anything added to
-  those windows has to be cheap, or it is not measuring the preview any more.
+  passes, and judges the 16 ms budget on **the single worst frame, with no allowance**.
+  **What it claims, and on what hardware.** CI verifies **correctness and
+  regression-detection**; it does **not** certify the frame budget. The budget is
+  certified on **target hardware**, where it holds with roughly **50× margin** —
+  0.20–0.30 ms per frame against 16.67 ms. The reason is structural, not runner speed:
+  every Mac this ships to has a hardware H.264 decoder and ANGLE-Metal binds the decoded
+  frame's IOSurface rather than copying it (§12.4, 0.000 ms), while a virtualised runner
+  has no hardware decoder at all and every composite there carries a ~30 MB CPU-backed
+  `texImage2D`. That is a **different workload, roughly 25× heavier per frame, that no
+  user of this app will ever run** — not a slower version of the product's frame — so how
+  often it trips 16.67 ms says nothing about the compositor.
+  **`FRAME_BUDGET_MS` and §8's four assertions are untouched, and strict on any host that
+  can represent the product** — which is every machine a contributor runs `npm test` on. A
+  phase is refused them only where the host structurally cannot: no hardware-backed decode
+  **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch is not
+  a pass. It detects regressions by **rate** — the compositor may miss the budget no
+  oftener than the host missed it in the same frames — and bounds single frames only by
+  §8's frame scaled by the per-frame work this host was measured doing.
+  **The derivations are not repeated here.** `test/gate/budget-control.ts`'s module
+  docblock and its per-constant comments own them: the deferred branch's two doors and why
+  they carry different bounds, the scaled envelope and the regression class it cannot
+  catch, the spin-resolution floor that must never be pinned to a number, the end-stamped
+  control pacing every asserted sample count is read off, and why none of these is a
+  threshold tuned to a run. Read it before touching any of them;
+  `test/budget-control.test.ts` pins the policy — including that a real regression fails on
+  both branches — and `test/phase6-gate.test.ts` judges the run.
+  **Two facts no file owns.** The deferred branch **cannot be exercised end to end on
+  Apple Silicon**: `--disable-accelerated-video-decode` flips the decode probe, but
+  ANGLE-Metal binds decoded frames as IOSurfaces whatever the decode preference, and four
+  levers up to `use-angle swiftshader` failed to reproduce the runner's frame — do not go
+  looking for a fifth; override the harness's reported `gpuCost` medians for one run
+  instead. And the surviving gap under sustained load, where the tracking ceiling rises
+  with the regression it judges and the host's own over-budget share outruns the
+  regression's, is filed as `loom-gate-exposure-matched-control` — **do not close it with a
+  factor on the share**, which is that same circularity one level up.
+  **Load this gate's box with `scripts/gate-load.mjs` and never with an ad-hoc
+  `while :; do :; done &`.** Every reading taken under load needs the box saturated on
+  purpose, and the ad-hoc version of that once left 42 orphaned spinners pinning this
+  shared machine for nine hours and put a fabricated flake rate in this file — which the
+  re-measurement, nine consecutive quiet runs and nine passes, retracted. A `trap` does not
+  cover it, because the failure case _is_ the parent dying before its cleanup runs; the
+  helper's spinners each carry their own deadline and exit on it unwatched.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
@@ -280,6 +306,17 @@ a gap lives in `recording.json`, never in the container.
   measured **across the same window**, never before or after it — the same no-op timer
   has reported 25.4 Hz beside one run and 80.7 Hz beside the next, and CI once failed
   a sampler handed 44 Hz against a control that found 69.5 Hz in a lull moments later.
+  The same rule holds **one level out, in the workflow**, and was being broken there
+  while it was kept here: `push: ['**']` beside `pull_request` started two full runs of
+  `ci.yml` per commit on any branch with an open PR, in two different `concurrency`
+  groups (`refs/heads/<branch>` and `refs/pull/<n>/merge`), so neither cancelled the
+  other and both ran the phase-6 gate simultaneously against one shared pool of macOS
+  hosts. Both runs of d26016c overlapped for the whole of both gates and each reported
+  one frame over budget — 21.3 ms and 123.6 ms against p99s of 3.5 ms and 6.2 ms. A
+  branch is now covered by its `pull_request` run alone (`synchronize` fires on every
+  push, and it measures the merge result); `push` is kept for `main`. Before adding a
+  second macOS job that runs concurrently with `verify`, note that these three gates
+  cannot tell a busy host apart from the defect they exist to catch.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and
@@ -308,6 +345,28 @@ a gap lives in `recording.json`, never in the container.
   `child-process-gone` so a context that goes anyway names what died. The gate prints
   its own log on a bad run for the same reason: how far it got is the difference
   between a host that took the instrument away and a defect that always will.
+- **A pre-empted renderer is not a slow frame, and the instrument cannot tell them
+  apart.** The frame budget is `performance.now()` around the frame body, so anything
+  the OS scheduler takes away lands on whichever frame it interrupted. Chromium
+  deprioritises a renderer it believes nobody is looking at — and on a CI runner there
+  is no display to be visible on, so the gate's window qualifies and its process drops
+  to background priority on a shared runner. Setting `backgroundThrottling: false` in
+  `webPreferences` does not cover that; it is Blink's timer and rAF throttling, not the
+  priority the OS scheduler reads. `test/gate/main.ts` therefore also runs with
+  `--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows` and
+  `--disable-background-timer-throttling`. How it was identified, and the shape to look
+  for if it comes back: time the frame body segment by segment and the pause turns up
+  **inside calls that cannot spend a millisecond** — 10–20 ms readings inside
+  `drawArrays`, inside `present`, and inside `resolve()` (0.2 µs of work, pinned by
+  `packages/edl/test/hot-path.test.ts`). That last one is phase 7's: the measurement was
+  taken on `fm/loom-p7`, and on a branch before it the equivalent segment is the four
+  state assignments `PreviewLoop` makes where phase 7 calls `resolve(compiled, t)`. CI
+  reported the same event on a slower host as one 177 ms frame against a p99 of 7.9 ms,
+  on the commit whose other run of that SHA passed. Thirty runs with hardware decode disabled — so every frame carries CI's 30 MB
+  CPU-backed upload — then held 2.6 ms worst with no run short of a frame, against
+  three pauses in thirty-odd runs of the same arrangement without them. None of this
+  makes anything faster or measures anything different: work still arrives as a number
+  over budget, on the worst frame, with no allowance.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is

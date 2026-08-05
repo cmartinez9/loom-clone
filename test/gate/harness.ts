@@ -23,18 +23,46 @@
  *     decoder produces.
  *  3. **Warmup is measured and reported separately**, rather than being quietly
  *     excluded. Shader link and the first 4K texture upload are one-time costs; the
- *     numbers are in the report either way.
+ *     numbers are in the report either way. It ends at the first *composited picture*
+ *     rather than at a frame count, because that upload arrives when the decoder
+ *     delivers rather than on a frame number — see the warmup below.
  *  4. **The composite is sampled all the way through each scrub's settle window**,
  *     not only once it has settled. That window is composited entirely out of
  *     `frameAt` misses, so it is where §4.3's "a miss holds the previous frame"
  *     either happens or does not — and a run that flashed the background through
  *     every backward scrub would otherwise pass 1, 2 and 3 unchanged. The detector
  *     has a control of its own at the end of the run.
+ *
+ * ## Making the *budget* mean something on a host that cannot hold it
+ *
+ * §8's bound is asserted on the worst frame with no allowance, which is right, and on
+ * a shared paravirtual CI host that bound has been decided by the host rather than by
+ * the renderer. So an environment control runs inside the measured phases' own frames —
+ * a fixed span of arithmetic with none of this code in it, paced by the wall clock from
+ * the end of one spin to the start of the next — and a second control runs a
+ * deliberately-slowed compositor through the same instrument so the first can never
+ * become an escape hatch.
+ * `budget-control.ts` is the whole argument; `test/phase6-gate.test.ts` is where both
+ * are judged.
  */
 
 import { Compositor, contentRect, describeRenderer } from '@loom/compositor';
 import { DemuxIndex, fetchByteRangeReader, hasWebCodecs, SourceReader } from '@loom/decode';
-import { PreviewLoop, type FrameScheduler } from '../../apps/renderer/src/preview/index.ts';
+import {
+  PreviewLoop,
+  type FrameScheduler,
+  type PreviewSource,
+} from '../../apps/renderer/src/preview/index.ts';
+import {
+  burn,
+  controlSink,
+  EnvironmentControl,
+  GpuCostProbe,
+  NO_CONTROL,
+  NO_GPU_PROFILE,
+  SLOW_COMPOSITE_MS,
+  type HardwareDecode,
+} from './budget-control.ts';
 import { CODE_BIT_COUNT, codeCellCenter, FIXTURE_SIZE, generate4kPart } from './fixture.ts';
 import type { GateBridge, GateReport, PhaseMetrics, PlaySample, ScrubCheck } from './report.ts';
 
@@ -60,6 +88,13 @@ const PROBE_PX = 8;
  * exactly 0. The threshold sits far from both.
  */
 const BLACK_LUMA = 8;
+/**
+ * How long the control for the environment control runs for.
+ *
+ * Twenty-four frames at {@link SLOW_COMPOSITE_MS} apiece costs under two seconds, and is
+ * enough for the gate to insist the phase really ran rather than judging two frames.
+ */
+const SLOW_CONTROL_FRAMES = 24;
 
 const logs: string[] = [];
 function log(message: string): void {
@@ -151,8 +186,20 @@ async function chooseScheduler(): Promise<{ scheduler: FrameScheduler; mode: 'ra
   };
 }
 
-/** A scheduler wrapper that lets the gate await "n more frames". */
-function counting(inner: FrameScheduler): {
+/**
+ * A scheduler wrapper that lets the gate await "n more frames", and offers each of
+ * them to the environment control.
+ *
+ * `afterFrame` is called immediately after the measured frame body returns, inside the
+ * same scheduler dispatch. That placement is the whole value of the control: it is
+ * exposed to the same host, in the same window, in the same frames as the measurement
+ * it is a control for, rather than describing a machine from a second earlier. See
+ * `budget-control.ts`.
+ */
+function counting(
+  inner: FrameScheduler,
+  afterFrame: () => void,
+): {
   scheduler: FrameScheduler;
   frames: () => number;
   after: (n: number) => Promise<void>;
@@ -163,6 +210,7 @@ function counting(inner: FrameScheduler): {
     request: (callback) =>
       inner.request((nowMs) => {
         callback(nowMs);
+        afterFrame();
         frames += 1;
         for (let i = waiters.length - 1; i >= 0; i--) {
           const waiter = waiters[i];
@@ -220,6 +268,31 @@ function readFrameCode(row: Uint8Array, viewport: [number, number]): number {
   return value;
 }
 
+/**
+ * Whether this host can decode the fixture in hardware — asked of the platform, not of
+ * the renderer string.
+ *
+ * `prefer-hardware` is a *requirement* to `isConfigSupported`, not a hint: the UA
+ * answers unsupported when it cannot provide an accelerated decoder for this exact
+ * config. That is the same question `fixture.ts` asks of the encoder, and it is the
+ * structural discriminator `budget-control.ts` argues from — every Mac this ships to
+ * answers yes, and a host that answers no is handing the compositor CPU-backed frames.
+ *
+ * A probe that throws answers `'unknown'`, which reads as representative: an instrument
+ * that could not measure must tighten this gate rather than loosen it.
+ */
+async function probeHardwareDecode(config: VideoDecoderConfig): Promise<HardwareDecode> {
+  try {
+    const support = await VideoDecoder.isConfigSupported({
+      ...config,
+      hardwareAcceleration: 'prefer-hardware',
+    });
+    return support.supported === true ? 'yes' : 'no';
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function run(): Promise<GateReport> {
   if (!hasWebCodecs()) throw new Error('this renderer has no WebCodecs; the gate cannot run');
 
@@ -230,6 +303,9 @@ async function run(): Promise<GateReport> {
     `encoded ${String(part.frameCount)} frames (${String(part.bytes.byteLength)} bytes, ` +
       `${part.hardwareAcceleration}) in ${part.encodeMs.toFixed(0)} ms`,
   );
+
+  const hardwareDecode = await probeHardwareDecode(part.config);
+  log(`hardware-backed decode for this fixture: ${hardwareDecode}`);
 
   await window.gate.write(MEDIA_PATH, part.bytes);
   await window.gate.write(
@@ -275,7 +351,15 @@ async function run(): Promise<GateReport> {
   log(`webgl2 renderer: ${glRenderer}`);
 
   const chosen = await chooseScheduler();
-  const clock = counting(chosen.scheduler);
+  // Armed per phase, below. Until then it is inert and costs a branch a frame.
+  const control = new EnvironmentControl();
+  // Sampled before the spin, so the phase's GPU cost is read off the driver's own
+  // completed queries rather than out of a window the control has already occupied.
+  const gpuCost = new GpuCostProbe(compositor.gpuTimer);
+  const clock = counting(chosen.scheduler, () => {
+    gpuCost.sample();
+    control.tick();
+  });
   const trouble: { loopError: Error | null; stalled: string | null } = {
     loopError: null,
     stalled: null,
@@ -361,15 +445,47 @@ async function run(): Promise<GateReport> {
   loop.seek(0);
   loop.start();
   await clock.after(WARMUP_FRAMES);
-  const warmup = snapshot(loop.metrics);
-  loop.metrics.reset();
-
-  // "The picture went black" only means something once there is a picture.
+  // ...and then on, until there is actually a picture — which is also what makes "the
+  // picture went black" mean anything below, since it only does once there has been one.
+  //
+  // A frame count alone cannot end the warmup, because the one-time cost the warmup
+  // exists to hold does not arrive on a frame number. It arrives when decode delivers
+  // the first frame, and the first thing `Compositor.render` does with one is allocate
+  // and upload a 30 MB texture that no driver has a recycled buffer for yet. Where that
+  // lands relative to a fixed twelve frames is a race between this host's decoder and
+  // this host's refresh rate, and on the paravirtual runner it has landed on both sides
+  // of the line in two runs of the *same commit*: 25.70 ms billed to warmup on the run
+  // that passed, and 24.50 ms billed to scrub frame 5 on the run that failed — that
+  // frame being the first composite of the run either way, with the ones before it
+  // drawing nothing because there was nothing yet to draw. One number, one cost, and the
+  // budget §8 asserts with no allowance decided by which side of a frame counter it fell.
+  //
+  // So the warmup ends where it has always said it ends: with the first picture on
+  // screen and its upload inside the phase that reports it. Bounded, like every other
+  // wait here, so a picture that never arrives fails on the scrub readbacks below rather
+  // than hanging.
   const litAt = performance.now();
+  let litAfterFrames = 0;
   while (centreLuma() <= BLACK_LUMA && performance.now() - litAt < SETTLE_TIMEOUT_MS) {
     await clock.after(1);
+    litAfterFrames += 1;
   }
-  log(`first picture composited after ${(performance.now() - litAt).toFixed(0)} ms of warmup`);
+  log(
+    `first picture composited ${String(litAfterFrames)} frames / ` +
+      `${(performance.now() - litAt).toFixed(0)} ms past the ${String(WARMUP_FRAMES)} ` +
+      `warmup frames; the warmup phase holds it either way`,
+  );
+  const warmup = snapshot(loop.metrics);
+  loop.metrics.reset();
+  // Armed at exactly the frame the scrub phase's own metrics start from, and offered
+  // every scheduler dispatch from here on — it spins on the ones a wall clock says to,
+  // not on every one, because the display's refresh rate is not this gate's to choose.
+  // What it does cost, at most a fifth of the thread, is deliberate: a control that
+  // costs nothing is never exposed to what it exists to catch, since a host stall lands
+  // inside a window in proportion to how much of the clock that window occupies.
+  // `budget-control.ts` argues both halves.
+  control.arm();
+  gpuCost.arm();
 
   // ---- scrub -------------------------------------------------------------
   const scrubChecks: ScrubCheck[] = [];
@@ -425,7 +541,11 @@ async function run(): Promise<GateReport> {
   }
   await clock.after(2);
   const scrub = snapshot(loop.metrics);
+  const scrubControl = control.snapshot();
+  const scrubGpu = gpuCost.snapshot();
   loop.metrics.reset();
+  control.reset();
+  gpuCost.reset();
 
   // ---- play --------------------------------------------------------------
   const hitsBefore = reader.stats.hits;
@@ -450,7 +570,70 @@ async function run(): Promise<GateReport> {
     }
   }
   const play = snapshot(loop.metrics);
+  const playControl = control.snapshot();
+  const playGpu = gpuCost.snapshot();
+  control.reset();
+  // The slow-compositor phase below is driven by a stub source that never has a frame,
+  // so `Compositor.render` returns before the timer query opens and there is nothing
+  // there to sample. Stopped rather than left running, so that stays true by construction.
+  gpuCost.disarm();
   loop.stop();
+  // Read here, not at the end: the slow-compositor control below moves them.
+  const playHits = reader.stats.hits - hitsBefore;
+  const playMisses = reader.stats.misses - missesBefore;
+
+  // ---- the control for the environment control ---------------------------
+  // The two phases above defer §8's absolute number to a host that can hold it, on the
+  // evidence of a spin measured in their own frames. That deferral is only honest
+  // while a compositor that has actually got slow still fails — otherwise the deferred
+  // branch is a way to pass by compositing badly on a busy machine, and the bound
+  // proves nothing anywhere. So the shipping `PreviewLoop` is run again here over a
+  // deliberately-slowed compositor: the real one, wrapped so that `render` burns
+  // {@link SLOW_COMPOSITE_MS} on top of the composite it just did, inside the frame
+  // body the gate measures. The environment control keeps spinning beside it, and
+  // `test/phase6-gate.test.ts` requires the same judgement that excused the host to
+  // fail this. Nothing in `packages/compositor` is touched; what is proved is the
+  // gate's judgement, which is the thing that changed.
+  //
+  // Its source is a stub that never has a frame, so `Compositor.render` holds the
+  // previous picture (§4.3) and the decoder, the ring and the reader's statistics are
+  // left exactly as playback finished with them.
+  const slowSource: PreviewSource = {
+    frameAt: () => null,
+    prime: () => Promise.resolve(),
+    release: () => undefined,
+    hasSourceFrameAt: () => false,
+    liveFrames: 0,
+    ringCapacity: reader.ringCapacity,
+  };
+  const slowLoop = new PreviewLoop({
+    compositor: {
+      render: (frames, state) => {
+        compositor.render(frames, state);
+        burn(SLOW_COMPOSITE_MS);
+      },
+      present: () => {
+        compositor.present();
+      },
+    },
+    screen: slowSource,
+    durationSec: part.durationSec,
+    scheduler: clock.scheduler,
+  });
+  control.arm();
+  slowLoop.start();
+  await clock.after(SLOW_CONTROL_FRAMES);
+  slowLoop.stop();
+  const slowFrames = snapshot(slowLoop.metrics);
+  const slowControl = control.snapshot();
+  control.disarm();
+  log(
+    `control: a compositor slowed by ${SLOW_COMPOSITE_MS.toFixed(2)} ms measured ` +
+      `${slowFrames.maxMs.toFixed(2)} ms worst over ${slowFrames.count} frames, beside a ` +
+      `${slowControl.maxMs.toFixed(2)} ms worst spin`,
+  );
+  // Read once, so nothing above can be optimised away as a loop with no result.
+  log(`control spins accumulated ${controlSink().toFixed(3)}`);
 
   // ---- the control for the count above -----------------------------------
   // Phase 6's first cut cleared the render target before it discovered it had no
@@ -480,6 +663,7 @@ async function run(): Promise<GateReport> {
       glRenderer,
       scheduler: chosen.mode,
       hardwareEncode: part.hardwareAcceleration,
+      hardwareDecode,
       electron: navigator.userAgent,
       chrome: navigator.userAgent,
     },
@@ -501,13 +685,20 @@ async function run(): Promise<GateReport> {
     warmup,
     scrub,
     play,
+    control: { scrub: scrubControl, play: playControl },
+    gpuCost: { scrub: scrubGpu, play: playGpu },
+    slowCompositor: {
+      injectedMs: SLOW_COMPOSITE_MS,
+      frames: slowFrames,
+      control: slowControl,
+    },
     scrubChecks,
     settleSamples,
     settleBlackFrames,
     controlDetectsBlack,
     playSamples,
-    playHits: stats.hits - hitsBefore,
-    playMisses: stats.misses - missesBefore,
+    playHits,
+    playMisses,
     decodedFrames: stats.decoded,
     seeks: stats.seeks,
     bytesRead: stats.bytesRead,
@@ -541,6 +732,7 @@ run().then(
         glRenderer: 'unknown',
         scheduler: 'raf',
         hardwareEncode: 'unknown',
+        hardwareDecode: 'unknown',
         electron: navigator.userAgent,
         chrome: navigator.userAgent,
       },
@@ -562,6 +754,13 @@ run().then(
       warmup: EMPTY_METRICS,
       scrub: EMPTY_METRICS,
       play: EMPTY_METRICS,
+      control: { scrub: NO_CONTROL, play: NO_CONTROL },
+      gpuCost: { scrub: NO_GPU_PROFILE, play: NO_GPU_PROFILE },
+      slowCompositor: {
+        injectedMs: SLOW_COMPOSITE_MS,
+        frames: EMPTY_METRICS,
+        control: NO_CONTROL,
+      },
       scrubChecks: [],
       settleSamples: 0,
       settleBlackFrames: 0,

@@ -24,6 +24,7 @@ import { registerLoomScheme } from '../../apps/main/src/protocol.ts';
 import { serveFile } from '../../apps/main/src/media-reader.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
+import { NO_CONTROL, NO_GPU_PROFILE } from './budget-control.ts';
 import type { GateReport } from './report.ts';
 
 interface Args {
@@ -86,6 +87,7 @@ function failureReport(error: string): GateReport {
       glRenderer: 'unknown',
       scheduler: 'raf',
       hardwareEncode: 'unknown',
+      hardwareDecode: 'unknown',
       electron: process.versions.electron ?? '',
       chrome: process.versions.chrome ?? '',
     },
@@ -107,6 +109,9 @@ function failureReport(error: string): GateReport {
     warmup: empty,
     scrub: empty,
     play: empty,
+    control: { scrub: NO_CONTROL, play: NO_CONTROL },
+    gpuCost: { scrub: NO_GPU_PROFILE, play: NO_GPU_PROFILE },
+    slowCompositor: { injectedMs: 0, frames: empty, control: NO_CONTROL },
     scrubChecks: [],
     settleSamples: 0,
     settleBlackFrames: 0,
@@ -153,6 +158,36 @@ app.commandLine.appendSwitch('force-gpu-mem-available-mb', '2048');
 // measurement. Nothing about what is measured changes; a genuinely hung GPU still
 // fails, on the frame budget, with the frame named.
 app.commandLine.appendSwitch('disable-gpu-watchdog');
+// The same argument, one layer down, and it is the other half of that story.
+//
+// Chromium deprioritises a renderer it believes nobody is looking at: a hidden or
+// occluded window has its process moved to background priority and its timers
+// throttled. On a CI runner there is no display to be visible on, so the gate's
+// window qualifies, and a renderer at background priority on a shared runner is
+// pre-empted for tens of milliseconds at a time. `webPreferences.background-
+// Throttling: false` does not cover this — that is Blink's own timer and rAF
+// throttling, not the process priority the OS scheduler reads.
+//
+// A pre-emption is not a slow frame, and the instrument cannot tell them apart: it
+// brackets the frame body with `performance.now()`, so whatever the scheduler takes
+// away lands on whichever frame it interrupted. Measured on `fm/loom-p7`, where phase
+// 7's timeline lands, with the frame body timed segment by segment: 10–20 ms readings
+// inside `drawArrays`, inside `present`, and inside that branch's `resolve()` — 0.2 µs
+// of work, pinned there by `packages/edl/test/hot-path.test.ts`, and on this branch the
+// four state assignments `PreviewLoop` still does in its place. None of those can spend
+// a millisecond doing anything. CI reported the same event on a slower host as a single
+// 177 ms frame against a p99 of 7.9 ms, on the same commit whose other run passed.
+//
+// Over thirty runs of this gate on one machine with hardware decode disabled — so
+// every frame carries CI's 30 MB CPU-backed upload — the worst frame was 2.6 ms and
+// no run lost a single scheduled frame. The thirty-odd runs of the same arrangement
+// without these switches produced three with a 10–20 ms pause in them, and a short
+// frame count to match.
+// Nothing about what is measured changes and nothing is made faster: real work still
+// arrives as a number over budget, on the worst frame, with no allowance.
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
 
 void app.whenReady().then(async () => {
   protocol.handle(LOOM_SCHEME, async (request) => {
