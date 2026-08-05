@@ -272,6 +272,15 @@ a gap lives in `recording.json`, never in the container.
   now read a slice (one row for the frame code, 8×8 px for the settle probe), which is
   what the settle probe's own comment had said to do since phase 6. Anything added to
   those windows has to be cheap, or it is not measuring the preview any more.
+  And a third time, in the same family: **the warmup ends at the first composited
+  picture, not after `WARMUP_FRAMES`.** The one-time cost it exists to hold is the first
+  4K `texImage2D`, for which no driver has a recycled 30 MB buffer yet, and that arrives
+  when the decoder delivers rather than on a frame number — so a fixed count raced it.
+  One commit produced both outcomes on the paravirtual runner minutes apart: 25.70 ms
+  billed to warmup on the run that passed, 24.50 ms billed to scrub frame 5 on the run
+  that failed, the same single composite either way, beside a 2.00 ms p99 and a
+  control that never exceeded 8.80 ms. Neither the budget nor the environment control
+  can tell those apart, and neither should have to.
   A genuine over-budget frame did eventually turn up on the fixed instrument — 17.60 ms
   of 360 beside a 5.50 ms p99, on a host that also stretched the warmup frame to 39 ms —
   and the decision taken was **not** to touch `FRAME_BUDGET_MS`, add a tolerance or

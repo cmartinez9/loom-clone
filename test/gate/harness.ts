@@ -23,7 +23,9 @@
  *     decoder produces.
  *  3. **Warmup is measured and reported separately**, rather than being quietly
  *     excluded. Shader link and the first 4K texture upload are one-time costs; the
- *     numbers are in the report either way.
+ *     numbers are in the report either way. It ends at the first *composited picture*
+ *     rather than at a frame count, because that upload arrives when the decoder
+ *     delivers rather than on a frame number — see the warmup below.
  *  4. **The composite is sampled all the way through each scrub's settle window**,
  *     not only once it has settled. That window is composited entirely out of
  *     `frameAt` misses, so it is where §4.3's "a miss holds the previous frame"
@@ -407,6 +409,36 @@ async function run(): Promise<GateReport> {
   loop.seek(0);
   loop.start();
   await clock.after(WARMUP_FRAMES);
+  // ...and then on, until there is actually a picture — which is also what makes "the
+  // picture went black" mean anything below, since it only does once there has been one.
+  //
+  // A frame count alone cannot end the warmup, because the one-time cost the warmup
+  // exists to hold does not arrive on a frame number. It arrives when decode delivers
+  // the first frame, and the first thing `Compositor.render` does with one is allocate
+  // and upload a 30 MB texture that no driver has a recycled buffer for yet. Where that
+  // lands relative to a fixed twelve frames is a race between this host's decoder and
+  // this host's refresh rate, and on the paravirtual runner it has landed on both sides
+  // of the line in two runs of the *same commit*: 25.70 ms billed to warmup on the run
+  // that passed, and 24.50 ms billed to scrub frame 5 on the run that failed — that
+  // frame being the first composite of the run either way, with the ones before it
+  // drawing nothing because there was nothing yet to draw. One number, one cost, and the
+  // budget §8 asserts with no allowance decided by which side of a frame counter it fell.
+  //
+  // So the warmup ends where it has always said it ends: with the first picture on
+  // screen and its upload inside the phase that reports it. Bounded, like every other
+  // wait here, so a picture that never arrives fails on the scrub readbacks below rather
+  // than hanging.
+  const litAt = performance.now();
+  let litAfterFrames = 0;
+  while (centreLuma() <= BLACK_LUMA && performance.now() - litAt < SETTLE_TIMEOUT_MS) {
+    await clock.after(1);
+    litAfterFrames += 1;
+  }
+  log(
+    `first picture composited ${String(litAfterFrames)} frames / ` +
+      `${(performance.now() - litAt).toFixed(0)} ms past the ${String(WARMUP_FRAMES)} ` +
+      `warmup frames; the warmup phase holds it either way`,
+  );
   const warmup = snapshot(loop.metrics);
   loop.metrics.reset();
   // Armed at exactly the frame the scrub phase's own metrics start from, and offered
@@ -417,13 +449,6 @@ async function run(): Promise<GateReport> {
   // inside a window in proportion to how much of the clock that window occupies.
   // `budget-control.ts` argues both halves.
   control.arm();
-
-  // "The picture went black" only means something once there is a picture.
-  const litAt = performance.now();
-  while (centreLuma() <= BLACK_LUMA && performance.now() - litAt < SETTLE_TIMEOUT_MS) {
-    await clock.after(1);
-  }
-  log(`first picture composited after ${(performance.now() - litAt).toFixed(0)} ms of warmup`);
 
   // ---- scrub -------------------------------------------------------------
   const scrubChecks: ScrubCheck[] = [];

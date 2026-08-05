@@ -133,7 +133,12 @@ export interface GateReport {
   peakLiveFrames: number;
   /** Live frames once everything is closed. Must be zero. */
   liveFramesAtEnd: number;
-  /** Frames rendered before measuring — shader link, first 4K upload, FBO warm. */
+  /**
+   * Frames rendered before measuring — shader link, first 4K upload, FBO warm.
+   *
+   * Ends at the first composited picture, not at a frame count: the first upload is
+   * the cost this phase exists to hold, and it arrives when the decoder delivers.
+   */
   warmup: PhaseMetrics;
   scrub: PhaseMetrics;
   play: PhaseMetrics;
