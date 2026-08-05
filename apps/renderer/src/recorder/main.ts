@@ -31,6 +31,7 @@ const counts = must('counts');
 const recordButton = must('record') as HTMLButtonElement;
 const stopButton = must('stop') as HTMLButtonElement;
 const errorLine = must('error');
+const cameraLine = must('camera');
 
 function must(id: string): HTMLElement {
   const element = document.getElementById(id);
@@ -71,6 +72,8 @@ render({
   frameCount: 0,
   droppedFrames: 0,
   error: null,
+  camera: 'off',
+  cameraParts: 0,
 });
 
 function render(status: RecorderStatus): void {
@@ -91,10 +94,38 @@ function render(status: RecorderStatus): void {
   if (status.droppedFrames > 0) parts.push(`${String(status.droppedFrames)} dropped`);
   counts.textContent = live || status.phase === 'finalizing' ? parts.join(' · ') : '';
 
+  renderCamera(status);
+
   if (status.error !== null) {
     errorLine.textContent = status.error;
     errorLine.hidden = false;
   }
+}
+
+/**
+ * The camera banner. Architecture report §7.4 step 3, verbatim:
+ *
+ * > *"Camera disconnected — still recording screen and audio."*
+ *
+ * Non-modal, and it says both halves on purpose. A user whose camera falls out
+ * needs to know two things: that it happened, and that pressing stop now is not
+ * required. A banner that said only the first would send them to stop the recording
+ * they are still successfully making.
+ *
+ * It is a notice, not an error — the recording is fine — so it does not touch the
+ * error line, which is where a recording that actually failed says so.
+ */
+function renderCamera(status: RecorderStatus): void {
+  const recording = status.phase === 'recording' || status.phase === 'finalizing';
+  if (!recording || status.camera === 'off' || status.camera === 'live') {
+    cameraLine.hidden = true;
+    return;
+  }
+  cameraLine.textContent =
+    status.camera === 'lost'
+      ? 'Camera disconnected — still recording screen and audio.'
+      : 'Camera unavailable — still recording screen and audio.';
+  cameraLine.hidden = false;
 }
 
 function showError(error: unknown): void {

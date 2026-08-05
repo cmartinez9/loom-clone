@@ -68,7 +68,9 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    loom:// protocol, IPC.
 apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture page
-                   and the preview loop today; overlay and editor later.
+                   (screen in `capture/main.ts`, camera in `capture/webcam.ts`, the
+                   two audio tracks in `capture/audio.ts`) and the preview loop
+                   today; overlay and editor later.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -154,7 +156,7 @@ are lists of parts (`screen.000.mp4`) from day one, never a single file.
 ## Capture, in one paragraph
 
 A hidden renderer runs `getDisplayMedia` (video **and** `audio: 'loopback'`) and
-`getUserMedia` (the microphone) → `MediaStreamTrackProcessor` →
+`getUserMedia` (the microphone, and the camera) → `MediaStreamTrackProcessor` →
 `VideoEncoder`/`AudioEncoder`, and sends **encoded chunks** to main, which writes each one as its own
 `moof`+`mdat` fragment the instant it exists. One sample per fragment is the crash
 budget made explicit: a `SIGKILL` costs what this process still holds, so a fragment
@@ -170,6 +172,29 @@ are the same fragment layout in a `.m4a` (one AAC frame per fragment, no sidecar
 1024 samples is arithmetic, not an index), and their media timeline is contiguous:
 a gap lives in `recording.json`, never in the container.
 
+## Parts, and the camera
+
+**One acquisition of a device is one part.** The camera is what makes that real:
+unplugging it fires `ended`, which closes `webcam.000.mp4` with `endedEarly` and
+`endReason: 'device-lost'`, and a `devicechange` bringing the **same `deviceId`**
+back opens `webcam.001.mp4` with a `startTimeSec` of its own (§7.4). The hole
+between them lives in `recording.json` and is never concatenated out of the media —
+§5.4 mechanism 5, applied to pictures. `apps/renderer/src/capture/webcam.ts` owns
+that loop and nothing in it can fail the recording: §7.3's rule for the microphone
+is §7.4's rule for the camera, and `session.ts` draws the same split — the screen is
+`REFERENCE_TRACK` and only its failures reach `failActive`.
+
+A part that closes **while the recording continues** is the `capture.partEnded`
+message; main finalizes that file and its sidecar immediately, so a later crash
+costs the part that is open rather than both. The last part of each video track is
+still open at stop and is closed from `CaptureEndReport.video`. `startTimeSec` is
+deliberately **not** computed when a part closes — the reference track's epoch
+offset is not known until the capture page stops — so each part keeps its raw first
+timestamp and epoch offset and they are all placed in one pass at finalize, through
+`videoPartStartSec` (§5.4 mechanisms 2 and 3, the arithmetic `alignAudioPart`
+already used). The camera is opt-in: `webcamDeviceId` defaults to `null`, because
+opening one lights the hardware indicator and that should follow from a user asking.
+
 ## Sharp edges
 
 - **Audio and video capture clocks do not share an epoch.** Measured by
@@ -183,6 +208,15 @@ a gap lives in `recording.json`, never in the container.
   the trim in an `elst` edit list so both agree; a reader that pulls raw chunks out of
   a part instead of demuxing it has to apply `parseAudioInitSegment().encoderDelaySamples`
   itself.
+- **A track's in-flight state is registered before the first `await`, not after.**
+  Opening a part is two awaits long and frames keep arriving across them — that is
+  what `MAX_HELD_CHUNKS` is for. If the announcement path and the chunk path can each
+  create the state, the announcement finishes by publishing one whose held-chunk
+  buffer is empty and every frame that arrived while the file was being created is
+  gone: a second of footage per part, silently, with the recording simply starting
+  late. `videoTrack()` in `session.ts` is the get-or-create that closes it, and
+  `held-frames-dropped-while-a-part-opens` in `npm run verify:mutation` keeps it
+  closed.
 - **Every track announcement is a read-modify-write of one `recording.json`.** Three
   encoders announce themselves within milliseconds of each other, so `RecorderSession`
   serializes them on `metaChain`; without it the second write drops the first track,
@@ -382,11 +416,11 @@ a gap lives in `recording.json`, never in the container.
   `0`, and by `clicks.ndjson` existing only once the tap is live. Phase 10's auto-zoom
   is the consumer that breaks silently if either collapses.
 
-## Carried forward to phase 2: five things no dev run has verified
+## Carried forward to phase 2: seven things no dev run has verified
 
-Phases 1 and 3 shipped with these **unverified**, not verified-and-passing. They are
-obligations on phase 2's signed-bundle gate, and until that gate runs, no report may
-describe them as working:
+Phases 1, 3 and 4 shipped with these **unverified**, not verified-and-passing. They
+are obligations on phase 2's signed-bundle gate, and until that gate runs, no report
+may describe them as working:
 
 1. **`desktopCapturer` screen enumeration.**
 2. **`setDisplayMediaRequestHandler`'s frame authorisation** — that the real handler
@@ -401,6 +435,18 @@ describe them as working:
 5. **A real microphone's `startTimeSec`.** The epoch correction is exercised against
    Chromium's own clocks by `--synthetic`, and the residue snapped to zero there — but
    a real device has its own latency, and only a granted run can show it.
+6. **A real camera's `startTimeSec`, and its epoch.** `test/phase4-gate.test.ts`
+   drives the shipping capture page on a driven clock and a deliberately different
+   epoch, so the arithmetic is exercised; what no dev run has seen is what Chromium
+   stamps a real `getUserMedia` video track with, or how far a real camera opens
+   behind the screen. If that offset is larger than one audio buffer it will not snap,
+   and the bubble will be visibly late.
+7. **A physical unplug.** The gate's device loss is `ended` on a real `EventTarget`
+   and its reconnect is a real `devicechange` — the events macOS delivers — but
+   nothing has yet pulled a cable. What that would prove beyond the gate is the
+   platform's own behaviour: whether `ended` fires at all for the built-in camera,
+   how long `getUserMedia` refuses a device that has just re-enumerated, and whether
+   the same `deviceId` really comes back.
 
 Why they are open: a machine that has not granted Screen Recording to the _terminal_
 cannot run the leg that would prove any of them, and granting it to a dev binary

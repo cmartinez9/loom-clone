@@ -31,7 +31,7 @@ import { ProjectStore } from '../src/project-store.ts';
 import {
   finalizedRecordingDoc,
   provisionalRecordingDoc,
-  withScreenTrack,
+  withVideoPart,
 } from '../src/recorder/recording-doc.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
@@ -58,7 +58,7 @@ afterEach(async () => {
 
 function provisional(store: ProjectStore): RecordingDoc {
   const file = store.mediaRelativePath('screen', 0);
-  return withScreenTrack(
+  return withVideoPart(
     provisionalRecordingDoc({
       display: {
         id: 1,
@@ -82,11 +82,14 @@ function provisional(store: ProjectStore): RecordingDoc {
       },
     }),
     {
+      track: 'screen',
       file,
       index: file.replace(/\.mp4$/, '.index.json'),
       codec: 'avc1.64000d',
       size: [fixture.width, fixture.height],
       requestedFps: fixture.fps,
+      rateMode: 'variable',
+      startTimeSec: 0,
     },
   );
 }
@@ -168,8 +171,23 @@ describe('the documents capture writes', () => {
   it('fills in the real numbers at finalize without touching the rest', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
-      { screen: { durationSec: 10, frameCount: 300, observedFps: 30, endedEarly: false } },
-      2,
+      {
+        video: {
+          screen: {
+            droppedFrames: 2,
+            parts: [
+              {
+                part: 0,
+                startTimeSec: 0,
+                durationSec: 10,
+                frameCount: 300,
+                observedFps: 30,
+                endedEarly: false,
+              },
+            ],
+          },
+        },
+      },
       '2026-08-05T00:00:00.000Z',
     );
     const result = validateRecordingDoc(doc);
@@ -189,15 +207,23 @@ describe('the documents capture writes', () => {
     const doc = finalizedRecordingDoc(
       provisional(store),
       {
-        screen: {
-          durationSec: 4,
-          frameCount: 120,
-          observedFps: 30,
-          endedEarly: true,
-          endReason: 'permission-revoked',
+        video: {
+          screen: {
+            droppedFrames: 0,
+            parts: [
+              {
+                part: 0,
+                startTimeSec: 0,
+                durationSec: 4,
+                frameCount: 120,
+                observedFps: 30,
+                endedEarly: true,
+                endReason: 'permission-revoked',
+              },
+            ],
+          },
         },
       },
-      0,
       '2026-08-05T00:00:00.000Z',
     );
     expect(doc.tracks.screen?.parts[0]?.endReason).toBe('permission-revoked');
@@ -224,14 +250,22 @@ describe('a recording that stops cleanly', () => {
       finalizedRecordingDoc(
         provisional(store),
         {
-          screen: {
-            durationSec: part.durationSec,
-            frameCount: part.frameCount,
-            observedFps: part.observedFps,
-            endedEarly: false,
+          video: {
+            screen: {
+              droppedFrames: 0,
+              parts: [
+                {
+                  part: 0,
+                  startTimeSec: 0,
+                  durationSec: part.durationSec,
+                  frameCount: part.frameCount,
+                  observedFps: part.observedFps,
+                  endedEarly: false,
+                },
+              ],
+            },
           },
         },
-        0,
         new Date().toISOString(),
       ),
     );

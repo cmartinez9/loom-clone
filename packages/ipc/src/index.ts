@@ -60,6 +60,7 @@ import type {
   RecordingId,
   RecordingSummary,
   TrackKey,
+  VideoTrackKey,
 } from '@loom/format';
 
 export type {
@@ -67,10 +68,12 @@ export type {
   AudioTrackKey,
   EditDocument,
   EditOp,
+  PartEndReason,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
   TrackKey,
+  VideoTrackKey,
 };
 
 /** Returned by every `on*` subscription; call it to stop listening. */
@@ -119,9 +122,9 @@ export interface ProjectApi {
 // ---------------------------------------------------------------- recorder
 
 /**
- * What to capture: screen video, the microphone and the system's audio output. The
- * webcam (phase 4) adds fields here rather than a second options type, because they
- * are options on one capture, not three captures.
+ * What to capture: screen video, the webcam, the microphone and the system's audio
+ * output — fields on one options type rather than four, because they are options on
+ * one capture, not four captures.
  */
 export interface CaptureOptions {
   /** Electron display id. `null` records the primary display. */
@@ -168,6 +171,28 @@ export interface CaptureOptions {
    * {@link LOOPBACK_AUDIO_CONSTRAINTS}).
    */
   micVoiceProcessing: boolean;
+  /**
+   * Camera device id, `'default'` for the system default, or `null` for no camera.
+   *
+   * `null` by default, and that is a decision rather than an oversight. A camera
+   * is the most visible privacy surface this app has — opening one lights the
+   * hardware indicator — so it is opened because the user asked for it, never
+   * because a default did. Phase 2 owns asking for the permission; the HUD owns
+   * offering the toggle. Everything below this line works the same whether the
+   * answer is a device or `null`.
+   */
+  webcamDeviceId: string | null;
+  /**
+   * Frame rate, longest edge and bitrate for the camera, separate from the screen's.
+   *
+   * A camera is a 720p-ish constant-rate source and the screen is a 4K
+   * variable-rate one (§2.3); one set of numbers cannot serve both, and giving the
+   * camera the screen's 12 Mbit/s would spend most of a recording's bytes on the
+   * smallest picture in it.
+   */
+  webcamFps: number;
+  webcamMaxDimension: number;
+  webcamBitrate: number;
 }
 
 export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
@@ -179,6 +204,10 @@ export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
   micDeviceId: 'default',
   audioBitrate: 128_000,
   micVoiceProcessing: false,
+  webcamDeviceId: null,
+  webcamFps: 30,
+  webcamMaxDimension: 1280,
+  webcamBitrate: 3_000_000,
 };
 
 /**
@@ -273,11 +302,85 @@ export interface AudioTrackReport {
 }
 
 /**
+ * What only the live capture knows about a video track, sent before its first frame.
+ *
+ * The camera's counterpart of {@link AudioTrackFacts}, and smaller: a camera has no
+ * trap 3 to record, because nothing is applied to the picture on the way out. What
+ * it does have is an identity, and that identity is load-bearing — §7.4 reacquires
+ * on "reappearance of the *same* `deviceId*`", so a camera that comes back is only
+ * the same camera if this says so.
+ */
+export interface VideoTrackFacts {
+  deviceId: string | null;
+  deviceName: string | null;
+}
+
+/**
+ * One video part's timing and identity, sent when the part closes.
+ *
+ * Every part of a video track needs its own `startTimeSec` (§2.3), and the numbers
+ * that produce it — the first frame, the last one, when capture actually stopped,
+ * and the track's epoch offset — are only ever in the renderer. Main places them on
+ * the recording clock with `alignVideoPart`; like the audio measurements, it cannot
+ * recompute them, because the encoded stream no longer carries the evidence.
+ */
+export interface VideoPartReport {
+  track: VideoTrackKey;
+  part: number;
+  /** Absent for the screen, whose identity is the display in `recording.json`. */
+  facts?: VideoTrackFacts;
+  /** First and last encoded frame of this part, on the track's own clock. */
+  firstTimestampUs: number | null;
+  lastTimestampUs: number | null;
+  /**
+   * When this part stopped producing, on the same clock.
+   *
+   * A video track emits a frame only when its picture changes, so the last frame
+   * has to stand for the still stretch after it — see
+   * {@link CaptureEndReport.endedAtUs}, which is this field for the screen.
+   */
+  endedAtUs: number | null;
+  /** See {@link AudioTrackReport.epochOffsetUs}. */
+  epochOffsetUs: number;
+  framesEncoded: number;
+  framesDropped: number;
+  endedEarly: boolean;
+  endReason?: PartEndReason;
+}
+
+/**
+ * A part that closed while the recording carried on — the message §7.4 is about.
+ *
+ * The camera is unplugged, its part closes, and the screen and the microphone do
+ * not notice. Main finalizes that part the moment this arrives rather than at the
+ * end of the recording, so the frame index sidecar for everything already recorded
+ * is on disk before the next part opens; a crash after the unplug then costs the
+ * part that was open, not both of them.
+ *
+ * The last part of each track is **not** closed this way — it is still open when
+ * capture stops, and {@link CaptureEndReport.video} closes it. `ChunkMsg.part` is
+ * chosen by the renderer for the same reason this message exists: a new part on a
+ * device loss is something the capture page announces, never something it has to
+ * ask permission for.
+ */
+export type PartEndMsg = VideoPartReport;
+
+/**
  * Where a recording is in its life. A subset of `project.json`'s `state` (§2.2)
  * plus `idle`, because "no recording in progress" is a state of the *recorder*
  * rather than of any recording.
  */
 export type RecorderPhase = 'idle' | 'starting' | 'recording' | 'finalizing' | 'failed';
+
+/**
+ * What the camera is doing, for the §7.4 banner.
+ *
+ * `lost` is the one that earns its keep: *"Camera disconnected — still recording
+ * screen and audio."* A recording that quietly loses its camera and says nothing is
+ * a recording the user finds out about in the editor, which is too late to redo it.
+ * `unavailable` is a camera that was asked for and never opened at all.
+ */
+export type CameraState = 'off' | 'live' | 'lost' | 'unavailable';
 
 export interface RecorderStatus {
   phase: RecorderPhase;
@@ -288,6 +391,10 @@ export interface RecorderStatus {
   droppedFrames: number;
   /** Present only in `failed`, and already phrased for a person to read. */
   error: string | null;
+  /** What the camera is doing right now (§7.4). `off` when none was asked for. */
+  camera: CameraState;
+  /** Parts the camera has produced so far — 2 after one unplug and reconnect. */
+  cameraParts: number;
 }
 
 /** What a crash-recovery pass found, so the app can say it out loud (§7.1). */
@@ -360,6 +467,16 @@ export interface CaptureEndReport {
    * first screen frame *on the shared clock*, so it needs this one too.
    */
   epochOffsetUs?: number;
+  /**
+   * One entry per video part that was **still open** when capture stopped.
+   *
+   * Parts that closed earlier arrived as {@link PartEndMsg} and are already
+   * finalized; these are the last one of each track. The screen's entry says the
+   * same thing as `endedAtUs` and `framesDropped` above, which are kept because
+   * phase 1 and phase 3 send them and neither should have to change to add a
+   * camera.
+   */
+  video?: VideoPartReport[];
 }
 
 export interface CaptureApi {
@@ -367,6 +484,8 @@ export interface CaptureApi {
   /** The decoder configuration for a part, sent before its first chunk. */
   meta(message: MetaMsg): void;
   chunk(message: ChunkMsg): void;
+  /** A video part that closed while the recording carried on (§7.4). */
+  partEnded(message: PartEndMsg): void;
   ended(report: CaptureEndReport): void;
   failed(message: string): void;
 }
@@ -447,6 +566,8 @@ export const CHANNEL = {
   captureMeta: 'loom.capture.meta',
   /** send-only, capture window -> main. The one high-rate channel. */
   captureChunk: 'loom.capture.chunk',
+  /** send-only, capture window -> main. A part closed; the recording continues. */
+  capturePartEnded: 'loom.capture.partEnded',
   /** send-only, capture window -> main */
   captureEnded: 'loom.capture.ended',
   /** send-only, capture window -> main */
@@ -472,6 +593,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.recorderOpen,
   CHANNEL.captureMeta,
   CHANNEL.captureChunk,
+  CHANNEL.capturePartEnded,
   CHANNEL.captureEnded,
   CHANNEL.captureFailed,
 ];
@@ -531,6 +653,17 @@ export interface MetaMsg {
    * is live and recovery cannot invent them (§2.3).
    */
   audio?: AudioTrackFacts;
+  /**
+   * Video tracks only, and only where there is a device to name: the camera's
+   * identity, plus where this part's first frame lands.
+   *
+   * The timestamps are here rather than only in {@link VideoPartReport} so that the
+   * `recording.json` written *before* the part's first byte already carries a real
+   * `startTimeSec` for it. A clean stop overwrites it with the measured value; a
+   * crash does not get to, and `webcam.001.mp4` recovered claiming to start at zero
+   * would sit on top of `webcam.000.mp4` for the length of the recording.
+   */
+  video?: VideoTrackFacts & { firstTimestampUs: number; epochOffsetUs: number };
 }
 
 // ---------------------------------------------------------------- loom://

@@ -79,6 +79,7 @@ body {
    there is anything to stop. */
 .btn[hidden],
 .hud-dot[hidden],
+.hud-notice[hidden],
 .hud-error[hidden] {
   display: none;
 }
@@ -87,6 +88,16 @@ body {
   margin: 0;
   padding: var(--sp-2) var(--sp-4);
   color: var(--accent);
+  background: var(--bg);
+  border-top: var(--line) solid var(--keyline);
+}
+
+/* §7.4's camera banner. Same shelf as the error line and deliberately quieter:
+   ink rather than the record accent, because the recording is still fine. */
+.hud-notice {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--fg);
   background: var(--bg);
   border-top: var(--line) solid var(--keyline);
 }

@@ -27,7 +27,7 @@
 
 import { appendFileSync, closeSync, openSync, writeFileSync } from 'node:fs';
 import { ProjectStore } from '../../src/project-store.ts';
-import { provisionalRecordingDoc, withScreenTrack } from '../../src/recorder/recording-doc.ts';
+import { provisionalRecordingDoc, withVideoPart } from '../../src/recorder/recording-doc.ts';
 import { loadEncodedFixture } from '../../../../packages/mux/test/helpers/fixture.ts';
 import type { EncodedSample } from '@loom/mux';
 
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   const file = store.mediaRelativePath('screen', 0);
   await store.writeRecordingDoc(
     id,
-    withScreenTrack(
+    withVideoPart(
       provisionalRecordingDoc({
         display: {
           id: 1,
@@ -95,11 +95,14 @@ async function main(): Promise<void> {
         },
       }),
       {
+        track: 'screen',
         file,
         index: file.replace(/\.mp4$/, '.index.json'),
         codec: 'avc1.64000d',
         size: [fixture.width, fixture.height],
         requestedFps: fixture.fps,
+        rateMode: 'variable',
+        startTimeSec: 0,
       },
     ),
   );

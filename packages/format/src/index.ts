@@ -37,8 +37,15 @@ export type {
   Seconds,
   TrackKey,
   Vec2,
+  VideoTrackKey,
 } from './types/common.ts';
-export { AUDIO_TRACK_KEYS, TRACK_KEYS, isAudioTrack } from './types/common.ts';
+export {
+  AUDIO_TRACK_KEYS,
+  TRACK_KEYS,
+  VIDEO_TRACK_KEYS,
+  isAudioTrack,
+  isVideoTrack,
+} from './types/common.ts';
 
 export type {
   ExportRecord,
@@ -133,8 +140,10 @@ export {
   snapNearby,
   totalGapSec,
   trackSourceTimeSec,
+  videoPartStartSec,
   type AudioPartTiming,
   type AudioRun,
+  type VideoPartStartOptions,
 } from './sync/align.ts';
 export {
   AudioCaptureMeter,

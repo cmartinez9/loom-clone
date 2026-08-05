@@ -32,6 +32,7 @@ import {
   type EditOp,
   type LoomApi,
   type MetaMsg,
+  type PartEndMsg,
   type RecorderStatus,
   type RecordingDoc,
   type RecordingId,
@@ -123,6 +124,9 @@ const api: LoomApi = {
     },
     chunk: (message: ChunkMsg): void => {
       ipcRenderer.send(CHANNEL.captureChunk, message);
+    },
+    partEnded: (message: PartEndMsg): void => {
+      ipcRenderer.send(CHANNEL.capturePartEnded, message);
     },
     ended: (report: CaptureEndReport): void => {
       ipcRenderer.send(CHANNEL.captureEnded, report);

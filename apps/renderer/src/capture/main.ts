@@ -28,7 +28,12 @@
  *    every iteration, so the *first* leak is loud rather than the hundredth.
  */
 
-import { LOOPBACK_AUDIO_CONSTRAINTS, type CaptureEndReason, type CaptureOptions } from '@loom/ipc';
+import {
+  LOOPBACK_AUDIO_CONSTRAINTS,
+  type CaptureEndReason,
+  type CaptureOptions,
+  type VideoPartReport,
+} from '@loom/ipc';
 import { TrackEpochEstimator } from '@loom/format';
 import {
   loopbackFacts,
@@ -40,6 +45,7 @@ import {
   type AudioCapture,
   type AudioSink,
 } from './audio.ts';
+import { WebcamCapture, type WebcamSink } from './webcam.ts';
 
 /**
  * Codec strings to try, highest level first.
@@ -85,6 +91,14 @@ interface Session {
   lastFrameUs: number | null;
   lastFrameAtMs: number;
   /**
+   * The first frame's timestamp, which is the recording clock's origin.
+   *
+   * Main learns it from the first chunk it is handed, so this is not the only
+   * record of it — but the screen's part is described the same way every other
+   * video part is (`alignVideoPart`), and that function takes a first and a last.
+   */
+  firstFrameUs: number | null;
+  /**
    * Relates the video clock to the one the audio tracks are observed on.
    *
    * Chromium timestamps captured audio and captured video against different
@@ -102,6 +116,12 @@ interface Session {
    * and named in `endMessage`; it never fails the recording (§7.3).
    */
   audio: AudioCapture[];
+  /**
+   * The camera, when one was asked for and could be opened. `null` covers both
+   * "no camera was asked for" and "one was and it would not open", because §7.4
+   * makes those the same thing as far as the rest of the recording is concerned.
+   */
+  webcam: WebcamCapture | null;
 }
 
 let session: Session | null = null;
@@ -124,12 +144,44 @@ const audioSink: AudioSink = {
   },
   unavailable: (track, reason) => {
     console.error(`[capture] no ${track} track: ${reason}`);
-    if (session !== null) {
-      session.endMessage =
-        session.endMessage === null ? reason : `${session.endMessage}; ${reason}`;
-    }
+    noteUnavailable(reason);
   },
 };
+
+/**
+ * The camera's sink. Same shape and the same rule as the audio one: what it reports
+ * is a track that is missing or a part that closed, never a recording that failed.
+ *
+ * `partEnded` is the §7.4 message — a camera unplugged mid-recording closes its part
+ * and main finalizes that file while the screen carries on writing to its own.
+ */
+const webcamSink: WebcamSink = {
+  meta: (message) => {
+    window.loom.capture.meta(message);
+  },
+  chunk: (message) => {
+    window.loom.capture.chunk(message);
+  },
+  partEnded: (message) => {
+    window.loom.capture.partEnded(message);
+  },
+  unavailable: (reason) => {
+    console.error(`[capture] no webcam track: ${reason}`);
+    noteUnavailable(reason);
+  },
+  state: () => {
+    // The recorder derives the camera's state from the parts main has actually
+    // opened and closed, so there is nothing to forward from here: a banner driven
+    // from the renderer could claim a camera was live while main held no part for
+    // it. This hook exists so the capture page can log, not decide.
+  },
+};
+
+/** Carry a missing track into the end report, so a stop says what it lost. */
+function noteUnavailable(reason: string): void {
+  if (session === null) return;
+  session.endMessage = session.endMessage === null ? reason : `${session.endMessage}; ${reason}`;
+}
 
 window.loom.capture.onCommand((command) => {
   if (command.kind === 'start') {
@@ -182,10 +234,12 @@ async function begin(options: CaptureOptions): Promise<void> {
       metaSent: false,
       lastFrameUs: null,
       lastFrameAtMs: 0,
+      firstFrameUs: null,
       epoch: new TrackEpochEstimator(),
       ending: null,
       endMessage: null,
       audio: [],
+      webcam: null,
     };
     session = current;
 
@@ -196,21 +250,27 @@ async function begin(options: CaptureOptions): Promise<void> {
       void end('source-ended', 'the screen source stopped');
     });
 
-    // Audio is started before the video pump, so both tracks begin as close
-    // together as the platform allows; whatever offset remains is measured and
-    // recorded as `startTimeSec` rather than assumed away (§5.4 mechanism 2).
+    // Audio and the camera are started before the video pump, so every track
+    // begins as close together as the platform allows; whatever offset remains is
+    // measured and recorded as `startTimeSec` rather than assumed away (§5.4
+    // mechanism 2).
     const captures = await startAudio(stream, options);
     current.audio = captures;
+    // The camera cannot fail the recording, so its failure is not caught here —
+    // `WebcamCapture.start` reports it and answers `null`.
+    const webcam = await WebcamCapture.start(options, webcamSink);
+    current.webcam = webcam;
     starting = false;
 
     // A stop, a screen track that ended and an encoder error are all reachable
-    // across that await, and `getUserMedia` holds it open for as long as macOS
-    // takes to answer the microphone prompt. A device opened after the session is
-    // over is stopped here: a microphone left running would keep its indicator lit
-    // and keep posting chunks under the same track and part key, which the *next*
-    // recording would accept as its own.
+    // across those awaits, and `getUserMedia` holds them open for as long as macOS
+    // takes to answer the microphone or camera prompt. A device opened after the
+    // session is over is stopped here: a microphone or camera left running would
+    // keep its indicator lit and keep posting chunks under the same track and part
+    // key, which the *next* recording would accept as its own.
     if (session !== current || current.ending !== null) {
       await Promise.all(captures.map((capture) => stopAudioCapture(capture)));
+      await webcam?.stop();
       return;
     }
 
@@ -325,6 +385,7 @@ async function pump(current: Session, options: CaptureOptions): Promise<void> {
       if (keyFrame) lastKeyframeUs = value.timestamp;
       current.encoder.encode(value, { keyFrame });
       current.framesEncoded += 1;
+      current.firstFrameUs ??= value.timestamp;
       current.lastFrameUs = value.timestamp;
       current.lastFrameAtMs = performance.now();
     } finally {
@@ -440,9 +501,12 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
     await current.reader.cancel().catch(() => undefined);
     current.track.stop();
     if (current.encoder.state === 'configured') await current.encoder.flush();
-    // Audio flushes alongside, not after: each encoder holds buffers of its own,
-    // and they are audio the capture already succeeded at.
-    await Promise.all(current.audio.map((capture) => stopAudioCapture(capture)));
+    // Audio and the camera flush alongside, not after: each encoder holds buffers
+    // of its own, and they are footage the capture already succeeded at.
+    await Promise.all([
+      ...current.audio.map((capture) => stopAudioCapture(capture)),
+      current.webcam?.stop() ?? Promise.resolve(),
+    ]);
   } catch (error) {
     current.endMessage ??= describe(error);
   } finally {
@@ -450,9 +514,10 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
     await release(current);
   }
 
+  const endedAtUs = stoppedAtUs(current);
   window.loom.capture.ended({
     reason,
-    endedAtUs: stoppedAtUs(current),
+    endedAtUs,
     framesEncoded: current.framesEncoded,
     framesDropped: current.framesDropped,
     epochOffsetUs: current.epoch.offsetUs,
@@ -460,7 +525,42 @@ async function end(reason: CaptureEndReason, detail?: string | null): Promise<vo
     // One entry per audio track that produced anything — the measurements only
     // this process ever had (§5.5). Main writes them; it cannot recompute them.
     ...(current.audio.length === 0 ? {} : { audio: current.audio.map(reportOf) }),
+    // And one per video part that was still open. Parts that closed earlier — a
+    // camera unplugged mid-recording — arrived as `partEnded` and main has already
+    // finalized them; sending them again would close the same file twice.
+    video: videoReports(current, reason, endedAtUs),
   });
+}
+
+/**
+ * The video parts still open when capture stopped.
+ *
+ * The screen's entry says the same thing as the report's own `endedAtUs`,
+ * `framesEncoded` and `framesDropped` — it is here so that main has one uniform way
+ * to close the last part of every video track, and the flat fields stay because
+ * phase 1 and phase 3 send them and neither should have to change to add a camera.
+ */
+function videoReports(
+  current: Session,
+  reason: CaptureEndReason,
+  endedAtUs: number | null,
+): VideoPartReport[] {
+  const reports: VideoPartReport[] = [
+    {
+      track: 'screen',
+      part: current.part,
+      firstTimestampUs: current.firstFrameUs,
+      lastTimestampUs: current.lastFrameUs,
+      endedAtUs,
+      epochOffsetUs: current.epoch.offsetUs,
+      framesEncoded: current.framesEncoded,
+      framesDropped: current.framesDropped,
+      endedEarly: reason !== 'stopped',
+    },
+  ];
+  const webcam = current.webcam?.openPartReport ?? null;
+  if (webcam !== null) reports.push(webcam);
+  return reports;
 }
 
 async function release(current: Session): Promise<void> {
@@ -470,9 +570,10 @@ async function release(current: Session): Promise<void> {
     // A closed encoder is the goal; a failure to close one is not worth reporting
     // over whatever caused us to be here.
   }
-  await Promise.all(current.audio.map((capture) => stopAudioCapture(capture))).catch(
-    () => undefined,
-  );
+  await Promise.all([
+    ...current.audio.map((capture) => stopAudioCapture(capture)),
+    current.webcam?.stop() ?? Promise.resolve(),
+  ]).catch(() => undefined);
   for (const track of current.stream.getTracks()) track.stop();
   await current.reader.cancel().catch(() => undefined);
 }
