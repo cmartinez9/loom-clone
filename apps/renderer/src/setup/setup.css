@@ -101,7 +101,15 @@ body {
   color: var(--fg);
 }
 
-.perm[data-state='granted'] .glyph {
+/*
+ * Filled green is a tick earned. For the three media grants `granted` is that; for
+ * Accessibility only `live` is, because macOS trusting us and clicks actually
+ * arriving are different facts and the click API succeeds without the permission and
+ * then silently delivers nothing. `trusted-unverified` and `relaunch-required` keep
+ * the neutral subject glyph above, so the glyph agrees with the control beside it.
+ */
+.perm[data-state='granted']:not([data-ax]) .glyph,
+.perm[data-ax='live'] .glyph {
   border-color: var(--ok);
   background: var(--ok);
   color: var(--bg-raised);
@@ -110,7 +118,7 @@ body {
 /*
  * Red means the user answered no. Only the three media grants can say that: macOS
  * distinguishes "denied" from "not-determined" for them, so `denied` here is a
- * refusal. The Accessibility row carries `data-ax` and is styled below instead.
+ * refusal. The Accessibility row carries `data-ax` and is styled from it instead.
  */
 .perm[data-state='denied']:not([data-ax]) .glyph {
   border-color: var(--danger);

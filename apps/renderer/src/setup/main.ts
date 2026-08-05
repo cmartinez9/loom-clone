@@ -96,20 +96,22 @@ function row(facts: Readonly<PermissionFacts>, report: PermissionReport): HTMLLI
   li.dataset['state'] = status;
   li.dataset['optional'] = String(!facts.required);
   // Accessibility's wire status is honest and blunt: `AXIsProcessTrusted()` is a
-  // boolean, so "refused" and "never asked" are both `denied`. The row is styled from
-  // the conclusion instead, because a first-run screen that paints the most invasive
-  // ask in refusal red before it has been asked is telling the user something that
-  // has not happened.
-  if (facts.kind === 'accessibility') {
-    li.dataset['ax'] = concludeAccessibility(report.accessibility);
-  }
+  // boolean, so "refused" and "never asked" are both `denied`, and "trusted" is not
+  // the same claim as "clicks arrive". Both ends of that row are styled from the
+  // conclusion instead — a first-run screen must not paint the most invasive ask in
+  // refusal red before it has been asked, and must not tick it before anything has
+  // watched an event arrive.
+  const conclusion =
+    facts.kind === 'accessibility' ? concludeAccessibility(report.accessibility) : null;
+  if (conclusion !== null) li.dataset['ax'] = conclusion;
 
-  const granted = status === 'granted';
+  // A row that has what it asked for swaps its subject glyph for a tick: it is no
+  // longer asking for a camera, it is reporting one. For the three media grants
+  // `granted` is that fact. For Accessibility only `live` is — this file's rule 1.
+  const earned = conclusion === null ? status === 'granted' : conclusion === 'live';
   const glyph = document.createElement('span');
   glyph.className = 'glyph';
-  // A granted row swaps its subject glyph for a tick: the row is no longer asking
-  // for a camera, it is reporting one.
-  glyph.innerHTML = icon(granted ? 'check' : GLYPH[facts.kind], 19);
+  glyph.innerHTML = icon(earned ? 'check' : GLYPH[facts.kind], 19);
 
   const body = document.createElement('div');
   const title = document.createElement('div');
