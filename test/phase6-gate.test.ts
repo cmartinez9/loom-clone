@@ -234,6 +234,11 @@ function describeRun(report: GateReport): string {
         (c) => `${c.targetSec.toFixed(2)}s→${String(c.expectedFrame)}/${String(c.observedFrame)}`,
       )
       .join(' ')}`,
+    // Only on a bad run: thirty lines of provenance are noise beside a pass, and the
+    // one place a lost context's *reason* appears. `webglcontextlost` carries none —
+    // a GPU process that died says so here, and how far the run got is the difference
+    // between a host that took the instrument away and a defect that always does.
+    ...(report.ok ? [] : ['gate log', ...report.logs.map((line) => `  ${line}`)]),
     '',
   ].join('\n');
 }

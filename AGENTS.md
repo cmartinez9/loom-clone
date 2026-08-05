@@ -295,7 +295,19 @@ a gap lives in `recording.json`, never in the container.
   really does model the silent no-op) and `test/relaunch-policy.test.ts`, which
   enumerates every bad-run shape and requires that none of them earns a second launch.
   A retry around an acceptance gate is how a real defect gets to look like weather;
-  it stays defensible only while it stays this narrow.
+  it stays defensible only while it stays this narrow. The other half of "silent" is
+  that the event carries **no reason**, and one of the reasons was ours to remove:
+  Chromium's GPU watchdog kills the GPU process when a call has not come back inside
+  its timeout, and every context in it goes too. In a browser that is a tab staying
+  responsive; here it is a slow host pre-empting the measurement that exists to catch
+  slowness — CI lost the context on both launches of one job while the same commit
+  passed in another, on runners that vary by 5× (a 24.5 ms warmup frame and a 4.1 ms
+  composite on one, 4.7 ms and 1.9 ms on another). `test/gate/main.ts` therefore runs
+  with `--disable-gpu-watchdog`, so a frame that takes too long arrives as a number
+  over budget rather than as a run that measured nothing, and notes
+  `child-process-gone` so a context that goes anyway names what died. The gate prints
+  its own log on a bad run for the same reason: how far it got is the difference
+  between a host that took the instrument away and a defect that always will.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
