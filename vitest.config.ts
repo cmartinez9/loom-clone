@@ -19,10 +19,24 @@ export default defineConfig({
     // phase 6 gate encodes a 4K fixture and plays it, and sets its own longer limit.
     testTimeout: 60_000,
     hookTimeout: 30_000,
-    // Tests that spawn processes and write to temp directories must not race each
-    // other for the same fixtures; each file gets its own temp root, so files may
-    // still run in parallel.
-    fileParallelism: true,
+    // One file at a time. Isolation is not the reason — every file already gets its
+    // own temp root — measurement is: three of these gates time the machine they are
+    // running on. The phase-5 sampler asserts §6.1's 120 Hz, phase 6 judges a 16 ms
+    // frame budget on the single worst frame with no allowance, and phase 3's
+    // twenty-minute A/V sync gate saturates the box for the better part of a minute
+    // encoding AAC and H.264. Two of those on a 3-vCPU CI runner measure each other,
+    // and neither can tell that apart from the thing it exists to catch: CI failed the
+    // sampler at 53 samples in a window it needed 60 in, on a commit that changed
+    // nothing in the sampler.
+    //
+    // `packages/sampler/test/rate-control.ts` holds the other half — a rate is only
+    // ever compared against a no-op control measured across the *same* window — but
+    // that keeps the comparison honest, not the machine free. A sampler doing two
+    // window-server round trips per tick loses more to a saturated box than an empty
+    // timer handler does, so a rate gate still cannot share one with a gate that
+    // saturates it. About a minute of wall clock is what that costs; nothing here
+    // depended on the parallelism.
+    fileParallelism: false,
     reporters: process.env['CI'] === undefined ? ['default'] : ['default', 'junit'],
     outputFile: { junit: 'coverage/junit.xml' },
   },

@@ -262,6 +262,15 @@ a gap lives in `recording.json`, never in the container.
   unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
   re-measure, then decide. If a genuine frame over budget turns up on the fixed
   instrument, that is a decision to take with real numbers, not a threshold to adjust.
+- **Test files run one at a time, and anything measuring the machine measures it
+  twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
+  6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
+  machine for the better part of a minute. `vitest.config.ts` sets
+  `fileParallelism: false` so they cannot measure each other. The other half is
+  `packages/sampler/test/rate-control.ts`: a rate is only comparable to a control
+  measured **across the same window**, never before or after it — the same no-op timer
+  has reported 25.4 Hz beside one run and 80.7 Hz beside the next, and CI once failed
+  a sampler handed 44 Hz against a control that found 69.5 Hz in a lull moments later.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and

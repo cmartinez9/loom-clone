@@ -18,7 +18,8 @@
  * So this follows `packages/format/test/kill-mid-write.test.ts` and ships a control:
  * `fixtures/control-timer.c`, the same GCD timer with an empty handler and none of the
  * sampler's code. It is measured in the same process tree, at the same requested rate,
- * beside the run it is a control for. Then:
+ * and — see {@link measureCeiling} — *across the same window*, because two figures a
+ * second apart are not two readings of one machine. Then:
  *
  * - **The control clears the bound, with room to spare** → the machine can do this, so
  *   the bound is the sampler's and is asserted exactly as the gate states it.
@@ -75,13 +76,13 @@ const CONTROL_WINDOW_MS = 1200;
 /**
  * How far above a bound the ceiling has to sit before that bound is asserted.
  *
- * The control is measured seconds *after* the window it is a control for, not during
- * it, so the two figures disagree by whatever the machine did in between — and under
- * 100 ms coalescing that is the same large spread `TRACKS_CONTROL` is sized for: six
- * control runs here spread 24.4–29.9 Hz and six sampler runs 23.9–26.8 Hz over the same
- * 1200 ms, a worst pairing of 0.80. A ceiling that clears the bound by less than that
- * spread has not shown the machine can reach the bound; it has shown two measurements
- * of one throttled machine landing either side of it.
+ * The control now runs *across* the window it is a control for rather than after it,
+ * so the two figures at least describe the same machine — but they are still two
+ * measurements, and under 100 ms coalescing they spread: six control runs here spread
+ * 24.4–29.9 Hz and six sampler runs 23.9–26.8 Hz over the same 1200 ms, a worst pairing
+ * of 0.80. A ceiling that clears the bound by less than that spread has not shown the
+ * machine can reach the bound; it has shown two measurements of one throttled machine
+ * landing either side of it.
  *
  * CI is where that first bit: a no-op timer handed 51.0 Hz — a machine plainly unable
  * to sustain 120 Hz — cleared the 60-samples-per-1200 ms bound by 1.2 samples, and the
@@ -129,8 +130,15 @@ export async function buildRateControl(scratchDirectory: string): Promise<string
 /**
  * Ask the control for `hz` and report what this machine handed it.
  *
- * Run next to the sampler window it is a control for, not once for the file: what it
- * measures drifts with whatever else the machine is doing.
+ * **Start this at the same instant as the sampler window it is a control for and await
+ * it afterwards** — never once for the file, and never in the gap after the window has
+ * closed. What it measures does not merely drift with the machine's load; the task
+ * policy itself comes and goes, and a run that is throttled is not throttled a second
+ * later. Measured sequentially, this file's own gate has seen a control report 25.4 Hz
+ * beside one run and 80.7 Hz beside the next, and CI has seen a sampler handed 44 Hz
+ * failed against a control that found 69.5 Hz in a lull moments later. Neither is a
+ * reading the sampler could have been held to; both are the instrument comparing two
+ * different machines.
  */
 export async function measureCeiling(controlPath: string, hz: number): Promise<ControlRate> {
   const args = ['--hz', String(hz), '--ms', String(CONTROL_WINDOW_MS)];
