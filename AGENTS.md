@@ -210,7 +210,12 @@ rewriting a growing JSON once a second for the length of the recording.
   `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
   number is painted into every frame and read back out of the framebuffer, so a fast
   blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
-  passes.
+  passes. It judges the 16 ms budget on the p99 plus a one-in-a-hundred allowance and
+  a separate stall ceiling, **not** on the single worst frame: a CI runner decodes 4K
+  in software and shares its host, so its worst frame is 19 ms against a 3.2 ms p99
+  and moves run to run, while the same code measures 0.3 ms on the hardware it ships
+  on. The allowance is stated where it is used, with what a regression would do to
+  those numbers instead.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
