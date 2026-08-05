@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  clickVerdict,
   formatReport,
   sealReport,
   type CheckResult,
@@ -135,5 +136,60 @@ describe('the human rendering', () => {
     );
     expect(text).toContain('setContentProtection keeps the HUD out of captured pixels');
     expect(text).toContain('closes: the §11 assumption');
+  });
+});
+
+/**
+ * The verdict that got this wrong once.
+ *
+ * `verify:permissions` failed a run in which the Accessibility tap was working
+ * perfectly, because nobody had clicked during its ten-second window and the check
+ * read "no clicks" as "dead tap" — while the same report carried `tapLive: true`.
+ * That is the exact conflation `@loom/sampler` exists to prevent, reproduced in
+ * reverse, in the one artifact whose whole job is to be honest about what was and was
+ * not established.
+ */
+describe('what zero observed clicks means', () => {
+  it('does not fail a live tap that simply saw no input', () => {
+    const verdict = clickVerdict('live', 0, 10_000);
+    expect(verdict?.status).toBe('skipped');
+    expect(verdict?.detail).toMatch(/tap is live/i);
+    expect(verdict?.detail).toMatch(/not a failure/i);
+    // And it says where the number actually gets measured, rather than leaving the
+    // obligation looking abandoned.
+    expect(verdict?.detail).toMatch(/phase 10/i);
+  });
+
+  it('CONTROL: still fails when the tap was never confirmed live', () => {
+    // Without this, a verdict that excused every empty window would pass the test
+    // above just as happily — and the silent-failure mode the captain's decision was
+    // written about would sail through the check built to catch it.
+    for (const conclusion of [
+      'trusted-unverified',
+      'relaunch-required',
+      'relaunch-to-find-out',
+      'not-granted',
+    ] as const) {
+      const verdict = clickVerdict(conclusion, 0, 10_000);
+      expect(verdict?.status, `${conclusion} must not be excused`).toBe('fail');
+    }
+  });
+
+  it('stands aside entirely once clicks were actually observed', () => {
+    // A run with events is the measurement path's business, not the verdict's.
+    expect(clickVerdict('live', 3, 10_000)).toBeNull();
+    expect(clickVerdict('not-granted', 3, 10_000)).toBeNull();
+  });
+
+  it('keeps a live-but-unclicked run out of a verified outcome', () => {
+    // `skipped` must not read as success: the rate is still unmeasured, so the run is
+    // incomplete rather than verified.
+    const sealed = sealReport(
+      draft(
+        [{ id: 'accessibility-clicks', title: 'clicks', status: 'skipped', detail: 'x' }],
+        true,
+      ),
+    );
+    expect(sealed.outcome).toBe('incomplete');
   });
 });

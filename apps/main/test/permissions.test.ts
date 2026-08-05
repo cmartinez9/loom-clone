@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHANNEL } from '@loom/ipc';
+import { CHANNEL, DEFAULT_CAPTURE_OPTIONS } from '@loom/ipc';
 import { PERMISSIONS } from '@loom/permissions';
 import { ProjectStore } from '../src/project-store.ts';
 
@@ -337,12 +337,7 @@ describe('preflight', () => {
   it('says what blocks and what merely degrades', async () => {
     harness.media.set('screen', 'granted');
     harness.media.set('camera', 'denied');
-    const result = await makeManager().preflight({
-      displayId: null,
-      fps: 30,
-      maxDimension: 3840,
-      bitrate: 12_000_000,
-    });
+    const result = await makeManager().preflight(DEFAULT_CAPTURE_OPTIONS);
     expect(result.ready).toBe(true);
     expect(result.blocking).toEqual([]);
     expect(result.degraded).toContain('camera');
@@ -350,12 +345,7 @@ describe('preflight', () => {
 
   it('is not ready without Screen Recording', async () => {
     harness.media.set('screen', 'denied');
-    const result = await makeManager().preflight({
-      displayId: null,
-      fps: 30,
-      maxDimension: 3840,
-      bitrate: 12_000_000,
-    });
+    const result = await makeManager().preflight(DEFAULT_CAPTURE_OPTIONS);
     expect(result.ready).toBe(false);
     expect(result.blocking).toEqual(['screen']);
   });

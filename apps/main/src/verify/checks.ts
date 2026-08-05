@@ -144,3 +144,56 @@ export function formatReport(report: VerifyReport): string {
   }
   return lines.join('\n');
 }
+
+/**
+ * What zero observed clicks means — which is two different facts, and only one of them
+ * is a failure.
+ *
+ * This function exists because the harness got it wrong. It read *"no clicks arrived"*
+ * as *"the tap is dead"* while the very same report carried `tapLive: true`, and failed
+ * a run in which the tap was working perfectly and nobody had touched the mouse. That
+ * is the silent-failure conflation `@loom/sampler` exists to prevent, reproduced in
+ * reverse: phase 5 refuses to let a consumer read `0` out of a machine whose tap was
+ * dead, and this read *dead* out of a live tap that simply saw no input.
+ *
+ * So the verdict is taken from the tap's own observed state, never inferred from the
+ * event count:
+ *
+ * - **`live`** — a real `CGEventTap` was built and reported enabled. Zero events is
+ *   then a statement about the operator, not the app: nothing clicked during the
+ *   window. Not a failure, and not a pass either — the rate is simply unmeasured.
+ * - **anything else** — the tap was never confirmed enabled, so zero events is exactly
+ *   the failure mode the captain's decision was written about, and is reported as one.
+ *
+ * Pure and separated from the Electron half precisely so the distinction can be tested
+ * both ways round, including the case that must still fail.
+ */
+export function clickVerdict(
+  conclusion:
+    'live' | 'trusted-unverified' | 'relaunch-required' | 'relaunch-to-find-out' | 'not-granted',
+  clickCount: number,
+  windowMs: number,
+): { status: CheckStatus; detail: string } | null {
+  if (clickCount > 0) return null;
+  const seconds = (windowMs / 1000).toFixed(0);
+
+  if (conclusion === 'live') {
+    return {
+      status: 'skipped',
+      detail:
+        `The click tap is live — a real CGEventTap was built and reported enabled — but nothing ` +
+        `clicked during the ${seconds}s observation window, so the event rate is unmeasured. ` +
+        'This is not a failure: the tap works. Rate and latency are deferred to phase 10, which ' +
+        'consumes the click log for auto-zoom-on-click and is where the number earns its keep.',
+    };
+  }
+
+  return {
+    status: 'fail',
+    detail:
+      'The tap was never confirmed enabled and produced zero events. That is the silent-failure ' +
+      'mode the captain’s decision was written about — the click API succeeds without the ' +
+      'permission and then delivers nothing, so a tap that cannot be shown to be live and saw ' +
+      'no events is a dead tap until proven otherwise.',
+  };
+}

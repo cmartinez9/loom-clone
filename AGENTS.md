@@ -492,18 +492,21 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward to phase 2: seven things no dev run has verified
+## Carried forward to phase 2: three closed, four still open
 
-Phases 1, 3 and 4 shipped with these **unverified**, not verified-and-passing. They
-are obligations on phase 2's signed-bundle gate, and until that gate runs, no report
-may describe them as working:
+Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
+signed-bundle gate. Three are now closed on real measurements from a granted, signed
+bundle; four are not, and **phase 2's harness does not cover them** — it has no audio
+and no camera checks at all, so nothing here has looked at them.
 
-1. **`desktopCapturer` screen enumeration.**
-2. **`setDisplayMediaRequestHandler`'s frame authorisation** — that the real handler
-   hands a source to the capture page and refuses every other frame.
-3. **`setContentProtection(true)` actually keeping the recorder HUD out of captured
-   frames.** `windows.test.ts` asserts the flag is set on the role; nothing has
-   watched the pixels.
+**Closed** (see the gate status below for the figures):
+
+1. ~~`desktopCapturer` screen enumeration.~~
+2. ~~`setDisplayMediaRequestHandler`'s frame authorisation.~~
+3. ~~`setContentProtection(true)` keeping the recorder HUD out of captured frames.~~
+
+**Still open, and still nobody's evidence:**
+
 4. **`audio: 'loopback'` reaching a real speaker output**, and whether macOS honours
    the AEC/NS/AGC-off stereo constraints on the track it hands back (research trap 3).
    The code asserts the constraints and records what was actually applied in
@@ -523,6 +526,11 @@ may describe them as working:
    platform's own behaviour: whether `ended` fires at all for the built-in camera,
    how long `getUserMedia` refuses a device that has just re-enumerated, and whether
    the same `deviceId` really comes back.
+
+None of the four is answered by `npm run verify:permissions`: the two audio ones need
+`node scripts/smoke-capture.mjs` without `--synthetic` on a granted machine, and the
+two camera ones need a real camera and a real cable. Do not read the gate's green rows
+as covering them.
 
 What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
 replaces only the _source acquisition_ — `getDisplayMedia` and `getUserMedia` — in the
@@ -557,30 +565,27 @@ talking about _us_.** A dev binary inherits its launching terminal's grants (res
 lives, and `sealReport()` in `apps/main/src/verify/checks.ts` rewrites every `pass` to
 `untrusted` when it fails. Nothing downstream can opt out.
 
-## Phase 2 gate status — two obligations closed, three checks open on a grant
+## Phase 2 gate status — three obligations closed on real measurements
 
 `npm run verify:permissions` packages the app, gives it the frozen identity, launches
 it through LaunchServices and runs the checks from inside the real bundle. Last run
-(2026-08-05, ad-hoc signed, `packaged: true`, `responsibleForSelf: true`):
+2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
+`responsibleForSelf: true`, so `sealReport` downgraded nothing.
 
-| Check                  | Status      | What it means                                                                                                                                                               |
-| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle-identity`      | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                    |
-| `frame-authorisation`  | **pass**    | Closes phase 1's obligation. A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC. |
-| `screen-enumeration`   | **blocked** | `getSources` throws "Failed to get sources". Needs Screen Recording.                                                                                                        |
-| `content-protection`   | **blocked** | No pixels to look at without Screen Recording.                                                                                                                              |
-| `accessibility-clicks` | **blocked** | The sampler is wired (`probeInput` for the tap state, `observeClicks` for rate). Needs the Accessibility grant.                                                             |
+| Check                  | Status       | Evidence                                                                                                                                            |
+| ---------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`      | **pass**     | Packaged, launched by launchd, signing as the frozen id.                                                                                            |
+| `frame-authorisation`  | **pass**     | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.      |
+| `screen-enumeration`   | **pass**     | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.              |
+| `content-protection`   | **pass**     | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched. |
+| `accessibility-clicks` | **deferred** | Tap confirmed live (`tapEnabled: true` under the granted bundle). Rate and latency deferred to phase 10 by captain decision — it consumes the log.  |
 
-**Do not describe the three blocked rows as working.** What is known about
-`content-protection` is that the harness itself is correct: run against a dev binary
-whose terminal holds the grant, the control window showed the marker across 99.3% of
-its rectangle and the protected HUD across 0.0%. That result is `untrusted` by
-construction and is evidence about the _test_, not about the flag.
-
-All three are blocked on the same thing: a grant. To close them, switch "Loom Clone"
-on under **Screen & System Audio Recording** and **Accessibility** in System Settings ›
-Privacy & Security, then re-run. There is no programmatic way to
-grant a TCC permission and nothing in this repo pretends otherwise.
+The `content-protection` row is the one worth understanding. "The marker is absent from
+the HUD's rectangle" passes just as well when the capture is black, the coordinates are
+wrong, or the window never painted — so a second window, same page, same size,
+`setContentProtection` **not** called, is placed beside it and must show the marker
+first. Without that control clearing, the check reports `blocked`, not a pass. Same
+discipline as `kill-mid-write.test.ts`'s naive writer.
 
 ## Sharp edges — permissions
 
@@ -590,6 +595,13 @@ grant a TCC permission and nothing in this repo pretends otherwise.
   churn `identity.ts` exists to prevent, arriving through the back door.
   `scripts/verify-permissions.mjs` ad-hoc signs with the frozen identifier and
   entitlements (research §5.3, note 4) and refuses to run if the identifier is wrong.
+- **An ad-hoc signature is content-derived, so every rebuild is a new identity.** A
+  grant given to one build does not survive `npm run package`. Worse, two bundles with
+  the same identifier and different signatures — `release/mac` and `release/mac-arm64`
+  — put two rows in System Settings, and granting the wrong one is indistinguishable
+  from granting nothing: the app still reports `denied`. That cost a full grant cycle
+  here. The runner prefers the host architecture; keep exactly one bundle on disk, and
+  if it is rebuilt, the grant has to be given again.
 - **`open -a`, never the executable.** Running `Loom Clone.app/Contents/MacOS/…` from a
   shell makes the _shell_ the responsible process, which is the lie the gate is about.
   The harness independently checks `process.ppid === 1`.

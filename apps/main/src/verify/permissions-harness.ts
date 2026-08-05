@@ -39,7 +39,7 @@ import { BrowserWindow, desktopCapturer, screen, type NativeImage } from 'electr
 import { LOOM_BUNDLE_ID } from '../identity.ts';
 import type { PermissionManager } from '../permissions.ts';
 import type { WindowRegistry } from '../windows.ts';
-import { sealReport, type CheckResult, type VerifyReport } from './checks.ts';
+import { clickVerdict, sealReport, type CheckResult, type VerifyReport } from './checks.ts';
 import { appUrl } from '@loom/ipc';
 import { concludeAccessibility, describeAccessibility } from '@loom/permissions';
 
@@ -628,19 +628,18 @@ async function checkAccessibilityClicks(
   );
   const clicks = await probe(windowMs);
 
-  if (clicks.length === 0) {
-    // The exact failure the captain's decision is about: trusted, tap built, zero
-    // events, no error. Reported as a failure, because here it is measured rather
-    // than assumed.
+  // Zero clicks is not one fact. `clickVerdict` decides it from the tap's observed
+  // state rather than from the event count, because a live tap that nobody clicked
+  // during and a tap that was never alive look identical from the count alone — and
+  // reading the second out of the first is what this check used to do.
+  const empty = clickVerdict(conclusion, clicks.length, windowMs);
+  if (empty !== null) {
     return {
       id,
       title,
       obligation,
-      status: 'fail',
-      detail:
-        'Accessibility is granted and the tap produced zero events. That is the silent-failure ' +
-        'mode the decision was written about — the permission needs the app relaunched before ' +
-        'it reaches a running process.',
+      status: empty.status,
+      detail: empty.detail,
       data: { ...base, clicks: 0, windowMs },
     };
   }
