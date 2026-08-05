@@ -168,12 +168,13 @@ app.commandLine.appendSwitch('disable-gpu-watchdog');
 //
 // A pre-emption is not a slow frame, and the instrument cannot tell them apart: it
 // brackets the frame body with `performance.now()`, so whatever the scheduler takes
-// away lands on whichever frame it interrupted. Measured here, with the frame body
-// timed segment by segment: 10–20 ms readings inside `resolve()` (0.2 µs of work,
-// pinned by `packages/edl/test/hot-path.test.ts`), inside `drawArrays` and inside
-// `present` — none of which can spend a millisecond doing anything. CI reported the
-// same event on a slower host as a single 177 ms frame against a p99 of 7.9 ms, on
-// the same commit whose other run passed.
+// away lands on whichever frame it interrupted. Measured on `fm/loom-p7`, where phase
+// 7's timeline lands, with the frame body timed segment by segment: 10–20 ms readings
+// inside `drawArrays`, inside `present`, and inside that branch's `resolve()` — 0.2 µs
+// of work, pinned there by `packages/edl/test/hot-path.test.ts`, and on this branch the
+// four state assignments `PreviewLoop` still does in its place. None of those can spend
+// a millisecond doing anything. CI reported the same event on a slower host as a single
+// 177 ms frame against a p99 of 7.9 ms, on the same commit whose other run passed.
 //
 // Over thirty runs of this gate on one machine with hardware decode disabled — so
 // every frame carries CI's 30 MB CPU-backed upload — the worst frame was 2.6 ms and

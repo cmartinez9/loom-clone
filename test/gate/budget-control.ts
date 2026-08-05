@@ -107,6 +107,32 @@ export const CONTROL_TARGET_MS = FRAME_BUDGET_MS / 2;
 export const CONTROL_PERIOD_MS = FRAME_BUDGET_MS * 2;
 
 /**
+ * How many scheduled frames one spin covers on a panel refreshing at `refreshHz`.
+ *
+ * Everything the gate asserts about the control's sample count is a reading of this
+ * function rather than a number written out beside it, because the two are the same
+ * fact: `tick()` is called once a frame and tests eligibility there, so a spin lands on
+ * **the first frame boundary strictly after `CONTROL_TARGET_MS + CONTROL_PERIOD_MS` of
+ * clock has passed** — 41.67 ms — and never on the boundary that merely reaches it,
+ * since the spin starts after the frame's own body rather than at the boundary itself.
+ * Hence `floor` plus one rather than `ceil`:
+ *
+ * - 60 Hz → 3 frames (50 ms between spins, a 16.7% duty)
+ * - 120 Hz → 6 (50 ms, 16.7%; measured at 5.6 on the 120 Hz machine this was written
+ *   on, which is what an upper bound should look like beside a real reading)
+ * - 240 Hz → 11 (45.83 ms, 18.2%)
+ *
+ * Two consequences the panel decides and the gate must not assume: the duty is *at
+ * most* the fifth {@link CONTROL_PERIOD_MS} argues for, quantisation only ever lowering
+ * it; and how many frames a control sample speaks for grows with the refresh rate, so a
+ * ratio guard has to be read off the fastest panel the gate expects to meet and a
+ * floor off the slowest.
+ */
+export function framesPerSpin(refreshHz: number): number {
+  return Math.floor((CONTROL_TARGET_MS + CONTROL_PERIOD_MS) / (1000 / refreshHz)) + 1;
+}
+
+/**
  * How far under the budget the control has to land before the budget is the
  * compositor's to meet.
  *
@@ -422,9 +448,9 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
 
 function figures(control: ControlPhase, budgetMs: number): string {
   return (
-    `${fmt(control.targetMs)} ms of pure arithmetic, run every ${fmt(control.periodMs)} ms in ` +
-    `these same frames with none of the compositor's code, took up to ${fmt(control.maxMs)} ms ` +
-    `across ${control.count} spins ` +
+    `${fmt(control.targetMs)} ms of pure arithmetic, spun with ${fmt(control.periodMs)} ms of ` +
+    `clock left free after each one, in these same frames with none of the compositor's ` +
+    `code, took up to ${fmt(control.maxMs)} ms across ${control.count} spins ` +
     `(mean ${fmt(control.meanMs)} ms, ${control.overBudget} over the ${fmt(budgetMs)} ms budget, ` +
     `worst at spin ${control.maxAt})`
   );

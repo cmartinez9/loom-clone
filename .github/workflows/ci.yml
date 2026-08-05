@@ -6,9 +6,30 @@
 # Running it on Linux would pass without testing the thing we claim.
 name: ci
 
+# A commit is verified exactly once, and that is a measurement decision rather than
+# a thrift one.
+#
+# `vitest.config.ts` sets `fileParallelism: false` because three of these gates time
+# the machine they run on — the phase-5 sampler's 120 Hz, phase 6's worst-frame budget
+# and phase 3's twenty-minute A/V sync — and two of them on one 3-vCPU runner measure
+# each other. That rule was being kept inside a run and broken outside it: with
+# `push: ['**']` alongside `pull_request`, every commit on a branch with an open PR
+# started **two** full runs of this workflow. They land in different `concurrency`
+# groups — `refs/heads/<branch>` against `refs/pull/<n>/merge` — so neither cancels
+# the other, and both then ran `npm test`, and so the phase-6 gate, at the same
+# instant against the same shared pool of macOS hosts. Observed on 2026-08-05: the two
+# runs of d26016c overlapped for the whole of both gates and reported a single frame at
+# 21.3 ms and at 123.6 ms, against p99s of 3.5 ms and 6.2 ms — the shape of a host that
+# took the renderer away, not of a frame that did the work.
+#
+# So branches are covered by the `pull_request` run, which fires on `synchronize` for
+# every push to an open PR and measures the merge result rather than the branch tip,
+# and `push` is kept for `main` alone. Nothing that was verified stops being verified;
+# it stops being verified twice over, concurrently, by the two jobs least able to
+# share a host.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
 concurrency:

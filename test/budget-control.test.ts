@@ -29,6 +29,7 @@ import {
   EnvironmentControl,
   environmentSustainsBudget,
   expectTracksControl,
+  framesPerSpin,
   NO_CONTROL,
   overBudgetRate,
   SLOW_COMPOSITE_MS,
@@ -75,11 +76,78 @@ describe('the frame budget is enforced against a measured environment', () => {
     expect(CONTROL_TARGET_MS).toBeCloseTo(FRAME_BUDGET_MS / 2, 10);
     expect(CONTROL_TARGET_MS / CONTROL_PERIOD_MS).toBeCloseTo(0.25, 10);
     // The period runs from the end of one spin to the start of the next, so what a
-    // host doing what it was asked actually gives up is target/(target + period).
+    // host doing what it was asked is *asked* for is target/(target + period) — and
+    // that is a ceiling rather than a figure, because a spin can only start on a frame
+    // boundary and the boundary always lands past the deadline, never on it. A 60 Hz
+    // and a 120 Hz panel both quantise the fifth to a sixth; 240 Hz gets closest at
+    // 18.2%. Quantisation only ever lowers it, which is the safe direction: the control
+    // can under-occupy the thread and still be a control, where over-occupying it
+    // breaks the run it is measuring.
     expect(CONTROL_TARGET_MS / (CONTROL_TARGET_MS + CONTROL_PERIOD_MS)).toBeCloseTo(0.2, 10);
+    for (const hz of [60, 120, 240]) {
+      const duty = CONTROL_TARGET_MS / (framesPerSpin(hz) * (1000 / hz));
+      expect(duty).toBeLessThanOrEqual(CONTROL_TARGET_MS / (CONTROL_TARGET_MS + CONTROL_PERIOD_MS));
+    }
     // Paced by the wall clock, never by the display: a 120 Hz panel must not double
     // what the control costs, and a 60 Hz one must not halve what it measures.
     expect(CONTROL_PERIOD_MS).toBeGreaterThan(FRAME_BUDGET_MS);
+  });
+
+  /**
+   * The one reading every sample-count guard in `test/phase6-gate.test.ts` is taken
+   * from, checked against a scheduler rather than against itself.
+   *
+   * Those guards catch a control that died or was truncated; they say nothing about §8.
+   * But they are counts, counts come from the pacing, and the pacing has now moved
+   * twice — so the arithmetic that turns one into the other is asserted here against a
+   * simulated fixed-refresh scheduler, at each of the three panels the gate reads off.
+   *
+   * The `+ 1` in {@link framesPerSpin} is the whole subtlety: a spin runs *after* the
+   * frame body, so at 120 and 240 Hz, where `target + period` is an exact multiple of
+   * the refresh, the boundary that reaches the deadline has already been spent and the
+   * spin waits for the next one. Reading it off `ceil` alone gives 5 at 120 Hz against
+   * the 5.6 this project actually measures there, and a ratio guard built on 5 would
+   * fail a healthy run for the panel's arithmetic.
+   */
+  it('derives frames-per-spin from the pacing, and a scheduler agrees', () => {
+    expect(framesPerSpin(60)).toBe(3);
+    expect(framesPerSpin(120)).toBe(6);
+    expect(framesPerSpin(240)).toBe(11);
+
+    /** Frames on a fixed grid that slips only when a callback overruns its slot. */
+    const spinsOverFrames = (refreshHz: number, bodyMs: number, frames: number): number => {
+      const refreshMs = 1000 / refreshHz;
+      let now = 0;
+      const control = new EnvironmentControl(CONTROL_TARGET_MS, CONTROL_PERIOD_MS, {
+        now: () => now,
+        spin: () => {
+          now += CONTROL_TARGET_MS;
+          return CONTROL_TARGET_MS;
+        },
+      });
+      control.arm();
+      for (let frame = 0; frame < frames; frame++) {
+        now = Math.max(now, frame * refreshMs) + bodyMs;
+        control.tick();
+      }
+      return control.snapshot().count;
+    };
+
+    const frames = 600;
+    for (const hz of [60, 120, 240]) {
+      // An upper bound whatever the frame body costs, so the ratio guard cannot
+      // false-fail: a body that overruns its own slot slips the grid, which only ever
+      // means fewer frames to a spin.
+      for (const bodyMs of [0.01, 0.3, 4]) {
+        const spins = spinsOverFrames(hz, bodyMs, frames);
+        expect(spins).toBeGreaterThan(0);
+        expect(frames / spins).toBeLessThanOrEqual(framesPerSpin(hz));
+      }
+      // And a tight one where this gate actually lives — frame bodies of two to five
+      // tenths of a millisecond — so a control that stopped a third of the way in
+      // cannot hide under a bound that was slack to begin with.
+      expect(frames / spinsOverFrames(hz, 0.3, frames)).toBeGreaterThan(framesPerSpin(hz) - 2);
+    }
   });
 
   /**

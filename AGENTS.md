@@ -330,6 +330,19 @@ a gap lives in `recording.json`, never in the container.
   and the mutation survived all three. Quiet, the same mutation now fails in four runs
   of four, and in three of those four on §8's own number rather than on this branch at
   all, the controls having cleared the budget outright (8.40–11.10 ms).
+  **The deferred branch also has an accepted flake, and it is the same limit read from
+  the other side.** One clean quiet run in nine failed: a genuine 49.10 ms host stall at
+  play frame 3, against a worst spin of 32.10 ms and so a ceiling of 48.15 ms, on a
+  compositor with nothing wrong with it. The mechanism is `TRACKS_CONTROL`'s own premise
+  — the frame and the spin are sampled separately, so a stall lands in one or the other
+  — and the pacing fix below makes it marginally likelier by trading control exposure
+  from a quarter of the clock to a fifth: 166–170 play spins a run, against about 204
+  before it. **Roughly 1 in 9, on a clean compositor**, measured on this machine.
+  It is accepted rather than fixed, and the arithmetic is why: this gate is 100% red
+  today. Do not paper over it, do not retry it, and do not widen a bound to hide it —
+  `loom-gate-exposure-matched-control` is now the fix for **both** this flake and the
+  middle band above, since matching the control's exposure to the frame's own cost puts
+  the stall in both windows or neither, and it is raised in priority accordingly.
   **A control paced per frame is a bug**: half a budget per frame is a whole thread on a
   120 Hz panel, and the version that did that starved decode until every scrub target
   timed out at four seconds. It is paced by the wall clock instead, **from the end of
@@ -340,8 +353,17 @@ a gap lives in `recording.json`, never in the container.
   control loads it, on exactly the saturated hosts the control exists to characterise.
   From the end, the host gets a whole period back after every spin however long that
   spin took, the demand falls as the host dilates instead of rising, and the duty on a
-  healthy host is a fifth of the clock rather than the intended quarter.
-  `test/budget-control.test.ts` pins it with an injected clock and spin.
+  healthy host is at most a fifth of the clock rather than the intended quarter — at
+  most, because a spin can only begin on a frame boundary and the boundary lands past
+  the deadline rather than on it, which quantises the fifth to a sixth on both a 60 Hz
+  and a 120 Hz panel. That same quantisation is the whole of `framesPerSpin`, which is
+  where **every count the phase-6 gate asserts about the control comes from**: 3 frames
+  a spin at 60 Hz, 6 at 120 (5.6 measured), 11 at 240, so the floors are the 60 Hz
+  pairing with the frame floors and the ratio guard is the 240 Hz reading. Derive them
+  from it rather than restating them — they were restated once, the pacing moved, and
+  they were left describing a period that no longer existed.
+  `test/budget-control.test.ts` pins the pacing with an injected clock and spin, and
+  `framesPerSpin` against a simulated fixed-refresh scheduler.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
@@ -351,6 +373,17 @@ a gap lives in `recording.json`, never in the container.
   measured **across the same window**, never before or after it — the same no-op timer
   has reported 25.4 Hz beside one run and 80.7 Hz beside the next, and CI once failed
   a sampler handed 44 Hz against a control that found 69.5 Hz in a lull moments later.
+  The same rule holds **one level out, in the workflow**, and was being broken there
+  while it was kept here: `push: ['**']` beside `pull_request` started two full runs of
+  `ci.yml` per commit on any branch with an open PR, in two different `concurrency`
+  groups (`refs/heads/<branch>` and `refs/pull/<n>/merge`), so neither cancelled the
+  other and both ran the phase-6 gate simultaneously against one shared pool of macOS
+  hosts. Both runs of d26016c overlapped for the whole of both gates and each reported
+  one frame over budget — 21.3 ms and 123.6 ms against p99s of 3.5 ms and 6.2 ms. A
+  branch is now covered by its `pull_request` run alone (`synchronize` fires on every
+  push, and it measures the merge result); `push` is kept for `main`. Before adding a
+  second macOS job that runs concurrently with `verify`, note that these three gates
+  cannot tell a busy host apart from the defect they exist to catch.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and
@@ -391,10 +424,12 @@ a gap lives in `recording.json`, never in the container.
   `--disable-background-timer-throttling`. How it was identified, and the shape to look
   for if it comes back: time the frame body segment by segment and the pause turns up
   **inside calls that cannot spend a millisecond** — 10–20 ms readings inside
-  `resolve()` (0.2 µs of work, pinned by `packages/edl/test/hot-path.test.ts`), inside
-  `drawArrays`, inside `present`. CI reported the same event on a slower host as one
-  177 ms frame against a p99 of 7.9 ms, on the commit whose other run of that SHA
-  passed. Thirty runs with hardware decode disabled — so every frame carries CI's 30 MB
+  `drawArrays`, inside `present`, and inside `resolve()` (0.2 µs of work, pinned by
+  `packages/edl/test/hot-path.test.ts`). That last one is phase 7's: the measurement was
+  taken on `fm/loom-p7`, and on a branch before it the equivalent segment is the four
+  state assignments `PreviewLoop` makes where phase 7 calls `resolve(compiled, t)`. CI
+  reported the same event on a slower host as one 177 ms frame against a p99 of 7.9 ms,
+  on the commit whose other run of that SHA passed. Thirty runs with hardware decode disabled — so every frame carries CI's 30 MB
   CPU-backed upload — then held 2.6 ms worst with no run short of a frame, against
   three pauses in thirty-odd runs of the same arrangement without them. None of this
   makes anything faster or measures anything different: work still arrives as a number

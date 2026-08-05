@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import {
   environmentSustainsBudget,
   expectTracksControl,
+  framesPerSpin,
   type BudgetEvidence,
 } from './gate/budget-control.ts';
 import { shouldRelaunch } from './gate/relaunch.ts';
@@ -90,6 +91,51 @@ const ATTEMPT_TIMEOUT_MS = 120_000;
  * gets to look like weather.
  */
 const GATE_ATTEMPTS = 2;
+
+/**
+ * How few frames a phase may measure and still be a measurement rather than an anecdote.
+ *
+ * Not §8 — §8 is the budget, and these two only say the run happened. They are the
+ * denominators the control's own floors are read off, below.
+ */
+const SCRUB_FRAME_FLOOR = 30;
+const PLAY_FRAME_FLOOR = 60;
+
+/**
+ * The two panels the control's sample-count guards are read off, and nothing between
+ * them is assumed.
+ *
+ * A spin covers `framesPerSpin(hz)` frames, which *rises* with the refresh rate — 3
+ * frames at 60 Hz, 6 at 120, 11 at 240 — so the two guards below take opposite ends of
+ * that range. The floors have to survive the panel that produces the fewest spins per
+ * frame, and the ratio the one that produces the most.
+ */
+const SLOWEST_PANEL_HZ = 60;
+const FASTEST_PANEL_HZ = 240;
+
+/**
+ * The control's own floors, paired with the frame floors through the 60 Hz relation
+ * exactly as they have always been: 30 scrub frames are 10 spins there, 60 play frames
+ * are 20.
+ *
+ * Derived rather than written down, because the last time they were written down the
+ * pacing they were derived from moved and they did not. Nothing here is padded: a
+ * larger floor would fail a short-but-honest phase, and a smaller one would let a
+ * control that died a third of the way in look like one that ran.
+ */
+const SCRUB_SPIN_FLOOR = Math.floor(SCRUB_FRAME_FLOOR / framesPerSpin(SLOWEST_PANEL_HZ));
+const PLAY_SPIN_FLOOR = Math.floor(PLAY_FRAME_FLOOR / framesPerSpin(SLOWEST_PANEL_HZ));
+
+/**
+ * The most frames one control sample is ever allowed to speak for: 11, the 240 Hz
+ * reading of {@link framesPerSpin}.
+ *
+ * The loose half of the pair, and deliberately so — how many frames a spin covers is
+ * the *panel's* choice, not the gate's, so this is read off the fastest panel the gate
+ * expects to meet rather than off the one it happens to be running on. It still catches
+ * a control that ran for the first eleventh of a phase and stopped.
+ */
+const FRAMES_PER_SPIN_CAP = framesPerSpin(FASTEST_PANEL_HZ);
 
 async function buildHarness(outDir: string): Promise<void> {
   const common = { bundle: true, sourcemap: 'inline' as const, logLevel: 'warning' as const };
@@ -317,22 +363,23 @@ describe('phase 6 gate: 4K scrub and play', () => {
       expect(report.fixture.observedFps, detail).toBeLessThan(30);
 
       // ---- half one: no frame over 16 ms -----------------------------------
-      expect(report.scrub.count, detail).toBeGreaterThanOrEqual(30);
-      expect(report.play.count, detail).toBeGreaterThanOrEqual(60);
+      expect(report.scrub.count, detail).toBeGreaterThanOrEqual(SCRUB_FRAME_FLOOR);
+      expect(report.play.count, detail).toBeGreaterThanOrEqual(PLAY_FRAME_FLOOR);
       // The control ran, and ran across those frames rather than stopping partway.
       // Asserted before it is consulted, because a control that produced nothing must
       // not be able to quietly excuse anything — `environmentSustainsBudget` enforces
       // the bound on an empty control for the same reason, and this is what makes an
-      // empty or truncated one loud rather than invisible. The ratio is the loose half
-      // of that pair and deliberately so: the control is paced by a wall clock at one
-      // spin per two 60 Hz refreshes, so how many frames a spin covers is the *panel's*
-      // choice — every other frame at 60 Hz, every fourth on the 120 Hz one this was
-      // written on. One in eight leaves room for a 240 Hz panel and still catches a
-      // control that ran for the first eighth of a phase and stopped.
-      expect(report.control.scrub.count, detail).toBeGreaterThanOrEqual(15);
-      expect(report.control.play.count, detail).toBeGreaterThanOrEqual(30);
-      expect(report.control.scrub.count * 8, detail).toBeGreaterThanOrEqual(report.scrub.count);
-      expect(report.control.play.count * 8, detail).toBeGreaterThanOrEqual(report.play.count);
+      // empty or truncated one loud rather than invisible. All four numbers are
+      // `framesPerSpin` read at one panel or the other; none of them is a judgement
+      // about the compositor, and none of them is §8.
+      expect(report.control.scrub.count, detail).toBeGreaterThanOrEqual(SCRUB_SPIN_FLOOR);
+      expect(report.control.play.count, detail).toBeGreaterThanOrEqual(PLAY_SPIN_FLOOR);
+      expect(report.control.scrub.count * FRAMES_PER_SPIN_CAP, detail).toBeGreaterThanOrEqual(
+        report.scrub.count,
+      );
+      expect(report.control.play.count * FRAMES_PER_SPIN_CAP, detail).toBeGreaterThanOrEqual(
+        report.play.count,
+      );
 
       // §8's number, on the worst frame and with no allowance. `p99Ms` stays in the
       // printed report because it is what tells a regression apart from a single
