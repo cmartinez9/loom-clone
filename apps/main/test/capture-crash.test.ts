@@ -49,6 +49,31 @@ const AVCONVERT = '/usr/bin/avconvert';
 /** The gate, per architecture report §8. Not a target — a floor. */
 const RECOVERY_FLOOR = 0.95;
 
+/**
+ * Frames the writer must have been handed before killing it measures anything.
+ *
+ * A `SIGKILL` costs a small and *constant* number of frames, not a proportion: the
+ * writer holds exactly one sample so it can measure each frame's duration against the
+ * next one's timestamp, and the child has at most one append in flight behind it, so
+ * one or two frames go and never more — one in most of the runs behind this comment
+ * and two in the rest, whatever the recording's length.
+ *
+ * So the 95% floor is a statement about the writer only while the denominator is large
+ * enough for that constant to fit under 5%. This harness used to kill purely on the
+ * clock and settle for whatever the child had managed by then, which is fine at the
+ * ~80 frames it feeds in 400 ms with the machine to itself and not fine at the ~36 it
+ * manages when the rest of the suite is running: two frames out of 36 is 5.6%, and the
+ * gate fails on arithmetic rather than on anything the writer did.
+ *
+ * 60 leaves a real margin — two frames is 3.3% — and is still early in a stream fed at
+ * 250 fps. The kill therefore waits for the stream as well as for the clock, which on
+ * an unloaded machine changes nothing at all.
+ */
+const MIN_HANDED_FRAMES = 60;
+
+/** How long to wait for {@link MIN_HANDED_FRAMES}. Generous; a bound, not a schedule. */
+const HANDED_TIMEOUT_MS = 20_000;
+
 const scratch = await mkdtemp(join(tmpdir(), 'loom-capture-gate-'));
 const childBundle = join(scratch, 'capture-child.cjs');
 
@@ -119,10 +144,13 @@ async function recordAndKill(mode: 'real' | 'buffered', killAfterMs: number): Pr
   try {
     await waitForOutput(child, 'ready', stderr);
     await delay(killAfterMs);
+    // ...and far enough into the stream for the floor to mean something. On an idle
+    // machine this has already happened and returns at once; see MIN_HANDED_FRAMES.
+    await untilHanded(progressPath, MIN_HANDED_FRAMES, HANDED_TIMEOUT_MS);
     child.kill('SIGKILL');
     const exit = await onceExit(child);
 
-    const handed = (await readFile(progressPath, 'utf8')).split('\n').filter(Boolean).length;
+    const handed = await handedCount(progressPath);
     const recordingId = (await readFile(idFilePath, 'utf8')).trim();
     return {
       handed,
@@ -266,6 +294,26 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Frames the child has handed the writer, read from the log it appends to with a
+ * synchronous `write(2)` *before* each append. Readable while the child is alive for
+ * exactly the reason it is trustworthy after the child is dead: the kernel has it.
+ */
+async function handedCount(progressPath: string): Promise<number> {
+  return (await readFile(progressPath, 'utf8')).split('\n').filter(Boolean).length;
+}
+
+/** Wait until the child has handed over `count` frames. Bounded, and never throws. */
+async function untilHanded(progressPath: string, count: number, timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while ((await handedCount(progressPath)) < count) {
+    // Returning on the bound rather than throwing leaves the precondition assertion in
+    // the test to say what went wrong, with the number it actually reached.
+    if (Date.now() - startedAt >= timeoutMs) return;
+    await delay(5);
+  }
+}
+
 function onceExit(
   child: ReturnType<typeof spawn>,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -309,7 +357,11 @@ describe('SIGKILL mid-recording', () => {
     it(`recovers at least 95% of frames after a kill at ${String(killAfterMs)}ms`, async () => {
       const killed = await recordAndKill('real', killAfterMs);
       expect(killed.killedBySignal, 'the child must die from SIGKILL, not finish').toBe(true);
-      expect(killed.handed, 'the harness must catch the child mid-recording').toBeGreaterThan(30);
+      expect(
+        killed.handed,
+        'the harness must catch the child mid-recording, with enough frames behind it ' +
+          'for the floor below to be a measurement',
+      ).toBeGreaterThanOrEqual(MIN_HANDED_FRAMES);
 
       const { report, bundleDir, project, recording, index } = await recover(killed);
 
@@ -360,7 +412,7 @@ describe('SIGKILL mid-recording', () => {
   it('CONTROL: the same harness recovers nothing from a writer that buffers', async () => {
     const killed = await recordAndKill('buffered', 650);
     expect(killed.killedBySignal).toBe(true);
-    expect(killed.handed).toBeGreaterThan(30);
+    expect(killed.handed).toBeGreaterThanOrEqual(MIN_HANDED_FRAMES);
 
     const store = new ProjectStore({
       recordingsRoot: killed.root,

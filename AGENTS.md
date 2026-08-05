@@ -291,6 +291,11 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   one that killed a copy of `writeAtomic`. Both gates now kill the real path, both
   have a control that must fail, and `npm run verify:mutation` breaks the writer on
   disk and requires the tests to notice. Add a mutation when you add a property.
+  The kill waits for the stream as well as the clock: a `SIGKILL` costs a _constant_
+  one or two frames, not a proportion, so ≥95% recovered is only a claim about the
+  writer once ~60 frames are behind it. Killing purely on a 400 ms timer gave ~80
+  frames on an idle machine and ~36 under the full suite, where two lost frames is
+  5.6% and the gate failed on arithmetic. See `MIN_HANDED_FRAMES`.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
