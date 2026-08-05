@@ -322,8 +322,8 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
    * a sampler that has stopped sampling — otherwise the throttled branch is a way to
    * pass by producing nothing, and the assertions above prove nothing on any developer
    * machine under this task policy. So both branches are exercised here directly, with
-   * the two ceilings this has actually been measured against: 25.4 Hz under the policy,
-   * 119.9 Hz from an ordinary shell.
+   * the three ceilings this has actually been measured against: 25.4 Hz under the
+   * policy, 51.0 Hz on a CI runner, 119.9 Hz from an ordinary shell.
    */
   it('CONTROL: a stalled sampler fails, throttled machine or not', () => {
     const throttled = { requestedHz: SAMPLE_HZ, ticks: 34, seconds: 1.337, hz: 25.4 };
@@ -372,5 +372,32 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
         windowMs: SAMPLE_WINDOW_MS,
       }),
     ).toContain('this environment cannot sustain');
+
+    // The figures CI actually produced. A machine handed 51.0 Hz for a 120 Hz request
+    // cannot sustain 120 Hz by any reading, but 51.0 Hz over 1200 ms arrives 1.2 samples
+    // the far side of a 60-sample bound — so a ceiling is only the sampler's to meet
+    // when it clears the bound by more than two measurements of one throttled machine
+    // disagree by. This sampler tracked that ceiling at 94% and is reported, not failed.
+    const marginal = { requestedHz: SAMPLE_HZ, ticks: 62, seconds: 1.216, hz: 51.0 };
+    expect(
+      expectSampleCount({
+        what: 'a sampler riding a ceiling that barely clears the bound',
+        hz: 47.8,
+        control: marginal,
+        count: 58,
+        floor: 60,
+        windowMs: SAMPLE_WINDOW_MS,
+      }),
+    ).toContain('this environment cannot sustain');
+    // And that concession still does not extend to a sampler that stopped.
+    expect(() =>
+      expectSampleCount({
+        ...stalled,
+        control: marginal,
+        count: 3,
+        floor: 60,
+        windowMs: SAMPLE_WINDOW_MS,
+      }),
+    ).toThrow(/falling behind this machine's own ceiling/);
   });
 });
