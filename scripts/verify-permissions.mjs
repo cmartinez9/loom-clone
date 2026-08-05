@@ -3,6 +3,9 @@
  *
  *   node scripts/verify-permissions.mjs               # package if needed, then run
  *   node scripts/verify-permissions.mjs --repackage   # always rebuild the bundle
+ *   node scripts/verify-permissions.mjs --mic-revocation   # ...and the §7.3 check
+ *                                                          # that needs you to flip
+ *                                                          # a switch mid-recording
  *   node scripts/verify-permissions.mjs --app <path>  # use an existing .app
  *
  * Architecture report §8: *"Run from a signed bundle, not a dev binary — dev
@@ -46,6 +49,15 @@ const SCRATCH = '---loom-verify-scratch:';
 
 const args = process.argv.slice(2);
 const wantRepackage = args.includes('--repackage');
+/**
+ * Run the §7.3 microphone-revocation check, which needs a person.
+ *
+ * Off by default because there is no programmatic way to revoke a TCC permission:
+ * the check starts a real recording and waits for somebody to switch Microphone off
+ * in System Settings. Without the flag it reports `skipped` and says so, rather than
+ * sitting there for ninety seconds and then reporting a gap that was never a defect.
+ */
+const wantMicRevocation = args.includes('--mic-revocation');
 const appArg = valueOf('--app');
 const outPath = valueOf('--out') ?? join(root, 'verify-permissions.json');
 
@@ -213,11 +225,29 @@ async function ensureIdentity(appPath, wantedId) {
  */
 const LAUNCH_TIMEOUT_MS = 4 * 60_000;
 
+/**
+ * ...and how long with `--mic-revocation`, which additionally waits for a person to
+ * walk to System Settings and back. The harness's own window is 90 s; this is that
+ * plus the rest of the run, with room for a slow first launch.
+ */
+const MIC_REVOCATION_TIMEOUT_MS = 7 * 60_000;
+
 async function launch(appPath) {
   const stdoutPath = join(root, '.verify-stdout.log');
   const stderrPath = join(root, '.verify-stderr.log');
   await writeFile(stdoutPath, '');
   await writeFile(stderrPath, '');
+
+  if (wantMicRevocation) {
+    console.log(
+      '\n  --mic-revocation: the app will start a real recording and wait for you.\n' +
+        '  When it does, switch "Loom Clone" OFF under\n' +
+        '    System Settings › Privacy & Security › Microphone\n' +
+        '  The app has no stdio while LaunchServices owns it, so follow along with\n' +
+        `    tail -f ${stdoutPath}\n` +
+        '  Switch it back ON afterwards, or the next run has nothing to revoke.\n',
+    );
+  }
 
   console.log('  launching via LaunchServices (open -a)…\n');
   let timedOut = false;
@@ -235,16 +265,20 @@ async function launch(appPath) {
         stderrPath,
         '--args',
         '--verify-permissions',
+        ...(wantMicRevocation ? ['--mic-revocation'] : []),
       ],
       { stdio: 'inherit' },
     );
-    const timer = setTimeout(() => {
-      timedOut = true;
-      // Kills the waiting `open`, not the app: LaunchServices owns that process and
-      // this script never had it. Saying so is the point — a stuck app the developer
-      // cannot see is worse than one they have been told to quit.
-      child.kill('SIGTERM');
-    }, LAUNCH_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => {
+        timedOut = true;
+        // Kills the waiting `open`, not the app: LaunchServices owns that process and
+        // this script never had it. Saying so is the point — a stuck app the developer
+        // cannot see is worse than one they have been told to quit.
+        child.kill('SIGTERM');
+      },
+      wantMicRevocation ? MIC_REVOCATION_TIMEOUT_MS : LAUNCH_TIMEOUT_MS,
+    );
     child.on('close', (closeCode) => {
       clearTimeout(timer);
       resolveCode(closeCode);
@@ -296,6 +330,9 @@ function explainWhatIsMissing(report) {
   if (!report.permissions.accessibility.axTrusted) {
     needs.add('Privacy & Security › Accessibility');
   }
+  if (report.permissions.statuses.microphone !== 'granted') {
+    needs.add('Privacy & Security › Microphone');
+  }
   if (needs.size > 0) {
     console.log('\n  Switch "Loom Clone" on in System Settings:');
     for (const pane of needs) console.log(`    · ${pane}`);
@@ -328,8 +365,9 @@ async function main() {
 
   if (timedOut) {
     if (stderr !== '') console.error(stderr);
+    const budget = wantMicRevocation ? MIC_REVOCATION_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
     fail(
-      `the app did not exit within ${LAUNCH_TIMEOUT_MS / 1000}s and produced no report. ` +
+      `the app did not exit within ${budget / 1000}s and produced no report. ` +
         'Everything it managed to print is above — the last check named there is the one ' +
         `that did not come back.\n  Quit "Loom Clone" (it is still running) before ` +
         're-running this.',

@@ -13,6 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -59,6 +60,13 @@ const harness = vi.hoisted(() => ({
    * tells them apart.
    */
   screenAccess: 'granted',
+  /**
+   * And what it says about the Microphone. Mutable for the same reason and for a
+   * sharper one: `decision-mic-revocation.md` turns on reading this *while the
+   * recording is still running*, which is the one moment the answer is about the
+   * event that just happened.
+   */
+  micAccess: 'granted',
 }));
 
 vi.mock('electron', () => {
@@ -95,7 +103,11 @@ vi.mock('electron', () => {
     shell: { openExternal: () => Promise.resolve() },
     systemPreferences: {
       getMediaAccessStatus: (kind: string) =>
-        kind === 'screen' ? harness.screenAccess : 'granted',
+        kind === 'screen'
+          ? harness.screenAccess
+          : kind === 'microphone'
+            ? harness.micAccess
+            : 'granted',
       isTrustedAccessibilityClient: () => false,
     },
   };
@@ -174,6 +186,27 @@ async function untilState(id: RecordingId, state: ProjectState): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`timed out waiting for ${id} to reach ${state}`);
+}
+
+/**
+ * Prove the media plays, using AVFoundation rather than our own reader.
+ *
+ * The same standard `apps/main/test/capture-crash.test.ts` holds a crash-recovered
+ * recording to, for the same reason: our own scanner agreeing with our own writer
+ * would prove only that they agree. `PresetPassthrough` remuxes without re-encoding,
+ * so it exercises the demuxer and every sample table without spending a decode, and
+ * `/usr/bin/avconvert` ships with macOS — the only platform this app runs on.
+ */
+function playsUnderAVFoundation(mediaPath: string, outPath: string): { ok: boolean; log: string } {
+  const result = spawnSync(
+    '/usr/bin/avconvert',
+    ['--source', mediaPath, '--output', outPath, '--preset', 'PresetPassthrough'],
+    { encoding: 'utf8', timeout: 60_000 },
+  );
+  return {
+    ok: result.status === 0,
+    log: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim(),
+  };
 }
 
 function metaMessage(): unknown {
@@ -420,6 +453,7 @@ beforeEach(async () => {
   harness.handlers.clear();
   harness.windows.clear();
   harness.screenAccess = 'granted';
+  harness.micAccess = 'granted';
   scratch = await mkdtemp(join(tmpdir(), 'loom-recorder-session-'));
   store = new ProjectStore({
     recordingsRoot: join(scratch, 'recordings'),
@@ -694,6 +728,239 @@ describe('the audio tracks', () => {
 
     expect((await store.list()).find((s) => s.id === id)?.state).toBe('editable');
     expect((await readRecordingDoc(id)).tracks.screen?.parts[0]?.frameCount).toBe(frames.length);
+  });
+});
+
+/**
+ * The captain's `data/loom-scope/decision-mic-revocation.md`, in full.
+ *
+ * > *"stop recording and tell the user to re-grant"*
+ *
+ * Three things have to be true together and none of them was: the recording
+ * **stops**, the user is told a **permission was revoked** rather than that a device
+ * disconnected, and what was already captured **survives and plays**. Before this,
+ * the §7.3 re-check covered the screen track only, so a withdrawn Microphone grant
+ * took §7.4's webcam path — recorded as `device-lost`, with the recording carrying
+ * on.
+ *
+ * Every one of these fails against that behaviour, and the two CONTROL rows are what
+ * stop them from passing for the wrong reason: a build that stopped on *any* audio
+ * track ending, or that wrote `permission-revoked` for every one, would pass the
+ * first three and fail the controls.
+ */
+describe('a Microphone grant withdrawn mid-recording (§7.3, decision-mic-revocation)', () => {
+  /**
+   * Record some screen and some microphone, then have the mic track end on its own.
+   *
+   * `audioEnded` is the message the capture page sends the instant a track stops —
+   * not the end report, which arrives only once the recording is already over and
+   * therefore cannot stop anything.
+   */
+  async function recordThenMicEnds(
+    cause: 'track-ended' | 'encoder-failed' = 'track-ended',
+  ): Promise<{ id: RecordingId; contents: FakeContents; frames: FixtureFrame[] }> {
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    const frames = fixture.frames.slice(0, 10);
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of frames) emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    emit(CHANNEL.captureMeta, contents, audioMetaMessage('mic'));
+    await untilAudioPartOpen(id, 'mic');
+    for (let i = 0; i < 8; i++) emit(CHANNEL.captureChunk, contents, audioChunkMessage('mic', i));
+    await until(() => store.mediaFrameCount(id, 'mic') >= 8, 'the mic frames');
+    await until(() => store.mediaFrameCount(id, 'screen') >= 9, 'the screen frames');
+
+    emit(CHANNEL.captureAudioEnded, contents, {
+      track: 'mic',
+      part: 0,
+      cause,
+      detail: 'the mic track ended',
+    });
+    return { id, contents, frames };
+  }
+
+  /** Every `stop` command main has sent the capture page. */
+  function stopCommands(contents: FakeContents): unknown[] {
+    return contents.sent
+      .filter((message) => message.channel === CHANNEL.captureCommand)
+      .map((message) => message.payload)
+      .filter((payload) => (payload as { kind?: string }).kind === 'stop');
+  }
+
+  /** Answer the stop main asked for, exactly as the capture page would. */
+  function answerStop(contents: FakeContents, frames: FixtureFrame[]): void {
+    const mic = audioReport('mic', 8);
+    // The renderer no longer names a reason — that is the fix, at its source. What it
+    // reports is that the track ended early; main is what decides why.
+    mic['endedEarly'] = true;
+    emit(CHANNEL.captureEnded, contents, endedMessage(frames, [mic]));
+  }
+
+  it('stops the recording, rather than carrying on without the microphone', async () => {
+    harness.micAccess = 'denied';
+    const { id, contents, frames } = await recordThenMicEnds();
+
+    await until(
+      () => stopCommands(contents).length === 1,
+      'main to stop the capture page after the grant went away',
+    );
+    answerStop(contents, frames);
+    // Finalized, not failed and not discarded: the bundle reaches `editable`, which
+    // is the state a recording the user pressed stop on reaches.
+    await untilState(id, 'editable');
+    await until(() => lastStatus(contents).phase === 'idle', 'the recorder to come to rest');
+  });
+
+  it('names the cause as a revoked permission, in recording.json and to the user', async () => {
+    harness.micAccess = 'denied';
+    const { id, contents, frames } = await recordThenMicEnds();
+    await until(() => stopCommands(contents).length === 1, 'the stop');
+    answerStop(contents, frames);
+    await untilState(id, 'editable');
+    await until(() => lastStatus(contents).phase === 'idle', 'the recorder to come to rest');
+
+    // On disk: the word §2.3 has for this, and not the one an unplugged webcam gets.
+    const doc = await readRecordingDoc(id);
+    expect(validateRecordingDoc(doc).ok).toBe(true);
+    const mic = doc.tracks.mic?.parts[0];
+    expect(mic?.endedEarly).toBe(true);
+    expect(mic?.endReason).toBe('permission-revoked');
+
+    // And to the user: a notice about a permission, carrying the recording it
+    // stopped — not the error line, because the recording did not fail.
+    const status = lastStatus(contents);
+    expect(status.revoked?.kind).toBe('microphone');
+    expect(status.revoked?.recordingId).toBe(id);
+    expect(status.revoked?.recordedSec).toBeGreaterThan(0);
+    expect(status.error).toBeNull();
+    expect(status.phase).toBe('idle');
+  });
+
+  it('keeps what was already captured, and it plays', async () => {
+    // The point with teeth: decision 5 deletes raw sources after an export, so a
+    // partial recording thrown away at stop time is gone for good.
+    harness.micAccess = 'denied';
+    const { id, contents, frames } = await recordThenMicEnds();
+    await until(() => stopCommands(contents).length === 1, 'the stop');
+    answerStop(contents, frames);
+    await untilState(id, 'editable');
+
+    const doc = await readRecordingDoc(id);
+    const screen = doc.tracks.screen?.parts[0];
+    expect(screen?.frameCount).toBe(frames.length);
+    expect(doc.tracks.mic?.parts[0]?.durationSec).toBeGreaterThan(0);
+
+    const dir = await store.directoryFor(id);
+    const index = validateFrameIndexDoc(
+      JSON.parse(await readFile(join(dir, screen?.index ?? ''), 'utf8')),
+    );
+    expect(index.ok).toBe(true);
+
+    // Playable according to AVFoundation rather than according to our own reader —
+    // the same standard `capture-crash.test.ts` holds a recovered recording to.
+    const played = playsUnderAVFoundation(
+      join(dir, screen?.file ?? ''),
+      join(scratch, 'revoked-passthrough.mov'),
+    );
+    expect(played.ok, `avconvert refused the surviving media:\n${played.log}`).toBe(true);
+  });
+
+  it('CONTROL: a microphone that merely went away does not stop the recording', async () => {
+    // The §7.4 path, which phase 4 built and this change must not have touched: a
+    // device that vanished may come back and is worth waiting for. Without this row
+    // a build that stopped on *any* audio track ending would pass everything above.
+    harness.micAccess = 'granted';
+    const { id, contents, frames } = await recordThenMicEnds();
+    await tick();
+    await tick();
+    expect(stopCommands(contents), 'a lost device must not end the recording').toHaveLength(0);
+    expect(lastStatus(contents).phase).toBe('recording');
+    expect(lastStatus(contents).revoked).toBeNull();
+
+    // ...and it is still recording the screen, after the microphone has gone.
+    for (const frame of fixture.frames.slice(10, 16)) {
+      emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    }
+    await until(
+      () => store.mediaFrameCount(id, 'screen') >= 15,
+      'the screen to still be recording',
+    );
+
+    const stopping = recorder.stop();
+    answerStop(contents, [...frames, ...fixture.frames.slice(10, 16)]);
+    await stopping;
+
+    const doc = await readRecordingDoc(id);
+    expect(doc.tracks.mic?.parts[0]?.endReason).toBe('device-lost');
+    expect(doc.tracks.screen?.parts[0]?.frameCount).toBe(16);
+  });
+
+  it('CONTROL: an encoder that failed is not a revoked permission', async () => {
+    // `encoder-failed` is not a device and not a grant, whatever TCC happens to say
+    // at that moment. A build that re-read TCC for every audio-track end would stop
+    // the recording here — and would be wrong about the cause as well.
+    harness.micAccess = 'denied';
+    const { id, contents, frames } = await recordThenMicEnds('encoder-failed');
+    await tick();
+    await tick();
+    expect(stopCommands(contents)).toHaveLength(0);
+
+    const stopping = recorder.stop();
+    answerStop(contents, frames);
+    await stopping;
+
+    expect((await readRecordingDoc(id)).tracks.mic?.parts[0]?.endReason).toBe('crash');
+  });
+
+  it('classifies a track that ended without a report, at finalize', async () => {
+    // The capture page can end a track inside its own stop — an encoder that errors
+    // during the flush — and the mid-recording message is deliberately not sent then.
+    // §7.3's answer must not be "no reason at all": the same read is taken at
+    // finalize, the way `endReasonFor` already does it for the screen.
+    harness.micAccess = 'denied';
+    const id = await recorder.start({ fps: fixture.fps });
+    const contents = captureContents();
+    const frames = fixture.frames.slice(0, 10);
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of frames) emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    emit(CHANNEL.captureMeta, contents, audioMetaMessage('mic'));
+    await untilAudioPartOpen(id, 'mic');
+    for (let i = 0; i < 8; i++) emit(CHANNEL.captureChunk, contents, audioChunkMessage('mic', i));
+    await until(() => store.mediaFrameCount(id, 'mic') >= 8, 'the mic frames');
+
+    const stopping = recorder.stop();
+    answerStop(contents, frames);
+    await stopping;
+
+    expect((await readRecordingDoc(id)).tracks.mic?.parts[0]?.endReason).toBe('permission-revoked');
+  });
+
+  it('refuses a mic end report from a recording that opened no microphone', async () => {
+    // The only message a renderer can send that ends a recording, so it is checked
+    // against what the recording actually asked for.
+    harness.micAccess = 'denied';
+    const id = await recorder.start({ fps: fixture.fps, micDeviceId: null });
+    const contents = captureContents();
+    emit(CHANNEL.captureMeta, contents, metaMessage());
+    for (const frame of fixture.frames.slice(0, 6)) {
+      emit(CHANNEL.captureChunk, contents, chunkMessage(frame));
+    }
+    await until(() => store.mediaFrameCount(id, 'screen') >= 5, 'the frames');
+
+    emit(CHANNEL.captureAudioEnded, contents, { track: 'mic', part: 0, cause: 'track-ended' });
+    // ...and a malformed one, which must not throw out of the listener either.
+    expect(() => {
+      emit(CHANNEL.captureAudioEnded, contents, { track: 'nope', cause: 'track-ended' });
+    }).not.toThrow();
+    await tick();
+    await tick();
+
+    expect(stopCommands(contents)).toHaveLength(0);
+    expect(lastStatus(contents).phase).toBe('recording');
+
+    const stopping = recorder.stop();
+    emit(CHANNEL.captureEnded, contents, endedMessage(fixture.frames.slice(0, 6)));
+    await stopping;
   });
 });
 

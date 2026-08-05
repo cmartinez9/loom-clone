@@ -86,6 +86,7 @@ body {
 .btn[hidden],
 .hud-dot[hidden],
 .hud-notice[hidden],
+.hud-revoked[hidden],
 .hud-error[hidden] {
   display: none;
 }
@@ -106,4 +107,27 @@ body {
   color: var(--fg);
   background: var(--bg);
   border-top: var(--line) solid var(--keyline);
+}
+
+/* §7.3's revoked-permission shelf. Ink rather than the record accent, like the
+   camera banner and unlike the error line: the recording stopped, but it saved
+   what it had. The button is what turns "tell them to re-grant" into something
+   they can act on without leaving the HUD. */
+.hud-revoked {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  color: var(--fg);
+  background: var(--bg);
+  border-top: var(--line) solid var(--keyline);
+}
+
+.hud-revoked p {
+  margin: 0;
+  flex: 1;
+}
+
+.hud-revoked .btn {
+  flex: none;
 }

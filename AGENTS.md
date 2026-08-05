@@ -31,8 +31,11 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture and the timeline model 19 ways; each must fail a gate
+npm run verify:mutation   # break capture and the timeline model 21 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
+node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
+node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
+                                                       # to switch Microphone off mid-recording
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
@@ -529,7 +532,7 @@ of its own, recorded below as item 8.
    how long `getUserMedia` refuses a device that has just re-enumerated, and whether
    the same `deviceId` really comes back.
 
-None of the four is answered by `npm run verify:permissions`: the two audio ones need
+None of the four is answered by an ordinary `npm run verify:permissions`: the two audio ones need
 `node scripts/smoke-capture.mjs` without `--synthetic` on a granted machine, and the
 two camera ones need a real camera and a real cable. Do not read the gate's green rows
 as covering them.
@@ -544,18 +547,59 @@ grant, rather than failing three layers down in `desktopCapturer` with "Failed t
 sources". Run it after any change to capture: it is the only thing that watches the
 two clocks, and it is what caught both of phase 3's real bugs.
 
-**And one phase 2 opened and did not close:**
+**And one phase 2 opened, now closed in code and open on hardware:**
 
-8. **A revoked Microphone is recorded as a lost device.** §7.3 asks for the mic case —
-   _"Microphone revoked → keep recording screen and system audio. Mark the mic part
-   `endedEarly`"_ — and the part is marked, but with the wrong reason. The TCC re-check
-   that tells `permission-revoked` apart from `device-lost` is applied to the **screen**
-   track only (`endReasonFor` in `apps/main/src/recorder/session.ts`); an audio track
-   that ends on its own still carries the capture page's `device-lost`, which `reportOf`
-   in `apps/renderer/src/capture/audio.ts` states at the field. Closing it is a
-   `readMediaStatus('microphone')` read on the same path in main, not a design question
-   — the renderer cannot do it, because reading TCC is main's alone (see
-   `apps/main/src/permissions.ts`'s header).
+8. ~~**A revoked Microphone is recorded as a lost device.**~~ Fixed — see § A revoked
+   Microphone, below. What is **still owed** is the same kind of evidence items 4–7 are
+   owed: nobody has watched a real grant move under a signed bundle.
+   `node scripts/verify-permissions.mjs --mic-revocation` is the check that would, and it has
+   **never been run**, because running it repackages and re-signs the bundle and that
+   costs the captain his grants. Its row therefore reports `skipped`, which is the
+   honest answer and not a pass.
+
+## A revoked Microphone, and why it is not the webcam path
+
+A device that vanished may come back and is worth waiting for; a permission the user
+withdrew will not come back without their action. The app was reporting the second as
+the first. The captain settled it in `data/loom-scope/decision-mic-revocation.md`:
+**"stop recording and tell the user to re-grant"** — a deliberate divergence from
+§7.3's own _"Microphone revoked → keep recording screen and system audio"_, on grounds
+§7.3 does not consider. Say so when you touch this; do not quietly re-align with the
+report.
+
+The two paths are now **explicit**, not implicit, and that is the point of the shape:
+
+- The capture page reports the **observation** and never the cause —
+  `AudioSink.ended` → `capture.audioEnded`, sent the moment a track stops rather than
+  in the end report. `reportOf` no longer names an `endReason` at all; it used to say
+  `device-lost` for every track that ended, which _was_ the bug.
+- Main decides, in `audioEndReasonFor` (`recorder/session.ts`), the audio counterpart
+  of `endReasonFor` and the only place the distinction is drawn. Reading TCC is main's
+  alone (`apps/main/src/permissions.ts`'s header), so the renderer structurally cannot
+  get this wrong again.
+- **The evidence is perishable.** What TCC says at the end of a twenty-minute
+  recording is not what it said at minute two, so the answer is decided when the track
+  stops and kept in `Active.audioEnd`; finalize only classifies what it has no answer
+  for.
+- Which grants stop a recording is **data**, not an `if`: `revocationStopsRecording`
+  in `packages/permissions/src/kinds.ts`, beside `whenRevokedMidRecording`, the
+  sentence every surface renders. Screen and Microphone stop; Camera and Accessibility
+  do not (§7.4).
+- Stopping is the **ordinary** `stop()`: the capture page flushes, the bundle
+  finalizes to `editable` with what it has. Nothing is discarded — decision 5 deletes
+  raw sources after an export, so a partial recording thrown away here is gone for
+  good.
+- The notice is `RecorderStatus.revoked`, not `error`: the recording stopped, it did
+  not fail. It lives on the session rather than on `Active` because it has to outlive
+  the recording it describes — by the time anyone reads it the recorder is `idle` —
+  and `start()` is what clears it.
+
+Covered by `apps/main/test/recorder-session.test.ts` (both controls: a device that
+merely went away must _not_ stop the recording, and an encoder failure is not a
+revocation), `apps/renderer/test/capture-session.test.ts` (the renderer names no
+cause), `test/hud-notice.test.ts` (the notice measured in pixels, with the same
+no-fit control §7.4's banner has) and two mutations in `npm run verify:mutation`.
+What none of them can establish is on hardware — see carried-forward item 8.
 
 ## Permissions and first run, in one paragraph
 
@@ -588,15 +632,18 @@ it through LaunchServices and runs the checks from inside the real bundle. Last 
 2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
 `responsibleForSelf: true`, so `sealReport` downgraded nothing. The run's own outcome
 is `incomplete` rather than `verified`, because `verified` needs every check to pass
-and the click row is `skipped`.
+and the click row is `skipped`. The table's last row was added afterwards and has not
+been run at all — the figures above are from the 2026-08-05 bundle and say nothing
+about it.
 
-| Check                  | Status      | Evidence                                                                                                                                                                                                             |
-| ---------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle-identity`      | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                             |
-| `frame-authorisation`  | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                       |
-| `screen-enumeration`   | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                               |
-| `content-protection`   | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                  |
-| `accessibility-clicks` | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in the window, so the rate is unmeasured. Rate and latency are deferred to phase 10 by captain decision — it consumes the log. |
+| Check                   | Status      | Evidence                                                                                                                                                                                                                                                       |
+| ----------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`       | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                                                                       |
+| `frame-authorisation`   | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                                                                 |
+| `screen-enumeration`    | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                                                                         |
+| `content-protection`    | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                            |
+| `accessibility-clicks`  | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in the window, so the rate is unmeasured. Rate and latency are deferred to phase 10 by captain decision — it consumes the log.                                           |
+| `microphone-revocation` | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from
 the HUD's rectangle" passes just as well when the capture is black, the coordinates are

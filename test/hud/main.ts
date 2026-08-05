@@ -20,7 +20,13 @@ import { app, type BrowserWindow } from 'electron';
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { CHANNEL, type CameraState, type RecorderPhase, type RecorderStatus } from '@loom/ipc';
+import {
+  CHANNEL,
+  type CameraState,
+  type RecorderPhase,
+  type RecorderStatus,
+  type RevocationNotice,
+} from '@loom/ipc';
 import { ProjectStore } from '../../apps/main/src/project-store.ts';
 import { installLoomProtocol, registerLoomScheme } from '../../apps/main/src/protocol.ts';
 import { WindowRegistry } from '../../apps/main/src/windows.ts';
@@ -110,6 +116,8 @@ const PROBE_SCRIPT = `(() => {
   };
   const notice = document.getElementById('camera');
   const error = document.getElementById('error');
+  const revoked = document.getElementById('revoked');
+  const revokedButton = document.getElementById('revoked-settings');
   const record = document.getElementById('record');
   const stop = document.getElementById('stop');
   const control = record.hidden ? stop : record;
@@ -121,6 +129,12 @@ const PROBE_SCRIPT = `(() => {
     noticeOnTop: !notice.hidden && onTop(notice),
     errorVisiblePx: error.hidden ? 0 : visible(error),
     errorText: error.hidden ? '' : (error.textContent ?? ''),
+    revokedHidden: revoked.hidden,
+    revokedText: revoked.hidden ? '' : (revoked.textContent ?? '').replace(/\\s+/g, ' ').trim(),
+    revokedVisiblePx: revoked.hidden ? 0 : visible(revoked),
+    revokedOnTop: !revoked.hidden && onTop(revoked),
+    revokedButtonText: revoked.hidden ? '' : (revokedButton.textContent ?? ''),
+    revokedButtonVisiblePx: revoked.hidden ? 0 : visible(revokedButton),
     controlText: control.textContent ?? '',
     controlVisiblePx: visible(control),
     controlOnTop: onTop(control),
@@ -128,7 +142,12 @@ const PROBE_SCRIPT = `(() => {
   };
 })()`;
 
-function status(phase: RecorderPhase, camera: CameraState, error: string | null): RecorderStatus {
+function status(
+  phase: RecorderPhase,
+  camera: CameraState,
+  error: string | null,
+  revoked: RevocationNotice | null = null,
+): RecorderStatus {
   return {
     phase,
     recordingId: phase === 'idle' ? null : 'rec-hud-gate',
@@ -138,8 +157,23 @@ function status(phase: RecorderPhase, camera: CameraState, error: string | null)
     error,
     camera,
     cameraParts: camera === 'off' ? 0 : 1,
+    revoked,
   };
 }
+
+/**
+ * What main publishes after a Microphone grant is withdrawn mid-recording.
+ *
+ * `phase: 'idle'` on purpose: by the time the user reads this the recording has
+ * already been stopped and finalized, which is the captain's decision working
+ * (`decision-mic-revocation.md`) and is exactly the state the camera banner would
+ * have hidden itself in.
+ */
+const MIC_REVOKED: RevocationNotice = {
+  kind: 'microphone',
+  recordingId: 'rec-hud-gate',
+  recordedSec: 12.5,
+};
 
 /**
  * Wait for the whole round trip to come to rest: the renderer has applied the
@@ -257,8 +291,23 @@ void app.whenReady().then(async () => {
     await settle(hud, bannerIs(false));
     await probe(hud, 'recording, camera reacquired');
 
-    // 5. And the error line, which shares the shelf and has had the same defect
-    //    since phase 1.
+    // 5. §7.3's revoked Microphone grant. The recording has already been stopped and
+    //    finalized by the time this is published, so it is read in `idle` — the state
+    //    every other notice on this shelf hides itself in.
+    send(status('idle', 'off', null, MIC_REVOKED));
+    await settle(hud, 'document.getElementById("revoked").hidden === false');
+    await probe(hud, 'idle, microphone revoked');
+
+    // 6. And pressing record clears it. Main is what does that
+    //    (`RecorderSession.start`); this is the HUD honouring the cleared field.
+    send(status('recording', 'off', null, null));
+    await settle(hud, 'document.getElementById("revoked").hidden === true');
+    await probe(hud, 'recording again, notice cleared');
+
+    // 7. And the error line, which shares the shelf and has had the same defect
+    //    since phase 1. Last, because unlike the two notices above it is *sticky* —
+    //    `render` shows it and only the record button clears it — so a probe after
+    //    this one would be measuring the error line as well as its own subject.
     send(status('failed', 'off', 'The screen recording could not be written.'));
     await settle(hud, 'document.getElementById("error").hidden === false');
     await probe(hud, 'failed, error line');

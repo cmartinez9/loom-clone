@@ -96,6 +96,31 @@ export interface PermissionFacts {
   limit: string;
   /** What the user loses by saying no. Shown wherever the app runs degraded. */
   whatBreaks: string;
+  /**
+   * Whether losing this grant **while a recording is running** ends the recording.
+   *
+   * The field exists because the two answers are genuinely different situations and
+   * the app kept confusing them. Architecture report §7.3 stops a recording when the
+   * screen source goes away; §7.4 keeps one going when the camera does. The
+   * microphone is the case the captain settled in
+   * `data/loom-scope/decision-mic-revocation.md` — **"stop recording and tell the
+   * user to re-grant"** — which is a deliberate divergence from §7.3's own
+   * *"Microphone revoked → keep recording screen and system audio"*, on the grounds
+   * that a withdrawn permission is not a device that may come back and must not be
+   * reported as one. This table is where that answer lives, so no surface has to
+   * decide it a second time and differently.
+   */
+  revocationStopsRecording: boolean;
+  /**
+   * What the user is told when this grant is withdrawn mid-recording.
+   *
+   * Same reasoning as {@link why} and {@link limit}: the sentence has to name the
+   * real cause — a permission the user turned off — rather than a device that
+   * disconnected, and it has to say what happened to the footage. If it lived in the
+   * HUD, the next surface that has to say it (a log line, a library banner) would
+   * write its own version.
+   */
+  whenRevokedMidRecording: string;
   /** The exact System Settings pane, named the way the user will see it. */
   settingsPaneName: string;
   /**
@@ -132,6 +157,10 @@ export const PERMISSIONS: Readonly<Record<PermissionKind, Readonly<PermissionFac
       'without it there is no recording at all.',
     limit: 'Only while a recording is running, and only the source you chose in the setup panel.',
     whatBreaks: 'Nothing can be recorded at all.',
+    revocationStopsRecording: true,
+    whenRevokedMidRecording:
+      'Screen Recording was turned off, so the recording stopped. Everything captured up to ' +
+      'that point is saved.',
     settingsPaneName: 'Privacy & Security › Screen & System Audio Recording',
     settingsUrl: `${SETTINGS_ROOT}?Privacy_ScreenCapture`,
   },
@@ -146,6 +175,13 @@ export const PERMISSIONS: Readonly<Record<PermissionKind, Readonly<PermissionFac
       'position stay changeable after the fact instead of being burned into the picture.',
     limit: 'Turn the camera off in the setup panel and this is never opened.',
     whatBreaks: 'No camera bubble. Screen, cursor and audio are unaffected.',
+    // §7.4, deliberately unlike the microphone's: a camera that goes away costs the
+    // camera and nothing else, whether it was unplugged or switched off in System
+    // Settings. The recording the user is making is still a recording.
+    revocationStopsRecording: false,
+    whenRevokedMidRecording:
+      'Camera access was turned off — still recording screen and audio, without the camera ' +
+      'bubble.',
     settingsPaneName: 'Privacy & Security › Camera',
     settingsUrl: `${SETTINGS_ROOT}?Privacy_Camera`,
   },
@@ -162,6 +198,13 @@ export const PERMISSIONS: Readonly<Record<PermissionKind, Readonly<PermissionFac
       'System audio — what your speakers are playing — is a different thing that macOS ' +
       'will not grant to any app on its own. That one needs a helper.',
     whatBreaks: 'Recordings have no voice track. The picture is unaffected.',
+    // The captain's `decision-mic-revocation.md`, verbatim: *"stop recording and tell
+    // the user to re-grant"*. See {@link PermissionFacts.revocationStopsRecording} for
+    // why that overrides §7.3's "keep recording" for this one grant.
+    revocationStopsRecording: true,
+    whenRevokedMidRecording:
+      'Microphone access was turned off, so the recording stopped. Everything captured up to ' +
+      'that point is saved — switch the microphone back on to record with your voice again.',
     settingsPaneName: 'Privacy & Security › Microphone',
     settingsUrl: `${SETTINGS_ROOT}?Privacy_Microphone`,
   },
@@ -183,6 +226,12 @@ export const PERMISSIONS: Readonly<Record<PermissionKind, Readonly<PermissionFac
     whatBreaks:
       'Click-triggered auto-zoom and click highlights are off. Cursor-follow by position, ' +
       'manual zoom and everything else keep working.',
+    // Nothing this grant feeds is the recording itself: the click log stops and the
+    // picture, the sound and the cursor positions carry on.
+    revocationStopsRecording: false,
+    whenRevokedMidRecording:
+      'Accessibility was turned off, so clicks are no longer being logged. The recording is ' +
+      'still going; auto-zoom-on-click will be missing from here on.',
     settingsPaneName: 'Privacy & Security › Accessibility',
     settingsUrl: `${SETTINGS_ROOT}?Privacy_Accessibility`,
   },

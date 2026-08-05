@@ -17,7 +17,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_CAPTURE_OPTIONS, type CaptureCommand, type CaptureEndReport } from '@loom/ipc';
+import {
+  DEFAULT_CAPTURE_OPTIONS,
+  type AudioPartEndMsg,
+  type CaptureCommand,
+  type CaptureEndReport,
+} from '@loom/ipc';
 
 interface FakeTrack {
   kind: 'video' | 'audio';
@@ -26,6 +31,12 @@ interface FakeTrack {
   stop(): void;
   getSettings(): Record<string, unknown>;
   addEventListener(type: string, listener: () => void): void;
+  /**
+   * Fire one of the events macOS delivers. `ended` is the only shape a revoked
+   * Microphone grant takes in a renderer (§7.3), which is why the fake track has to
+   * be able to produce it rather than ignore it.
+   */
+  fire(type: string): void;
 }
 
 interface FakeStream {
@@ -72,11 +83,15 @@ class FakeProcessor {
 }
 
 function fakeTrack(kind: 'video' | 'audio', label: string): FakeTrack {
+  const listeners = new Map<string, (() => void)[]>();
   return {
     kind,
     label,
     stopped: false,
     stop(): void {
+      // Deliberately does not fire `ended`: `MediaStreamTrack.stop()` never does,
+      // which is what lets the capture page tell an ordinary stop apart from a
+      // device or a grant going away underneath it.
       this.stopped = true;
     },
     getSettings: () => ({
@@ -87,7 +102,12 @@ function fakeTrack(kind: 'video' | 'audio', label: string): FakeTrack {
       noiseSuppression: false,
       autoGainControl: false,
     }),
-    addEventListener: () => undefined,
+    addEventListener: (type: string, listener: () => void): void => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    fire: (type: string): void => {
+      for (const listener of listeners.get(type) ?? []) listener();
+    },
   };
 }
 
@@ -135,6 +155,7 @@ const FAKE_GLOBALS = [
 
 let command: ((command: CaptureCommand) => void) | null = null;
 let ended: CaptureEndReport[] = [];
+let audioEnded: AudioPartEndMsg[] = [];
 let failed: string[] = [];
 let micStream: FakeStream;
 let micCall: Deferred<FakeStream>;
@@ -165,6 +186,7 @@ beforeEach(async () => {
   audioEncoders.length = 0;
   command = null;
   ended = [];
+  audioEnded = [];
   failed = [];
   displayStream = fakeStream([fakeTrack('video', 'screen')]);
   micStream = fakeStream([fakeTrack('audio', 'mic-1')]);
@@ -179,6 +201,7 @@ beforeEach(async () => {
         },
         meta: () => undefined,
         chunk: () => undefined,
+        audioEnded: (message: AudioPartEndMsg) => audioEnded.push(message),
         ended: (report: CaptureEndReport) => ended.push(report),
         failed: (reason: string) => failed.push(reason),
       },
@@ -242,5 +265,72 @@ describe('a microphone that opens after the session it belongs to', () => {
     expect(ended).toHaveLength(1);
     expect(ended[0]?.audio?.map((entry) => entry.track)).toEqual(['mic']);
     expect(failed).toEqual([]);
+  });
+});
+
+/**
+ * The renderer half of `data/loom-scope/decision-mic-revocation.md`.
+ *
+ * This page cannot tell a revoked Microphone grant from an unplugged interface, and
+ * it used to claim it could: `reportOf` wrote `endReason: 'device-lost'` for every
+ * track that ended on its own, which is how a permission the user had just withdrawn
+ * reached `recording.json` as a disconnected device. Reading TCC is main's alone
+ * (`apps/main/src/permissions.ts`'s header), so what this page owes main is the
+ * observation, delivered while it still means something.
+ */
+describe('a microphone track that ends mid-recording', () => {
+  it('tells main as it happens, and does not claim to know why', async () => {
+    micCall.resolve(micStream);
+    send(startCommand());
+    await settled();
+
+    // The event macOS delivers for both a revoked grant and a device that fell out.
+    micTrack().fire('ended');
+    await settled();
+
+    // Reported straight away — not held until the end report, which on a
+    // twenty-minute recording arrives eighteen minutes after the grant went away and
+    // long after TCC could still say anything about it.
+    expect(audioEnded, 'main was not told while the recording was still running').toHaveLength(1);
+    expect(audioEnded[0]?.track).toBe('mic');
+    expect(audioEnded[0]?.cause).toBe('track-ended');
+    expect(ended, 'reporting a track end must not end the recording from here').toHaveLength(0);
+
+    send({ kind: 'stop' });
+    await settled();
+
+    const mic = ended[0]?.audio?.find((entry) => entry.track === 'mic');
+    expect(mic?.endedEarly).toBe(true);
+    // The fix at its source: no guess. `device-lost` here was the defect.
+    expect(mic?.endReason, 'the renderer named a cause it cannot know').toBeUndefined();
+  });
+
+  it('reports it once, however many ways the track winds down', async () => {
+    micCall.resolve(micStream);
+    send(startCommand());
+    await settled();
+
+    micTrack().fire('ended');
+    micTrack().fire('ended');
+    await settled();
+
+    // Main takes the first report because it is the one whose TCC read was fresh; a
+    // second would be a second answer to a question already asked.
+    expect(audioEnded).toHaveLength(1);
+  });
+
+  it('says nothing when the track is stopped as part of an ordinary stop', async () => {
+    micCall.resolve(micStream);
+    send(startCommand());
+    await settled();
+
+    send({ kind: 'stop' });
+    await settled();
+
+    // Every track is stopped by a stop, and main reading that as "a track stopped on
+    // its own" would have it re-check TCC and, on a denied Microphone, try to stop a
+    // recording that is already stopping.
+    expect(audioEnded).toEqual([]);
+    expect(ended).toHaveLength(1);
   });
 });

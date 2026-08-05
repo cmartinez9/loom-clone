@@ -216,6 +216,51 @@ describe('the recorder HUD says what §7.4 requires, where a user can read it', 
   );
 
   it(
+    'shows a revoked Microphone grant as a revoked permission, on screen, after the stop',
+    async () => {
+      const report = await runProbe(true);
+      const detail = describeRun(report);
+      console.log(detail);
+
+      expect(report.error, detail).toBe('');
+      expect(report.ok, detail).toBe(true);
+
+      const revoked = probeAt(report, 'idle, microphone revoked');
+
+      // The whole of `decision-mic-revocation.md`, as a string assertion: the notice
+      // names a **permission that was turned off**, and says nothing about a device
+      // that disconnected. Both halves matter — the old behaviour said the second.
+      expect(revoked.revokedText, detail).toContain('Microphone access was turned off');
+      expect(revoked.revokedText, detail).not.toContain('disconnect');
+      // ...and that the recording it stopped survived, with how much of it.
+      expect(revoked.revokedText, detail).toContain('0:12');
+      expect(revoked.revokedText, detail).toContain('in your library');
+      // ...and how to put it back, which is the other half of what the captain asked
+      // for: not just told, but asked to re-grant.
+      expect(revoked.revokedButtonText, detail).toContain('Microphone');
+      expect(revoked.revokedButtonVisiblePx, detail).toBeGreaterThan(0);
+
+      // Measured, not asserted-into-existence: this shelf lives below the same 92 px
+      // fold that hid §7.4's banner for the whole of phase 4.
+      expect(revoked.revokedVisiblePx, detail).toBeGreaterThan(0);
+      expect(revoked.revokedOnTop, detail).toBe(true);
+      expect(revoked.documentHeight, detail).toBeLessThanOrEqual(revoked.innerHeight);
+      expect(revoked.contentSize[1], detail).toBeGreaterThan(HUD_HEIGHT);
+      // The recording is over, so the button the user needs is Record, and it is not
+      // covered by the notice.
+      expect(revoked.controlText, detail).toBe('Record screen');
+      expect(revoked.controlVisiblePx, detail).toBeGreaterThan(0);
+
+      // Pressing record clears it and gives the borrowed room back.
+      const cleared = probeAt(report, 'recording again, notice cleared');
+      expect(cleared.revokedHidden, detail).toBe(true);
+      expect(cleared.revokedVisiblePx, detail).toBe(0);
+      expect(cleared.contentSize, detail).toEqual([HUD_WIDTH, HUD_HEIGHT]);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
     'CONTROL: without main growing the window, the banner measures zero visible pixels',
     async () => {
       const report = await runProbe(false);
@@ -236,6 +281,14 @@ describe('the recorder HUD says what §7.4 requires, where a user can read it', 
       expect(lost.contentSize, detail).toEqual([HUD_WIDTH, HUD_HEIGHT]);
       expect(lost.noticeVisiblePx, detail).toBe(0);
       expect(lost.documentHeight, detail).toBeGreaterThan(lost.innerHeight);
+
+      // The §7.3 shelf is below the same fold and fails the same way without the fit.
+      // Without this row, "the notice is populated" would be the only thing the
+      // revocation gate above actually proved.
+      const revoked = probeAt(report, 'idle, microphone revoked');
+      expect(revoked.revokedHidden, detail).toBe(false);
+      expect(revoked.revokedText, detail).toContain('Microphone access was turned off');
+      expect(revoked.revokedVisiblePx, detail).toBe(0);
     },
     GATE_TIMEOUT_MS,
   );
