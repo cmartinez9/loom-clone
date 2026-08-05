@@ -2,11 +2,14 @@
  * `resolve` is on the frame budget — §3.6's *"Hot path. No allocation, no locking,
  * no simulation. Called once per rendered frame."*
  *
- * Phase 6's gate passed CI at **14.90 ms of a 16.67 ms budget**, and this runs
- * inside that, with later phases still to add passes. The brief's instruction is
- * unambiguous: if something pushes a frame over budget, make the frame faster; do
- * not move the line. So the two properties worth pinning are the ones that would
- * quietly cost a frame:
+ * Measured here at **0.08 µs for an identity timeline and ~0.3 µs for a
+ * thirty-minute, 3000-key document**, against §8's 16.67 ms frame — with later
+ * phases still to add passes. The phase-6 gate's CI readings are not the headroom
+ * this fits inside: that gate certifies the budget on target hardware, where a
+ * composite costs 0.20–0.30 ms, and its CI frame is a different workload no user
+ * runs. The brief's instruction is unambiguous: if something pushes a frame over
+ * budget, make the frame faster; do not move the line. So the two properties worth
+ * pinning are the ones that would quietly cost a frame:
  *
  * 1. **Nothing allocates.** Not the state, not its nested objects, not the
  *    annotation array. Asserted by object identity across calls rather than by a

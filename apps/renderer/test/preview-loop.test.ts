@@ -179,9 +179,22 @@ describe('PreviewLoop', () => {
     // it here would silently throw their edits away.
     loop.timeline = identityTimeline(12);
     expect(loop.durationSec).toBe(12);
+    // A shorter timeline takes the playhead with it. `resolve` clamps internally so
+    // the picture is right either way, but `time` is what a scrub bar reads, and a
+    // paused loop reporting 20 s of a 12 s project is a playhead off its own track.
+    expect(loop.time).toBe(12);
     expect(() => {
       loop.durationSec = 40;
     }).toThrow(/timeline/);
+  });
+
+  it('brings the playhead back inside a shortened duration', () => {
+    const source = stubSource();
+    const { loop } = loopWith(source);
+    loop.durationSec = 30;
+    loop.seek(25);
+    loop.durationSec = 12;
+    expect(loop.time).toBe(12);
   });
 
   it('does not advance while paused, so a seek stays put', () => {

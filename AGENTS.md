@@ -455,8 +455,10 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
 - **`resolve` hands back the same `ResolvedState` object every call.** That is how
   §3.6 gets "no allocation", and it means a caller that stores one is storing a
   reference to next frame's state. `cloneResolvedState` is the way out. Measured at
-  0.08 µs for an identity timeline and 0.3 µs for a 30-minute, 3000-key one, against a
-  16.67 ms frame the phase-6 gate already spends 89% of on CI.
+  0.08 µs for an identity timeline and 0.3 µs for a 30-minute, 3000-key one, against
+  §8's 16.67 ms frame — four orders under it, and flat in the length of the recording,
+  which is the half that matters. Not against a phase-6 CI reading: that gate
+  certifies the budget on target hardware, and its CI frame is a different workload.
 - **Track order is stacking order, so an inverse op has to preserve it.** `track.add`
   and `span.set` carry an optional `at` for exactly that: undoing the removal of a
   middle track by appending leaves a valid document and a wrong picture, which is the

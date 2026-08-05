@@ -128,9 +128,19 @@ export interface CompiledSpanLayer {
   spans: CompiledSpan[];
 }
 
-/** An audio track's mute spans, in the track's own domain. */
+/**
+ * An audio track's mute spans, in the track's own domain, with the window they
+ * live inside.
+ *
+ * `ranges`/`blendSec` are here for the same reason every other layer kind carries
+ * them: §3.5's `window(track, t)` is what decides whether a track has an opinion at
+ * `t`, and a mute is one of that track's opinions. A parked track — `enabled: true`,
+ * `activeRanges: []` — must not go on muting.
+ */
 export interface CompiledMuteLayer {
   domain: number;
+  ranges: Float64Array;
+  blendSec: number;
   /** Flattened `[start, end]` pairs. */
   spans: Float64Array;
 }
@@ -354,7 +364,12 @@ function compileMutes(track: Track): CompiledMuteLayer {
     flat[i * 2] = span.start;
     flat[i * 2 + 1] = span.end;
   });
-  return { domain: domainCode(track), spans: flat };
+  return {
+    domain: domainCode(track),
+    ranges: compileRanges(track),
+    blendSec: Math.max(0, track.blendMs) / 1000,
+    spans: flat,
+  };
 }
 
 /**

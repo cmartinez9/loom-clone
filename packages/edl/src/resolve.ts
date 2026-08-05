@@ -26,11 +26,20 @@
  *
  * ## Budget
  *
- * Phase 6's gate passed CI at 14.90 ms of a 16.67 ms budget, and this runs inside
- * that. The costs here are: one binary search over the clip list, and for each
- * enabled track a walk of its `activeRanges` plus one bucket lookup or one grid
- * index per channel it owns. There is no path whose length depends on the length of
- * the recording.
+ * §8's frame is 16.67 ms, and `resolve` is measured at **0.08 µs for an identity
+ * timeline and ~0.3 µs for a thirty-minute, 3000-key document** — four orders of
+ * magnitude under it, and the second figure is the point: the cost does not grow
+ * with the recording. Do not reach for the phase-6 gate's CI numbers as the headroom
+ * this fits inside; that gate certifies the budget on target hardware, and its CI
+ * frame carries a ~30 MB CPU-backed upload no user of this app will ever run.
+ * `packages/edl/test/hot-path.test.ts` therefore pins the two properties that would
+ * cost a frame — no allocation, and a *ratio* between a long document and a short
+ * one measured in the same window — rather than a millisecond from one machine.
+ *
+ * The costs here are: one binary search over the clip list, and for each enabled
+ * track a walk of its `activeRanges` plus one bucket lookup or one grid index per
+ * channel it owns. There is no path whose length depends on the length of the
+ * recording.
  *
  * ## The returned object is borrowed
  *
@@ -45,6 +54,7 @@ import {
   BLEND_ADD,
   BLEND_MULTIPLY,
   DOMAIN_TIMELINE,
+  type CompiledMuteLayer,
   type CompiledStack,
   type CompiledTimeline,
 } from './compile.ts';
@@ -218,14 +228,18 @@ export function resolve(ct: CompiledTimeline, timelineTime: Seconds): ResolvedSt
 
 function gainOf(
   stack: CompiledStack,
-  mutes: readonly { domain: number; spans: Float64Array }[],
+  mutes: readonly CompiledMuteLayer[],
   sourceTime: Seconds,
   timelineTime: Seconds,
 ): number {
   for (const mute of mutes) {
     // A mute is a hard zero, not a −∞ dB keyframe: §2.6 models it as a span
-    // precisely so it survives every gain edit around it.
-    if (insideSpan(mute.spans, layerTime(mute, sourceTime, timelineTime))) return 0;
+    // precisely so it survives every gain edit around it. It is still the owning
+    // track's opinion, so §3.5's window gates it exactly as it gates a channel or
+    // an annotation span: a track with no weight at `t` has nothing to say there.
+    const t = layerTime(mute, sourceTime, timelineTime);
+    if (windowWeight(mute.ranges, mute.blendSec, t) <= 0) continue;
+    if (insideSpan(mute.spans, t)) return 0;
   }
   return dbToLinear(stack.acc[0] ?? 0);
 }

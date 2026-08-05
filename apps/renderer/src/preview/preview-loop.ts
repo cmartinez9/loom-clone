@@ -211,6 +211,7 @@ export class PreviewLoop {
       );
     }
     this.#timeline = identityTimeline(Math.max(0, value));
+    this.#clampTime();
   }
   get timeline(): CompiledTimeline {
     return this.#timeline;
@@ -222,10 +223,21 @@ export class PreviewLoop {
    * Assignment, not a rebuild: the next frame resolves against the new timeline and
    * every frame before it resolved against the old one. There is no instant at
    * which half of one and half of the other is on screen.
+   *
+   * A shorter timeline takes the playhead with it. `resolve` clamps internally, so
+   * the composite would be right either way — but `time` is what a scrub bar reads,
+   * and a paused loop reporting 25 s of a 12 s project is a playhead off the end of
+   * its own track until something happens to call `seek`.
    */
   set timeline(value: CompiledTimeline) {
     this.#timeline = value;
     this.#ownsTimeline = false;
+    this.#clampTime();
+  }
+
+  #clampTime(): void {
+    const duration = this.durationSec;
+    if (this.#time > duration) this.#time = duration;
   }
   /** High-water mark of live frames observed by the loop. The gate asserts on it. */
   get peakLiveFrames(): number {

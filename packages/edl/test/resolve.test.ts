@@ -498,6 +498,43 @@ describe('cursor, annotations and audio', () => {
     // Unity by default, and untouched by the mic's mute.
     expect(resolve(ct, 90).audio.systemGain).toBe(1);
   });
+
+  it('gates a mute on the owning track’s window, as §3.5 gates every other opinion', () => {
+    // A mute is one of the track's opinions, so `window(track, t)` decides whether it
+    // has one at `t`. `activeRanges: []` is how a track is parked without deleting it
+    // (§3.5, and `windowWeight`'s note); a parked track that went on muting would
+    // ignore the one control the model gives for that.
+    const micWith = (activeRanges: Track['activeRanges']): Track => ({
+      id: 't-mic',
+      kind: 'audio',
+      target: 'audio:mic',
+      domain: 'source',
+      origin: 'manual',
+      blend: 'replace',
+      blendMs: 0,
+      activeRanges,
+      enabled: true,
+      channels: { gainDb: { keys: [{ t: 0, v: -6, ease: { kind: 'hold' } }] } },
+      spans: [{ id: 'm1', start: 10, end: 20, type: 'mute' }],
+    });
+    const clips = [{ id: 'c1', sourceStart: 0, sourceEnd: 120, speed: 1 }];
+    const unity = 1;
+    const gained = Math.pow(10, -6 / 20);
+
+    // In range: the mute applies, and so does the gain either side of it.
+    const inRange = compile(documentWith([micWith(ALWAYS)], clips));
+    expect(resolve(inRange, 15).audio.micGain).toBe(0);
+    expect(resolve(inRange, 25).audio.micGain).toBeCloseTo(gained, 12);
+
+    // Parked: no window anywhere, so neither the mute nor the gain is heard.
+    const parked = compile(documentWith([micWith([])], clips));
+    expect(resolve(parked, 15).audio.micGain).toBe(unity);
+
+    // Windowed away from the span: the mute is outside the track's own range.
+    const elsewhere = compile(documentWith([micWith([[40, 60]])], clips));
+    expect(resolve(elsewhere, 15).audio.micGain).toBe(unity);
+    expect(resolve(elsewhere, 50).audio.micGain).toBeCloseTo(gained, 12);
+  });
 });
 
 describe('manual keyframed zoom, all the way to the sampled rect — decision 3', () => {
