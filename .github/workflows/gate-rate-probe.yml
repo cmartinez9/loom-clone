@@ -1,0 +1,65 @@
+# THROWAWAY MEASUREMENT JOB — delete this branch when the numbers are in.
+#
+# Not a product change and not part of PR #9. It exists to answer one question that
+# cannot be answered on an Apple Silicon developer box: how often does the phase-6
+# gate fail on a GitHub paravirtual runner, on a commit where nothing is wrong?
+#
+# It has to run here because the runner's workload cannot be reproduced locally —
+# ANGLE-Metal binds decoded frames as IOSurfaces on Apple Silicon whatever the decode
+# preference, so the ~30 MB CPU-backed texImage2D that dominates the runner's frame
+# never happens on the dev box: gpu 0.312 ms against the runner's 3.309 ms, play p99
+# 0.20-0.40 ms against ~5 ms.
+#
+# ONE job looping the gate, not N jobs: the gate is ~26 s of a ~2-minute job, so
+# iterating inside a single job amortises checkout and install and costs roughly a
+# quarter of what separate runs would at the 10x private-repo rate.
+#
+# CAVEAT, and it is stated in the report too: these iterations share one runner
+# instance, so a bad minute correlates several of them. This is a weaker sample than
+# the same number of independent runs.
+name: gate-rate-probe
+
+on: pull_request
+
+jobs:
+  probe:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Loop the phase-6 gate
+        run: |
+          set +e
+          mkdir -p probe-out
+          fails=0
+          for i in $(seq 1 30); do
+            npx vitest run test/phase6-gate.test.ts > "probe-out/iter-$i.log" 2>&1
+            status=$?
+            if [ $status -ne 0 ]; then fails=$((fails+1)); fi
+            # One CSV row per iteration: the distribution matters, not just the tally.
+            play=$(grep -m1 '^play  *n=' "probe-out/iter-$i.log" | sed -E 's/.*max=([0-9.]+)ms@([0-9]+) p99=([0-9.]+)ms over-budget=([0-9]+).*/\1,\2,\3,\4/')
+            scrub=$(grep -m1 '^scrub  *n=' "probe-out/iter-$i.log" | sed -E 's/.*max=([0-9.]+)ms@[0-9]+ p99=([0-9.]+)ms over-budget=([0-9]+).*/\1,\2,\3/')
+            ctl=$(grep -m1 '^control ' "probe-out/iter-$i.log" | sed -E 's/.*play: n=([0-9]+) max=([0-9.]+)ms@[0-9]+ mean=([0-9.]+)ms over-budget=([0-9]+).*/\1,\2,\3,\4/')
+            warm=$(grep -m1 '^warmup ' "probe-out/iter-$i.log" | sed -E 's/.*max=([0-9.]+)ms.*/\1/')
+            gpu=$(grep -m1 '^gpu ' "probe-out/iter-$i.log" | sed -E 's/^gpu  *([0-9.]+)ms.*/\1/')
+            echo "ITER,$i,$status,$play,$scrub,$ctl,$warm,$gpu" | tee -a probe-out/summary.csv
+          done
+          echo "PROBE-RESULT failures=$fails of 30"
+          echo "--- header: iter,status,playMax,playMaxAt,playP99,playOver,scrubMax,scrubP99,scrubOver,ctlN,ctlMax,ctlMean,ctlOver,warmupMax,gpuMs"
+          cat probe-out/summary.csv
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-rate-probe
+          path: probe-out/
