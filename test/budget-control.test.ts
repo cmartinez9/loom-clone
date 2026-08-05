@@ -26,6 +26,7 @@ import {
   CLEARS_BUDGET,
   CONTROL_PERIOD_MS,
   CONTROL_TARGET_MS,
+  EnvironmentControl,
   environmentSustainsBudget,
   expectTracksControl,
   NO_CONTROL,
@@ -65,17 +66,86 @@ function evidence(measured: Partial<BudgetEvidence['measured']>, c: ControlPhase
 }
 
 describe('the frame budget is enforced against a measured environment', () => {
-  it('asks the host for a quarter of the clock, so the control is exposed like a frame is', () => {
+  it('asks the host for a fifth of the clock, so the control is exposed like a frame is', () => {
     // Occupancy is exposure: a stall lands inside a window in proportion to how much
     // of the clock that window takes. A control costing nothing would sit beside every
     // stall it exists to catch, and one costing a whole thread would break the run it
-    // is measuring — which the first version of it did. A quarter is the same order as
+    // is measuring — which the first version of it did. A fifth is the same order as
     // the ~30% of a frame an honest CPU-backed 4K upload occupies on the runner.
     expect(CONTROL_TARGET_MS).toBeCloseTo(FRAME_BUDGET_MS / 2, 10);
     expect(CONTROL_TARGET_MS / CONTROL_PERIOD_MS).toBeCloseTo(0.25, 10);
+    // The period runs from the end of one spin to the start of the next, so what a
+    // host doing what it was asked actually gives up is target/(target + period).
+    expect(CONTROL_TARGET_MS / (CONTROL_TARGET_MS + CONTROL_PERIOD_MS)).toBeCloseTo(0.2, 10);
     // Paced by the wall clock, never by the display: a 120 Hz panel must not double
     // what the control costs, and a 60 Hz one must not halve what it measures.
     expect(CONTROL_PERIOD_MS).toBeGreaterThan(FRAME_BUDGET_MS);
+  });
+
+  /**
+   * The pacing, and the one thing it must not do to a host that is already struggling.
+   *
+   * Measured from the *start* of a spin, the interval between spins is
+   * `spinDuration + frameGap` rather than a period: a spin the host stretches past
+   * {@link CONTROL_PERIOD_MS} satisfies the gate on the very next frame, and on every
+   * frame after it, so the wall-clock pacing collapses into the once-per-frame pacing
+   * that starved decode until all twelve scrub targets timed out at four seconds. That
+   * is a positive feedback loop — the slower the host, the harder the control loads it
+   * — and it arrives on exactly the saturated hosts the control exists to characterise,
+   * where the run would redden on missing scrub frames rather than deferring §8.
+   *
+   * Measured from the end, the host gets a whole period back after every spin however
+   * long that spin took, so the arithmetic the control demands per second *falls* as
+   * the host dilates. The clock and the spin are injected here because the property is
+   * about how much of a *host's* clock the control takes, and asking a real one for a
+   * real 6× stall is not something a test can do twice the same way.
+   */
+  it('CONTROL: a stretched spin buys back a period, never the next frame', () => {
+    /** A 120 Hz panel — the worst case for anything paced per frame. */
+    const frameMs = 1000 / 120;
+    const spanMs = 1000;
+    /** One second of that panel, on a host that takes `dilationMs` to do a spin. */
+    const second = (dilationMs: number): { spins: number; frames: number } => {
+      let now = 0;
+      let frames = 0;
+      const control = new EnvironmentControl(CONTROL_TARGET_MS, CONTROL_PERIOD_MS, {
+        now: () => now,
+        spin: () => {
+          now += dilationMs;
+          return dilationMs;
+        },
+      });
+      control.arm();
+      while (now < spanMs) {
+        now += frameMs;
+        frames += 1;
+        control.tick();
+      }
+      return { spins: control.snapshot().count, frames };
+    };
+
+    // A host doing what it was asked: a fifth of its clock, and nothing like the
+    // 120 spins a second the panel would have handed a per-frame control.
+    const healthy = second(CONTROL_TARGET_MS);
+    expect((healthy.spins * CONTROL_TARGET_MS) / spanMs).toBeCloseTo(0.2, 1);
+
+    // And under dilation the demand falls rather than rises — in spins a second,
+    // bounded by one per `dilation + period`, and in the share of frames that carry
+    // one, which is the figure that collapsed. Timed from the start of a spin, a
+    // dilation past the period puts a spin on *every* frame, whatever the panel: the
+    // once-per-frame pacing, arrived at exactly when the host can least afford it.
+    let previousSpins = Infinity;
+    for (const dilationMs of [CONTROL_TARGET_MS, 16.67, CONTROL_PERIOD_MS, 50, 100]) {
+      const { spins, frames } = second(dilationMs);
+      expect(spins).toBeLessThanOrEqual(Math.ceil(spanMs / (dilationMs + CONTROL_PERIOD_MS)) + 1);
+      expect((spins * CONTROL_TARGET_MS) / spanMs).toBeLessThanOrEqual(0.25);
+      expect(spins / frames).toBeLessThanOrEqual(0.25);
+      expect(spins).toBeLessThan(previousSpins);
+      previousSpins = spins;
+    }
+    // The floor of that range is still a control: a host stalled sixfold is sampled
+    // often enough for `maxMs` and the share to mean something.
+    expect(second(100).spins).toBeGreaterThan(5);
   });
 
   it.each([
@@ -266,6 +336,14 @@ describe('the frame budget is enforced against a measured environment', () => {
    * factor here to make it separate: a share a stalling host inflates would be the
    * ceiling's own circularity one level up, and tuning one until a known mutation failed
    * would be fitting the instrument to the defect it is meant to find.
+   *
+   * It was re-measured once the control stopped timing its period from the *start* of a
+   * spin — a control that spun harder the slower the host got could have manufactured
+   * this whole band, see the pacing test above — and the band survived: three runs of
+   * three under the same 20 spinners put the host at 9.09%, 14.10%/14.74% and 28.06% of
+   * its own spins against 0.78–3.33% of the regression's frames, and the mutation
+   * passed all three. Quiet, that same mutation now fails four runs of four, three of
+   * them on §8's own number with the control never reaching this branch.
    */
   it('CONTROL: a regression missing the budget oftener than the host fails on the share', () => {
     // Quiet host, measured: the ceiling excuses it and the share does not.

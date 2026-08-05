@@ -322,10 +322,26 @@ a gap lives in `recording.json`, never in the container.
   closing it means matching the control's _exposure_ to the frame's own cost instead of
   fixing it at half a budget — filed as `loom-gate-exposure-matched-control`, and the
   only correct way in. Measured on a quiet host the gate fails that mutation in three
-  runs of four; before any of this it failed none of three.
+  runs of four; before any of this it failed none of three. **Re-measured after the
+  pacing fix below**, on the suspicion that the band was self-inflicted by a control
+  that had been loading the host it was characterising: it is not. Under 20 spinners on
+  18 cores the host's own share still ran ahead of the regression's in three runs of
+  three — 9.09–50.00% of spins against 0.78–3.33% of frames, worst spins 25.5–68.5 ms —
+  and the mutation survived all three. Quiet, the same mutation now fails in four runs
+  of four, and in three of those four on §8's own number rather than on this branch at
+  all, the controls having cleared the budget outright (8.40–11.10 ms).
   **A control paced per frame is a bug**: half a budget per frame is a whole thread on a
   120 Hz panel, and the version that did that starved decode until every scrub target
-  timed out at four seconds. It is paced by the wall clock instead.
+  timed out at four seconds. It is paced by the wall clock instead, **from the end of
+  one spin to the start of the next**. Timed from the start, the interval is
+  `spinDuration + frameGap`, so a spin the host stretched past `CONTROL_PERIOD_MS` was
+  followed by one on the very next frame and on every frame after it — the per-frame
+  pacing again, reached by a feedback loop in which the slower the host, the harder the
+  control loads it, on exactly the saturated hosts the control exists to characterise.
+  From the end, the host gets a whole period back after every spin however long that
+  spin took, the demand falls as the host dilates instead of rising, and the duty on a
+  healthy host is a fifth of the clock rather than the intended quarter.
+  `test/budget-control.test.ts` pins it with an injected clock and spin.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
@@ -363,6 +379,26 @@ a gap lives in `recording.json`, never in the container.
   `child-process-gone` so a context that goes anyway names what died. The gate prints
   its own log on a bad run for the same reason: how far it got is the difference
   between a host that took the instrument away and a defect that always will.
+- **A pre-empted renderer is not a slow frame, and the instrument cannot tell them
+  apart.** The frame budget is `performance.now()` around the frame body, so anything
+  the OS scheduler takes away lands on whichever frame it interrupted. Chromium
+  deprioritises a renderer it believes nobody is looking at — and on a CI runner there
+  is no display to be visible on, so the gate's window qualifies and its process drops
+  to background priority on a shared runner. Setting `backgroundThrottling: false` in
+  `webPreferences` does not cover that; it is Blink's timer and rAF throttling, not the
+  priority the OS scheduler reads. `test/gate/main.ts` therefore also runs with
+  `--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows` and
+  `--disable-background-timer-throttling`. How it was identified, and the shape to look
+  for if it comes back: time the frame body segment by segment and the pause turns up
+  **inside calls that cannot spend a millisecond** — 10–20 ms readings inside
+  `resolve()` (0.2 µs of work, pinned by `packages/edl/test/hot-path.test.ts`), inside
+  `drawArrays`, inside `present`. CI reported the same event on a slower host as one
+  177 ms frame against a p99 of 7.9 ms, on the commit whose other run of that SHA
+  passed. Thirty runs with hardware decode disabled — so every frame carries CI's 30 MB
+  CPU-backed upload — then held 2.6 ms worst with no run short of a frame, against
+  three pauses in thirty-odd runs of the same arrangement without them. None of this
+  makes anything faster or measures anything different: work still arrives as a number
+  over budget, on the worst frame, with no allowance.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is

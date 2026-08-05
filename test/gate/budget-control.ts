@@ -51,13 +51,14 @@
  * stall lands inside a window in proportion to how much of the frame that window
  * occupies, so a control that costs nothing would sit beside every stall it is meant
  * to catch and report a healthy machine forever. {@link CONTROL_TARGET_MS} is half of
- * one 60 Hz refresh, taken once per {@link CONTROL_PERIOD_MS} — a quarter of the wall
- * clock, against the ~30% of each frame an honest CPU-backed 4K upload occupies on the
- * paravirtual runner. Comparable exposure, and the claim it supports is a plain one:
- * *this host stretched half a frame of arithmetic past a whole frame.* Nothing that
- * does that can promise a 16.67 ms frame to anybody.
+ * one 60 Hz refresh, and {@link CONTROL_PERIOD_MS} of wall clock has to pass after each
+ * spin ends before the next may start — a fifth of the clock on a host doing what it
+ * was asked, against the ~30% of each frame an honest CPU-backed 4K upload occupies on
+ * the paravirtual runner. The same order of exposure, and the claim it supports is a
+ * plain one: *this host stretched half a frame of arithmetic past a whole frame.*
+ * Nothing that does that can promise a 16.67 ms frame to anybody.
  *
- * It costs a quarter of the renderer's main thread for the length of the measured
+ * It costs a fifth of the renderer's main thread for the length of the measured
  * phases. That is the price of a control that shares the window rather than guessing
  * at it, and {@link CONTROL_PERIOD_MS} is where the bill was negotiated down from a
  * version that broke the run it was measuring.
@@ -75,7 +76,8 @@ import { FRAME_BUDGET_MS, FrameMetrics } from '../../apps/renderer/src/preview/f
 export const CONTROL_TARGET_MS = FRAME_BUDGET_MS / 2;
 
 /**
- * How often a spin is allowed, in wall clock — **not** once per frame.
+ * How much wall clock has to pass **after a spin ends** before the next may start —
+ * and **not** once per frame.
  *
  * Once per frame is what this was first written as, and it is wrong for a reason worth
  * keeping: the display's refresh rate is not the gate's to choose. On a 120 Hz panel
@@ -85,10 +87,22 @@ export const CONTROL_TARGET_MS = FRAME_BUDGET_MS / 2;
  * frames instead of 197, and playback went from no misses to 507. A control that
  * changes what it is measuring is not a control.
  *
- * Pacing by wall clock instead makes the cost the same on any panel: one spin per two
- * refreshes, a 25% duty cycle, against the ~30% of each frame an honest CPU-backed 4K
- * upload occupies on the paravirtual runner. Comparable exposure to a host stall, a
- * quarter of the thread, and the same number either way.
+ * Pacing by wall clock instead makes the cost the same on any panel: on a host doing
+ * what it was asked, 8.33 ms of arithmetic per 41.67 ms of clock — a fifth of the
+ * thread, the same order as the ~30% of each frame an honest CPU-backed 4K upload
+ * occupies on the paravirtual runner, and the same number on any panel.
+ *
+ * **From the end of the last spin, not from its start**, and that is the whole of it.
+ * Measured from the start, the interval between spins is `spinDuration + frameGap`
+ * rather than a period, so a spin whose own elapsed time reaches this number satisfies
+ * the gate on the very next frame — and every frame after it. Past a 3× dilation of
+ * {@link CONTROL_TARGET_MS} the wall-clock pacing therefore collapses into exactly the
+ * per-frame pacing above, by a positive feedback loop: the slower the host, the harder
+ * the control loads it, on precisely the saturated hosts the control exists to
+ * characterise, and the run reddens on timed-out scrub targets rather than deferring.
+ * Measured from the end, the host gets a whole period of the clock back after every
+ * spin however long that spin took, so the arithmetic the control demands per second
+ * *falls* as the host dilates instead of rising.
  */
 export const CONTROL_PERIOD_MS = FRAME_BUDGET_MS * 2;
 
@@ -225,6 +239,16 @@ export function controlSink(): number {
 }
 
 /**
+ * The clock and the spin, so `test/budget-control.test.ts` can pin the pacing without
+ * asking a real host for a real stall. The gate itself passes neither: what runs in the
+ * measured frames is `performance.now()` and {@link burn}, and nothing else.
+ */
+export interface ControlHooks {
+  now?: () => number;
+  spin?: (targetMs: number) => number;
+}
+
+/**
  * The environment control, armed for one phase at a time.
  *
  * `tick()` belongs immediately after the frame callback the gate is measuring, inside
@@ -237,13 +261,21 @@ export class EnvironmentControl {
   readonly targetMs: number;
   readonly periodMs: number;
   readonly #metrics: FrameMetrics;
+  readonly #now: () => number;
+  readonly #spin: (targetMs: number) => number;
   #armed = false;
-  #lastSpinAtMs = -Infinity;
+  #lastSpinEndedAtMs = -Infinity;
 
-  constructor(targetMs: number = CONTROL_TARGET_MS, periodMs: number = CONTROL_PERIOD_MS) {
+  constructor(
+    targetMs: number = CONTROL_TARGET_MS,
+    periodMs: number = CONTROL_PERIOD_MS,
+    hooks: ControlHooks = {},
+  ) {
     this.targetMs = targetMs;
     this.periodMs = periodMs;
     this.#metrics = new FrameMetrics(4096, FRAME_BUDGET_MS);
+    this.#now = hooks.now ?? (() => performance.now());
+    this.#spin = hooks.spin ?? burn;
   }
 
   arm(): void {
@@ -255,18 +287,20 @@ export class EnvironmentControl {
   }
 
   /**
-   * One spin, if armed and if {@link CONTROL_PERIOD_MS} has passed since the last one.
+   * One spin, if armed and if {@link CONTROL_PERIOD_MS} has passed since the last one
+   * *ended*.
    *
    * Called from every scheduled frame, after the frame's own work; how many of those
-   * calls actually spin is decided by the clock rather than by the display, for the
-   * reason {@link CONTROL_PERIOD_MS} gives.
+   * calls actually spin is decided by the clock rather than by the display, and the
+   * clock is read again after the spin so that a spin the host stretched cannot buy
+   * itself the next frame's spin as well. Both halves are {@link CONTROL_PERIOD_MS}'s
+   * to argue.
    */
   tick(): void {
     if (!this.#armed) return;
-    const now = performance.now();
-    if (now - this.#lastSpinAtMs < this.periodMs) return;
-    this.#lastSpinAtMs = now;
-    this.#metrics.record(burn(this.targetMs));
+    if (this.#now() - this.#lastSpinEndedAtMs < this.periodMs) return;
+    this.#metrics.record(this.#spin(this.targetMs));
+    this.#lastSpinEndedAtMs = this.#now();
   }
 
   snapshot(): ControlPhase {
