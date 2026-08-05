@@ -38,9 +38,10 @@
  * §8's bound is asserted on the worst frame with no allowance, which is right, and on
  * a shared paravirtual CI host that bound has been decided by the host rather than by
  * the renderer. So an environment control runs inside the measured phases' own frames —
- * a fixed span of arithmetic with none of this code in it, taken a quarter of the wall
- * clock at a time — and a second control runs a deliberately-slowed compositor through
- * the same instrument so the first can never become an escape hatch.
+ * a fixed span of arithmetic with none of this code in it, paced by the wall clock from
+ * the end of one spin to the start of the next — and a second control runs a
+ * deliberately-slowed compositor through the same instrument so the first can never
+ * become an escape hatch.
  * `budget-control.ts` is the whole argument; `test/phase6-gate.test.ts` is where both
  * are judged.
  */
@@ -444,8 +445,8 @@ async function run(): Promise<GateReport> {
   // Armed at exactly the frame the scrub phase's own metrics start from, and offered
   // every scheduler dispatch from here on — it spins on the ones a wall clock says to,
   // not on every one, because the display's refresh rate is not this gate's to choose.
-  // What it does cost, a quarter of the thread, is deliberate: a control that costs
-  // nothing is never exposed to what it exists to catch, since a host stall lands
+  // What it does cost, at most a fifth of the thread, is deliberate: a control that
+  // costs nothing is never exposed to what it exists to catch, since a host stall lands
   // inside a window in proportion to how much of the clock that window occupies.
   // `budget-control.ts` argues both halves.
   control.arm();
