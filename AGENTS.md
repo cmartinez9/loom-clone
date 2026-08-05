@@ -255,13 +255,14 @@ a gap lives in `recording.json`, never in the container.
   number is painted into every frame and read back out of the framebuffer, so a fast
   blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
   passes. It judges the 16 ms budget on **the single worst frame, with no allowance**,
-  in both phases. That bound was once relaxed to a p99 plus a one-in-a-hundred
-  allowance on the strength of a CI run reporting a 19 ms frame — and the next round
-  proved that run came off a lost WebGL context returning stale pixels (below), so the
-  number was partly fabricated. **A measurement from an instrument since proven
-  unreliable cannot justify weakening an acceptance criterion**; fix the instrument,
-  re-measure, then decide. If a genuine frame over budget turns up on the fixed
-  instrument, that is a decision to take with real numbers, not a threshold to adjust.
+  in both phases, on every host that can hold that budget at all (the control, below).
+  That bound was once relaxed to a p99 plus a one-in-a-hundred allowance on the
+  strength of a CI run reporting a 19 ms frame — and the next round proved that run came
+  off a lost WebGL context returning stale pixels (below), so the number was partly
+  fabricated. **A measurement from an instrument since proven unreliable cannot justify
+  weakening an acceptance criterion**; fix the instrument, re-measure, then decide. If a
+  genuine frame over budget turns up on the fixed instrument, that is a decision to take
+  with real numbers, not a threshold to adjust.
   The instrument has since needed fixing a second time, the same way: **the gate's own
   readback was the largest cost inside the window it was measuring.** A whole 1440p
   frame out of the GPU is 14.7 MB synchronously plus an in-place flip of the same —
@@ -280,14 +281,16 @@ a gap lives in `recording.json`, never in the container.
   nothing short of that** (`CLEARS_BUDGET = 1`): a margin — it was 0.8 — let a control
   reading 14.50 ms, under §8's own number, defer a phase in which an injected 20.20 ms
   frame was then excused, and made every phase of every clean run on an M5 Pro defer
-  when the compositor was compositing in 0.20 ms. Two things keep it from being an escape hatch: on
-  the deferred branch the compositor is still held to the ceiling the control just
-  measured, and the harness runs the shipping `PreviewLoop` over a deliberately-slowed
-  compositor in the same run, which the gate requires to fail. That ceiling is
-  `TRACKS_CONTROL` × a number measured on the main thread the compositor saturates, so
-  it rises with the regression it judges: a 20 ms-on-one-frame-in-thirty mutation of
-  `Compositor.render` put 27–29 play frames at 3× budget and still passed, three runs
-  out of three. The deferred branch therefore also discriminates on **how often** — the
+  when the compositor was compositing in 0.20 ms; `test/budget-control.test.ts` pins
+  that case and fails if the constant is put back. Two things keep it from being an
+  escape hatch: on the deferred branch the compositor is still held to the ceiling the
+  control just measured, and the harness runs the shipping `PreviewLoop` over a
+  deliberately-slowed compositor in the same run, which the gate requires to fail. That
+  ceiling is `TRACKS_CONTROL` × a number measured on the main thread the compositor
+  saturates, so it rises with the regression it judges: a 20 ms-on-one-frame-in-thirty
+  mutation of `Compositor.render` put 27–29 play frames at 3× budget and still passed,
+  three runs out of three.
+  The deferred branch therefore also discriminates on **how often** — the
   compositor's over-budget share of frames against the host's own share of spins, which
   the compositor cannot inflate because the spin runs after the frame body. **The share
   is necessary and not sufficient, and the numbers say where it stops**: quiet, it
