@@ -411,5 +411,56 @@ describe.skipIf(process.platform !== 'darwin')('phase 5 gate: Accessibility revo
         windowMs: SAMPLE_WINDOW_MS,
       }),
     ).toThrow(/falling behind this machine's own ceiling/);
+
+    // The same reading, at the shorter window — and the figures CI produced next. A
+    // ceiling of 46.2 Hz defers the 1200 ms bound outright (55.5 samples against 60),
+    // and it must defer this one too: it clears 10 samples per 300 ms by 1.1, which is
+    // a quarter of one coalescing group on that machine. A proportion alone said the
+    // sampler had to meet it. See COALESCE_MS in rate-control.ts.
+    const short = { requestedHz: SAMPLE_HZ, ticks: 56, seconds: 1.211, hz: 46.2 };
+    expect(
+      expectSampleCount({
+        what: 'a sampler on a ceiling that clears a short window by less than a burst',
+        hz: 33.3,
+        control: short,
+        count: 10,
+        floor: 10,
+        windowMs: SHORT_WINDOW_MS,
+      }),
+    ).toContain('this environment cannot sustain');
+    expect(() =>
+      expectSampleCount({
+        ...stalled,
+        control: short,
+        count: 1,
+        floor: 10,
+        windowMs: SHORT_WINDOW_MS,
+      }),
+    ).toThrow(/falling behind this machine's own ceiling/);
+
+    // A machine that can reach it still asserts the short window's bound exactly, so
+    // the clearance above buys a throttled machine nothing on a capable one.
+    expect(() =>
+      expectSampleCount({
+        ...stalled,
+        control: unthrottled,
+        count: 3,
+        floor: 10,
+        windowMs: SHORT_WINDOW_MS,
+      }),
+    ).toThrow(/under the required 10/);
+
+    // "At least `floor`", not "more than": a count landing exactly on the bound is a
+    // pass, and a strict comparison reported one as "10 samples, under the required 10".
+    expect(
+      expectSampleCount({
+        what: 'a sampler landing exactly on the bound',
+        hz: 50,
+        control: unthrottled,
+        count: 60,
+        floor: 60,
+        windowMs: SAMPLE_WINDOW_MS,
+      }),
+    ).toBeNull();
   });
 });

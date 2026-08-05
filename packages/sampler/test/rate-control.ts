@@ -92,8 +92,32 @@ const CONTROL_WINDOW_MS = 1200;
  * clear it. This is not a relaxation of the bound: a machine that really does deliver
  * 120 Hz clears both of the gate's bounds by far more than this, and asserts them
  * exactly as written.
+ *
+ * This is the proportional half of that spread. {@link COALESCE_MS} is the other half,
+ * which a proportion cannot express, and both have to clear.
  */
 const CLEARS_BOUND = 0.8;
+
+/**
+ * The clearance a bound needs in *samples*, on top of {@link CLEARS_BOUND}.
+ *
+ * {@link CLEARS_BOUND} is a proportion, and a proportion of a small bound is small. The
+ * spread it is calibrated against was measured over 1200 ms windows; a shorter window
+ * is coarser, for the reason {@link CONTROL_WINDOW_MS} gives — `kern.timer_coalesce_bg_ns_max`
+ * hands a throttled machine's timer its firings in bursts up to 100 ms apart, and where
+ * a window's edges fall between two bursts is worth a whole burst of samples either
+ * way. That error is *absolute* — one group, however long the window — so it is charged
+ * in samples rather than folded into the proportion, and it is `control.hz` × this,
+ * because the group is the machine's own.
+ *
+ * This is the failure {@link CLEARS_BOUND} was added for, one call site along. CI handed
+ * a no-op timer 46.2 Hz — well under half the 120 Hz asked of it — and the 1200 ms bound
+ * duly deferred (44.4 against 60), while that same ceiling cleared the 10-samples-per-300 ms
+ * bound by 1.1 samples and held the sampler to it. 46.2 Hz is 4.6 samples in a coalescing
+ * group, so 1.1 is inside the instrument's own resolution. Both bounds now defer there,
+ * and the sampler is still held to tracking the ceiling measured for it.
+ */
+const COALESCE_MS = 100;
 
 export interface ControlRate {
   /** The rate asked of the control, matching what the sampler was asked for. */
@@ -171,6 +195,11 @@ export interface RateEvidence {
 /**
  * The gate's *"at least `floor` samples in a `windowMs` window"* bound.
  *
+ * *At least*, so a count landing exactly on the bound is a pass: a strict comparison
+ * here reported "10 samples, under the required 10", which is a sentence that cannot be
+ * true. The gate's numbers are the caller's and are asserted as written; what is fixed
+ * is this file saying one thing and testing another.
+ *
  * Returns the line the caller should report when the machine came up short, and `null`
  * when the gate's own bound is what was asserted. Throws — the test fails — whenever
  * the sampler is the one that came up short, on either branch.
@@ -183,12 +212,16 @@ export function expectSampleCount(
   // not assumed: the control's own wait is coalesced too, so its window is divided
   // out rather than taken on trust.
   const capacity = control.hz * (windowMs / 1000);
-  if (capacity * CLEARS_BOUND > floor) {
+  // The bound is the sampler's to meet only where the ceiling clears it by more than
+  // two measurements of one machine disagree by: proportionally, and by the one
+  // coalescing group a short window has no room to average out.
+  const reachable = floor + control.hz * (COALESCE_MS / 1000);
+  if (capacity * CLEARS_BOUND > reachable) {
     expect(
       count,
       `${what}: ${fmt(count)} samples, under the required ${fmt(floor)}. This machine ` +
         `is not the reason — ${figures(control)}, which is ${fmt(capacity)} in this window.`,
-    ).toBeGreaterThan(floor);
+    ).toBeGreaterThanOrEqual(floor);
     return null;
   }
   return tracksControl(evidence, `the ${fmt(floor)} samples per ${fmt(windowMs)} ms`);
