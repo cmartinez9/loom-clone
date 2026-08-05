@@ -1,0 +1,16 @@
+{
+  "name": "@loom/compositor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The one compositor: a WebGL2 Compositor class over pure draw calls. Preview and export both call it.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@loom/format": "0.1.0"
+  }
+}

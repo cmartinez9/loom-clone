@@ -192,8 +192,47 @@ export default tseslint.config(
     },
   },
 
+  // ---- decode and compositor stay framework-free -----------------------------
+  // Architecture report §1.3: *"`edl` and `compositor` being framework-free is what
+  // lets a headless test render frame 1,234 of a fixture project and compare it
+  // byte-for-byte against the exporter's frame 1,234."* `decode` is the same bargain
+  // for the other half of §4.5: one decode path, reachable from preview, from export
+  // and from a test, because it can reach nothing itself. They use DOM *types*
+  // (`VideoFrame`, `WebGL2RenderingContext`) and one DOM *value* each — `fetch` and
+  // the GL context they are handed — and nothing beyond that.
+  {
+    files: ['packages/decode/src/**/*.ts', 'packages/compositor/src/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.browser },
+    },
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'electron', '@loom/format/fs', '@loom/ipc'],
+              message:
+                'decode and compositor are pure: no node, no electron, no I/O. They ' +
+                'reach the world through the seams they declare — a ByteRangeReader, a ' +
+                'DecoderFactory, a GL context (architecture report §1.3).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   {
     files: ['packages/design/src/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.browser },
+    },
+  },
+
+  // The phase 6 gate harness: a renderer half and an Electron-main half.
+  {
+    files: ['test/gate/harness.ts', 'test/gate/fixture.ts'],
     languageOptions: {
       globals: { ...globals.browser },
     },

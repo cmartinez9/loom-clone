@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src loom:; img-src 'self' data:;"
+    />
+    <title>loom-clone — phase 6 gate</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #14110f;
+        color: #f2ece4;
+        font:
+          13px ui-monospace,
+          monospace;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="harness.js"></script>
+  </body>
+</html>

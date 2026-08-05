@@ -54,21 +54,32 @@ packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it w
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
+packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
+packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    loom:// protocol, IPC.
-apps/renderer/     renderer windows. Library, recorder HUD and the hidden capture
-                   page today; overlay and editor later.
+apps/renderer/     renderer windows. Library, recorder HUD, the hidden capture page
+                   and the preview loop today; overlay and editor later.
+test/              gates that span more than one package, in a real Electron renderer.
 ```
 
-Later phases add `packages/edl`, `packages/compositor`, `packages/decode` and
-`apps/export` beside these (report §1.3). The report also lists `apps/capture`; the
-hidden capture page lives in `apps/renderer/src/capture/` instead, because a window
-in this repo is a role in `apps/main/src/windows.ts` plus an entry in
-`apps/renderer/vite.config.ts`, and a second renderer app would fork that.
+Later phases add `packages/edl` and `apps/export` beside these (report §1.3). The
+report also lists `apps/capture`; the hidden capture page lives in
+`apps/renderer/src/capture/` instead, because a window in this repo is a role in
+`apps/main/src/windows.ts` plus an entry in `apps/renderer/vite.config.ts`, and a
+second renderer app would fork that.
+
+`decode` and `compositor` are **pure**: DOM types, no `node:`, no `electron`, no I/O,
+enforced in `eslint.config.mjs`. They reach the world through three narrow seams —
+a `ByteRangeReader`, a `DecoderFactory`, and the GL context they are handed. Wiring a
+real captured part to `SourceReader` needs exactly a byte-range reader, a
+`loom.index/1` sidecar and a `VideoDecoderConfig`; `source-reader.ts` says so at the
+top, including the one thing an adapter has to decide (where the `avcC` description
+comes from after a restart, since `recording.json` does not carry it).
 
 ## The four rules that are not style preferences
 
@@ -83,6 +94,9 @@ in this repo is a role in `apps/main/src/windows.ts` plus an entry in
    against a ~2 MB/s need). `packages/ipc/test/ipc-boundary.test.ts` fails the build
    if `VideoFrame`, `AudioData`, `ImageBitmap` or friends appear in the contract or
    the preload. The preload exposes named channels only — never a generic `invoke`.
+   And every `VideoFrame` has exactly one owner, `FrameRing`, with a `FrameLedger`
+   that throws on the _first_ frame past the ring cap (report §10.2). A leak here does
+   not throw on its own — the decoder just stops producing frames.
 3. **The bundle identifier is frozen.** `com.github.cmartinez9.loom-clone`, declared
    once in `apps/main/src/identity.ts`. macOS TCC keys every permission grant on it;
    changing it costs the user Screen Recording, Camera, Microphone and Accessibility,
@@ -168,6 +182,22 @@ rewriting a growing JSON once a second for the length of the recording.
   _process_ death leaves the old bytes or the new ones, never a mixture — proved by
   `packages/format/test/kill-mid-write.test.ts`, which includes a naive-writer control
   so it cannot pass vacuously.
+- **Never `flush()` a `VideoDecoder` mid-stream.** Chromium requires a keyframe as the
+  first chunk after `configure()` _and after every `flush()`_, so flushing to learn
+  that outputs have landed forces a re-seek and a whole re-decoded GOP on the next
+  frame of ordinary playback. `flush` is deliberately absent from `VideoDecoderLike`;
+  `SourceReader` waits on the output callback instead.
+- **`prime()` is called ~60×/s and must not disturb decode that is already running.**
+  A prime whose range is already requested rides along with the in-flight one rather
+  than superseding it, and "the ring does not hold `t`" only means re-seek when the
+  ring has moved _past_ `t` or the decoder has gone idle. Getting either wrong turns
+  every rendered frame into a seek that discards the decode it just started.
+- **The phase 6 gate is `npm test`, in a real Electron renderer.** `test/gate/` builds
+  a harness with esbuild, launches Electron, encodes a 4K VFR fixture with
+  `VideoEncoder` and plays it through the shipping `PreviewLoop`. The fixture's frame
+  number is painted into every frame and read back out of the framebuffer, so a fast
+  blank screen cannot pass. `test/phase6-gate.test.ts` prints the numbers even when it
+  passes.
 - **Test from a signed bundle at least once** before trusting anything permission
   related: in development, TCC is inherited from the terminal (research report §7,
   trap 6). The one way to shed that inheritance in a test is
