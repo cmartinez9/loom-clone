@@ -24,14 +24,44 @@ import {
   LOOM_API_KEY,
   type AppInfo,
   type ApplyOpsResult,
+  type CaptureCommand,
+  type CaptureEndReport,
+  type CaptureOptions,
+  type ChunkMsg,
   type EditDocument,
   type EditOp,
   type LoomApi,
+  type MetaMsg,
+  type RecorderStatus,
   type RecordingDoc,
   type RecordingId,
   type RecordingSummary,
   type TrackKey,
+  type Unsubscribe,
 } from '@loom/ipc';
+
+/**
+ * Subscribe to a main -> renderer push.
+ *
+ * Two things this deliberately does not do. It does not forward the
+ * `IpcRendererEvent` — that carries `sender` and `ports`, and handing a renderer a
+ * live handle on the IPC machinery would widen this surface well past the list of
+ * functions below. And it does not pretend the payload is typed: what arrives is
+ * `unknown`, and the two callers below assert its shape, which is where the "main
+ * is trusted, the wire is not" assumption belongs.
+ */
+function subscribe(
+  channel: (typeof CHANNEL)[keyof typeof CHANNEL],
+  callback: (payload: unknown) => void,
+): Unsubscribe {
+  const listener = (_event: unknown, payload: unknown): void => {
+    callback(payload);
+  };
+  ipcRenderer.on(channel, listener);
+  return () => {
+    ipcRenderer.removeListener(channel, listener);
+  };
+}
 
 const api: LoomApi = {
   app: {
@@ -61,6 +91,45 @@ const api: LoomApi = {
       ipcRenderer.invoke(CHANNEL.projectApplyOps, id, ops, baseRevision) as Promise<ApplyOpsResult>,
     mediaUrl: (id: RecordingId, track: TrackKey, part: number): Promise<string> =>
       ipcRenderer.invoke(CHANNEL.projectMediaUrl, id, track, part) as Promise<string>,
+  },
+
+  recorder: {
+    open: (): void => {
+      ipcRenderer.send(CHANNEL.recorderOpen);
+    },
+    start: (options?: Partial<CaptureOptions>): Promise<{ recordingId: RecordingId }> =>
+      ipcRenderer.invoke(CHANNEL.recorderStart, options ?? {}) as Promise<{
+        recordingId: RecordingId;
+      }>,
+    stop: (): Promise<void> => ipcRenderer.invoke(CHANNEL.recorderStop) as Promise<void>,
+    onStatus: (callback: (status: RecorderStatus) => void): Unsubscribe =>
+      subscribe(CHANNEL.recorderStatus, (payload) => {
+        callback(payload as RecorderStatus);
+      }),
+  },
+
+  /**
+   * The hidden capture page's half. Present on every window because there is one
+   * preload; accepted by main only from the capture window, which is where the
+   * check belongs — a renderer cannot be trusted to decline a capability.
+   */
+  capture: {
+    onCommand: (callback: (command: CaptureCommand) => void): Unsubscribe =>
+      subscribe(CHANNEL.captureCommand, (payload) => {
+        callback(payload as CaptureCommand);
+      }),
+    meta: (message: MetaMsg): void => {
+      ipcRenderer.send(CHANNEL.captureMeta, message);
+    },
+    chunk: (message: ChunkMsg): void => {
+      ipcRenderer.send(CHANNEL.captureChunk, message);
+    },
+    ended: (report: CaptureEndReport): void => {
+      ipcRenderer.send(CHANNEL.captureEnded, report);
+    },
+    failed: (message: string): void => {
+      ipcRenderer.send(CHANNEL.captureFailed, message);
+    },
   },
 };
 

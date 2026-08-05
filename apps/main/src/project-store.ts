@@ -29,6 +29,7 @@ import {
   BUNDLE,
   applyOps as applyOpsToDocument,
   isSafeBundleRelativePath,
+  mediaIndexPath,
   mediaPartPath,
   newSettingsDoc,
   ulid,
@@ -46,6 +47,8 @@ import {
   type SettingsDoc,
   type TrackKey,
   type ValidationIssue,
+  type VideoPart,
+  type VideoTrackDoc,
 } from '@loom/format';
 import {
   BundleLock,
@@ -60,6 +63,13 @@ import {
   type BundlePaths,
   type OpenedBundle,
 } from '@loom/format/fs';
+import type { ColourDescription, EncodedSample } from '@loom/mux';
+import {
+  MediaPartWriter,
+  recoverMediaPart,
+  type FinalizedPart,
+  type RecoveredPart,
+} from '@loom/mux/fs';
 
 export interface ProjectStoreOptions {
   /** Absolute path to the recordings root. */
@@ -96,6 +106,39 @@ interface OpenProject {
    * project, in order, is the whole point of this class.
    */
   chain: Promise<void>;
+}
+
+/** What a capture part needs before its first frame can be written. */
+export interface MediaPartRequest {
+  track: TrackKey;
+  part: PartIndex;
+  /** Coded size, in pixels. */
+  width: number;
+  height: number;
+  /** The `avcC` record from `VideoDecoderConfig.description`. */
+  avcC: Uint8Array;
+  /** Requested capture rate, used only for the final sample's duration. */
+  nominalFps: number;
+  colour?: ColourDescription;
+}
+
+/** Bundle-relative paths of a part that is now open for writing. */
+export interface OpenedMediaPart {
+  file: string;
+  index: string;
+}
+
+/** What a crash-recovery pass over one bundle achieved. Architecture report §7.1. */
+export interface BundleRecovery {
+  recordingId: RecordingId;
+  name: string;
+  /** `true` when the bundle came back as an editable recording. */
+  recovered: boolean;
+  recoveredSec: number;
+  frameCount: number;
+  /** Bytes dropped from a fragment that was mid-write when the process died. */
+  truncatedBytes: number;
+  error: string | null;
 }
 
 export class UnknownRecordingError extends Error {
@@ -146,6 +189,19 @@ export class ProjectStore {
    * awaiting, so this window is reachable from outside main.
    */
   private readonly opening = new Map<RecordingId, Promise<OpenedBundle>>();
+  /**
+   * Capture parts open for writing, keyed `<recordingId>:<track>`.
+   *
+   * Deliberately **not** on the per-project queue that every other write uses. The
+   * queue exists so a revision check and its append cannot interleave; a media part
+   * has no revision, writes a different file, and shares nothing with `edit.json`.
+   * What it does share is the crash budget: chunks arrive at 30 Hz and everything
+   * queued in memory is exactly what a `SIGKILL` costs, so the append path must not
+   * be able to end up behind a debounced snapshot's recursive bundle-size walk.
+   * `MediaPartWriter` serializes its own appends, so ordering within a part still
+   * holds.
+   */
+  private readonly openMedia = new Map<string, MediaPartWriter>();
   private settings: SettingsDoc | null = null;
 
   constructor(options: ProjectStoreOptions) {
@@ -388,6 +444,225 @@ export class ProjectStore {
     });
   }
 
+  // -------------------------------------------------------------- capture parts
+
+  /**
+   * Create `media/<track>.<part>.mp4` and write its initialisation segment.
+   *
+   * Called once per part, before its first frame. The part file is created with
+   * `wx`, so a part index that has already been used is an error rather than a
+   * silent truncation of somebody's footage.
+   */
+  async beginMediaPart(id: RecordingId, request: MediaPartRequest): Promise<OpenedMediaPart> {
+    const open = this.open.get(id);
+    if (open === undefined) throw new UnknownRecordingError(id);
+    const key = mediaKey(id, request.track);
+    if (this.openMedia.has(key)) {
+      throw new Error(`${request.track} already has an open part for ${id}`);
+    }
+    if (request.track !== 'screen' && request.track !== 'webcam') {
+      throw new Error(`${request.track} is not a video track`);
+    }
+
+    const file = mediaPartPath(request.track, request.part);
+    const index = mediaIndexPath(request.track, request.part);
+    const writer = await MediaPartWriter.create({
+      mediaPath: join(open.paths.dir, file),
+      indexPath: join(open.paths.dir, index),
+      width: request.width,
+      height: request.height,
+      avcC: request.avcC,
+      nominalFps: request.nominalFps,
+      ...(request.colour === undefined ? {} : { colour: request.colour }),
+    });
+    this.openMedia.set(key, writer);
+    return { file, index };
+  }
+
+  /**
+   * Append one encoded sample to an open part.
+   *
+   * Resolves once the bytes are with the kernel, which is the only thing that
+   * makes them survive a `SIGKILL` (§7.1). Callers may fire these without awaiting
+   * — order is preserved inside the writer — but must not drop the rejection: a
+   * failed write is the recording ending, not a log line.
+   */
+  async appendMediaChunk(id: RecordingId, track: TrackKey, sample: EncodedSample): Promise<void> {
+    const writer = this.openMedia.get(mediaKey(id, track));
+    if (writer === undefined) throw new Error(`${track} has no open part for ${id}`);
+    await writer.append(sample);
+  }
+
+  /** Frames written to an open part so far, for the recorder's status. */
+  mediaFrameCount(id: RecordingId, track: TrackKey): number {
+    return this.openMedia.get(mediaKey(id, track))?.frameCount ?? 0;
+  }
+
+  /**
+   * Flush the held sample, write the frame index sidecar, and close the part.
+   *
+   * `endTimestampUs` is when capture stopped, on the encoder's clock. A screen
+   * track stops producing frames when the screen stops changing, so without it a
+   * recording that ends on a still screen loses everything after its last frame.
+   */
+  async finalizeMediaPart(
+    id: RecordingId,
+    track: TrackKey,
+    endTimestampUs?: number,
+  ): Promise<FinalizedPart> {
+    const key = mediaKey(id, track);
+    const writer = this.openMedia.get(key);
+    if (writer === undefined) throw new Error(`${track} has no open part for ${id}`);
+    this.openMedia.delete(key);
+    return writer.finalize(endTimestampUs);
+  }
+
+  /**
+   * Close an open part without losing what it holds.
+   *
+   * Used when capture fails or the app quits mid-recording: the bytes already
+   * written stay, and the sidecar describes whatever the part actually contains.
+   */
+  async abortMediaPart(id: RecordingId, track: TrackKey): Promise<FinalizedPart | null> {
+    const key = mediaKey(id, track);
+    const writer = this.openMedia.get(key);
+    if (writer === undefined) return null;
+    this.openMedia.delete(key);
+    return writer.abort();
+  }
+
+  private async abortAllMediaParts(id: RecordingId): Promise<void> {
+    const prefix = `${id}:`;
+    await Promise.all(
+      [...this.openMedia.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(async ([key, writer]) => {
+          this.openMedia.delete(key);
+          await writer.abort();
+        }),
+    );
+  }
+
+  // ------------------------------------------------------------------ recovery
+
+  /**
+   * Bundles that were mid-recording when the process last died.
+   *
+   * `state: "recording"` or `"finalizing"` found at launch means we crashed — the
+   * state is written before the first frame precisely so this is *detected* rather
+   * than inferred from what happens to be on disk (§7.1).
+   */
+  async listCrashed(): Promise<RecordingSummary[]> {
+    const summaries = await this.list();
+    return summaries.filter((s) => s.state === 'recording' || s.state === 'finalizing');
+  }
+
+  /**
+   * Bring one crashed bundle back. Architecture report §7.1, steps 1–5.
+   *
+   * The captain's rule from `decision-journal-damage-recovery` governs the shape of
+   * this: withhold what cannot be verified, open what can, report what was lost. So
+   * a torn trailing fragment is truncated away rather than left to poison the next
+   * read, the frame index is rebuilt from the fragments that survived rather than
+   * trusted from a sidecar written before the crash, and the outcome — including a
+   * recording with nothing in it — is returned to be said out loud, never thrown
+   * away and never dressed up as a clean stop.
+   */
+  async recoverBundle(id: RecordingId): Promise<BundleRecovery> {
+    const opened = await this.openProject(id);
+    const name = opened.project.name;
+    const dir = opened.paths.dir;
+    try {
+      await this.setState(id, 'needs-recovery');
+
+      const recording = opened.recording;
+      if (recording === null) {
+        // `recording.json` is written before the part file is created, so its
+        // absence means the crash landed before any frame could exist.
+        return await this.failRecovery(
+          id,
+          name,
+          'the recording stopped before it captured a frame',
+        );
+      }
+
+      // Video tracks only: phase 1 captures the screen, phase 4 adds the webcam,
+      // and audio parts (phase 3) will need their own repair because an AAC
+      // stream is not a sequence of fragments.
+      const screen = await repairVideoTrack(dir, recording.tracks.screen);
+      const webcam = await repairVideoTrack(dir, recording.tracks.webcam);
+      const repaired = [screen, webcam].filter((t) => t !== null);
+
+      const frameCount = repaired.reduce((n, t) => n + t.frameCount, 0);
+      const truncatedBytes = repaired.reduce((n, t) => n + t.truncatedBytes, 0);
+      // Every track is cut back to the shortest one: a half-written trailing
+      // fragment on one track must not desynchronise the rest (§7.1, step 1).
+      // Phase 1 records one track, so this is that track's end.
+      const shortestEndSec =
+        repaired.length === 0 ? null : Math.min(...repaired.map((t) => t.endSec));
+
+      if (frameCount === 0) {
+        return await this.failRecovery(id, name, 'no complete frame survived the crash');
+      }
+
+      await this.writeRecordingDoc(id, {
+        ...recording,
+        // A video track that recovered no part at all is dropped rather than left
+        // pointing at a file with nothing in it — the format says a track has at
+        // least one part, and an empty one would be a document that fails its own
+        // validator on the next read.
+        tracks: {
+          ...(recording.tracks.mic === undefined ? {} : { mic: recording.tracks.mic }),
+          ...(recording.tracks.system === undefined ? {} : { system: recording.tracks.system }),
+          ...(screen === null ? {} : { screen: screen.track }),
+          ...(webcam === null ? {} : { webcam: webcam.track }),
+        },
+        integrity: {
+          finalizedAt: new Date().toISOString(),
+          recoveredFromCrash: true,
+          truncatedToSec: shortestEndSec,
+        },
+      });
+      await this.setState(id, 'editable');
+
+      return {
+        recordingId: id,
+        name,
+        recovered: true,
+        recoveredSec: shortestEndSec ?? 0,
+        frameCount,
+        truncatedBytes,
+        error: null,
+      };
+    } finally {
+      await this.close(id);
+    }
+  }
+
+  /**
+   * Mark a bundle that could not be brought back, and say why.
+   *
+   * `failed` rather than deleted or hidden: the recording is still in the library,
+   * still revealable in Finder, still the user's. An app that quietly removes a
+   * recording it could not read is an app that has lost the user's footage twice.
+   */
+  private async failRecovery(
+    id: RecordingId,
+    name: string,
+    reason: string,
+  ): Promise<BundleRecovery> {
+    await this.setState(id, 'failed', reason);
+    return {
+      recordingId: id,
+      name,
+      recovered: false,
+      recoveredSec: 0,
+      frameCount: 0,
+      truncatedBytes: 0,
+      error: reason,
+    };
+  }
+
   /** Replace `recording.json`. Written once, by the capture pipeline, at finalize. */
   async writeRecordingDoc(id: RecordingId, recording: RecordingDoc): Promise<void> {
     const open = this.open.get(id);
@@ -424,6 +699,10 @@ export class ProjectStore {
    * journal may only be dropped once the snapshot that supersedes it is durable.
    */
   async close(id: RecordingId): Promise<void> {
+    // Media parts first, and before the lock goes: a part still holding a file
+    // descriptor into this bundle is a writer we said we no longer had.
+    await this.abortAllMediaParts(id);
+
     const open = this.open.get(id);
     if (open === undefined) return;
     this.open.delete(id);
@@ -578,6 +857,71 @@ export class ProjectStore {
     const dir = await this.directoryFor(id);
     await rm(join(dir, BUNDLE.lock), { force: true });
   }
+}
+
+function mediaKey(id: RecordingId, track: TrackKey): string {
+  return `${id}:${track}`;
+}
+
+interface RepairedTrack {
+  track: VideoTrackDoc;
+  frameCount: number;
+  truncatedBytes: number;
+  /** Where this track ends on the recording clock, after repair. */
+  endSec: number;
+}
+
+/** Repair every part of one video track, or return `null` if none survived. */
+async function repairVideoTrack(
+  dir: string,
+  track: VideoTrackDoc | undefined,
+): Promise<RepairedTrack | null> {
+  if (track === undefined) return null;
+  const parts: VideoPart[] = [];
+  let frameCount = 0;
+  let truncatedBytes = 0;
+  let endSec = 0;
+  for (const part of track.parts) {
+    const result = await recoverPart(dir, part);
+    if (result === null) continue;
+    frameCount += result.frameCount;
+    truncatedBytes += result.truncatedBytes;
+    parts.push(repairedPart(part, result));
+    endSec = part.startTimeSec + result.durationSec;
+  }
+  if (parts.length === 0) return null;
+  return { track: { ...track, parts }, frameCount, truncatedBytes, endSec };
+}
+
+/**
+ * Recover one part, or `null` if there is nothing there to recover.
+ *
+ * A missing media file means the crash landed between `recording.json` and the
+ * part being created. That is a part with no frames, not a bundle that refuses to
+ * open — so it is dropped from the recovered document and the caller reports a
+ * recording with less in it, rather than an error the user cannot act on.
+ */
+async function recoverPart(dir: string, part: VideoPart): Promise<RecoveredPart | null> {
+  try {
+    return await recoverMediaPart(join(dir, part.file), join(dir, part.index));
+  } catch (error) {
+    console.warn(`[ProjectStore] ${part.file} could not be recovered:`, error);
+    return null;
+  }
+}
+
+/** The part as the bytes on disk actually describe it, after recovery. */
+function repairedPart(part: VideoPart, recovered: RecoveredPart): VideoPart {
+  return {
+    ...part,
+    codec: recovered.codec,
+    size: recovered.size,
+    durationSec: recovered.durationSec,
+    frameCount: recovered.frameCount,
+    rate: { ...part.rate, observedFps: recovered.observedFps },
+    endedEarly: true,
+    endReason: 'crash',
+  };
 }
 
 function isInside(parent: string, child: string): boolean {

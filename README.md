@@ -5,15 +5,20 @@ a recording is a folder on your disk that you can open in Finder.
 
 ## Status
 
-**Phase 0 of 14: the project format and the Electron skeleton.**
+**Phase 1 of 14: the capture spine.**
 
-What runs today: the app launches, lists the recordings it finds under
-`~/Movies/Loom Clone`, reveals them in Finder and moves them to the Trash. Capture,
-media and editing are phases 1 onward and are deliberately absent.
+What runs today: the app launches, records the screen, and lists the recordings it
+finds under `~/Movies/Loom Clone` — revealing them in Finder or moving them to the
+Trash. Audio is phase 3, the webcam phase 4, and the editor phase 7; they are
+deliberately absent rather than stubbed.
 
-What is complete today, because everything else is built on it: the on-disk format
-with its schemas, validation, migrations and crash-safe writes; the window registry;
-the `loom://` protocol; the typed IPC boundary; and the Pressroom design system.
+The property phase 1 exists to establish: **a recording survives the process being
+killed.** Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and
+are written by the main process as fragmented-MP4 fragments the instant they exist,
+so a `SIGKILL` costs at most the frame in flight. `npm test` proves it by killing a
+real recording mid-stream and measuring what comes back — the gate is 95%, measured
+at 98.7–99.4% — and `npm run verify:mutation` proves the gate itself by breaking the
+writer four ways and requiring the test to fail each time.
 
 ## Requirements
 
@@ -35,15 +40,22 @@ node scripts/seed-fixtures.mjs ~/Movies/"Loom Clone"
 npm start
 ```
 
+To check that screen capture really works on this machine, end to end:
+
+```bash
+npm run build && node scripts/smoke-capture.mjs
+```
+
 ## How it is put together
 
 ```
 packages/format/   the .loomrec on-disk format — schemas, migrations, atomic writes,
                    the edit journal
+packages/mux/      the fragmented-MP4 writer and the scanner crash recovery reads
 packages/ipc/      the typed main <-> renderer contract
 packages/design/   "Pressroom" — tokens, type, icons, self-hosted fonts
-apps/main/         Electron main: windows, ProjectStore, loom://, IPC
-apps/renderer/     renderer windows
+apps/main/         Electron main: windows, ProjectStore, RecorderSession, loom://, IPC
+apps/renderer/     renderer windows — library, recorder HUD, hidden capture page
 ```
 
 `AGENTS.md` carries the rules that hold this together and points at the design

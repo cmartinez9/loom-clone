@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The capture page renders nothing and loads nothing. Its CSP says so: no
+      styles, no fonts, no images, no media element — only its own script. The
+      window it lives in is 1x1 and never shown (architecture report §1.2).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <title>Capture</title>
+    <script type="module" src="./capture/main.ts"></script>
+  </head>
+  <body></body>
+</html>

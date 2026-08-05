@@ -106,6 +106,12 @@ export default tseslint.config(
                 'The filesystem half of @loom/format has exactly one caller: ProjectStore. ' +
                 'Import the pure @loom/format entry point instead.',
             },
+            {
+              name: '@loom/mux/fs',
+              message:
+                'The filesystem half of @loom/mux has exactly one caller: ProjectStore. ' +
+                'Capture writes reach the disk through it like every other write.',
+            },
           ],
         },
       ],
@@ -123,6 +129,10 @@ export default tseslint.config(
             {
               name: '@loom/format/fs',
               message: 'media-reader.ts reads bytes; bundle I/O belongs to ProjectStore.',
+            },
+            {
+              name: '@loom/mux/fs',
+              message: 'media-reader.ts reads bytes; capture writes belong to ProjectStore.',
             },
           ],
         },
@@ -153,20 +163,20 @@ export default tseslint.config(
     },
   },
 
-  // ---- the pure package stays pure -----------------------------------------
+  // ---- the pure packages stay pure -----------------------------------------
   {
-    files: ['packages/format/src/**/*.ts'],
-    ignores: ['packages/format/src/fs/**/*.ts'],
+    files: ['packages/format/src/**/*.ts', 'packages/mux/src/**/*.ts'],
+    ignores: ['packages/format/src/fs/**/*.ts', 'packages/mux/src/fs/**/*.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
         {
           patterns: [
             {
-              group: ['node:*', 'electron'],
+              group: ['node:*', 'electron', '@loom/format/fs'],
               message:
-                'The @loom/format entry point is pure: no node, no DOM, no I/O. ' +
-                'Filesystem code belongs in src/fs (architecture report §1.3).',
+                'The @loom/format and @loom/mux entry points are pure: no node, no DOM, ' +
+                'no I/O. Filesystem code belongs in src/fs (architecture report §1.3).',
             },
           ],
         },

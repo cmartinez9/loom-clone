@@ -31,8 +31,11 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
+npm run verify:mutation   # break the capture writer four ways; each must fail the gate
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
+node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
+npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
 ```
 
@@ -42,26 +45,33 @@ npx electron scripts/screenshot.cjs --out shots --theme light   # capture the re
 packages/format/   the on-disk format: schemas, types, validation, migrations,
                    writeAtomic, the edit journal.  `@loom/format` is PURE (no node,
                    no DOM); `@loom/format/fs` is the filesystem half.
+packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it with.
+                   `@loom/mux` is PURE; `@loom/mux/fs` owns the file descriptor and,
+                   like `@loom/format/fs`, has exactly one caller.
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
-apps/main/         Electron main: WindowRegistry, ProjectStore, loom:// protocol, IPC.
-apps/renderer/     renderer windows. Library today; HUD, overlay and editor later.
+apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
+                   loom:// protocol, IPC.
+apps/renderer/     renderer windows. Library, recorder HUD and the hidden capture
+                   page today; overlay and editor later.
 ```
 
-Later phases add `packages/edl`, `packages/compositor`, `packages/decode`,
-`packages/mux`, `apps/capture` and `apps/export` beside these (report §1.3).
-A new window is a role in `apps/main/src/windows.ts` plus an entry in
-`apps/renderer/vite.config.ts`.
+Later phases add `packages/edl`, `packages/compositor`, `packages/decode` and
+`apps/export` beside these (report §1.3). The report also lists `apps/capture`; the
+hidden capture page lives in `apps/renderer/src/capture/` instead, because a window
+in this repo is a role in `apps/main/src/windows.ts` plus an entry in
+`apps/renderer/vite.config.ts`, and a second renderer app would fork that.
 
 ## The four rules that are not style preferences
 
 1. **Main is the only writer to disk.** Renderers propose; main persists. Enforced
    structurally, not by convention: sandboxed renderers have no filesystem at all,
-   `eslint.config.mjs` restricts `node:fs` and `@loom/format/fs` to
+   `eslint.config.mjs` restricts `node:fs`, `@loom/format/fs` and `@loom/mux/fs` to
    `apps/main/src/project-store.ts` (plus read-only `media-reader.ts`), and a `.lock`
    file keeps a second app instance out of a bundle. Adding a second writer is an
-   architecture change, not a refactor.
+   architecture change, not a refactor. That includes the 30 Hz capture path: chunks
+   reach the disk through `ProjectStore.appendMediaChunk` like everything else.
 2. **Raw and decoded frames never cross IPC.** Encoded chunks do (measured 289 MB/s
    against a ~2 MB/s need). `packages/ipc/test/ipc-boundary.test.ts` fails the build
    if `VideoFrame`, `AudioData`, `ImageBitmap` or friends appear in the contract or
@@ -94,6 +104,21 @@ debounce, so an editor crash costs at most 250 ms.
 Time is **seconds, float**, everywhere except the frame index sidecar. Media tracks
 are lists of parts (`screen.000.mp4`) from day one, never a single file.
 
+## Capture, in one paragraph
+
+A hidden renderer runs `getDisplayMedia` → `MediaStreamTrackProcessor` →
+`VideoEncoder` and sends **encoded chunks** to main, which writes each one as its own
+`moof`+`mdat` fragment the instant it exists. One sample per fragment is the crash
+budget made explicit: a `SIGKILL` costs what this process still holds, so a fragment
+is one frame (~110 bytes of overhead, ~0.2% at 12 Mbps) rather than the report's
+"≤ 1 s". The writer holds exactly one sample so every duration is measured against
+the next frame's timestamp, which a variable-rate screen track needs. `recording.json`
+is written **before the first frame** with the facts only a live session knows
+(display, scale factor, permissions); recovery corrects it rather than inventing it.
+The frame index is held in memory and written at finalize — recovery rebuilds it by
+scanning the fragments, which is strictly better than a checkpoint and avoids
+rewriting a growing JSON once a second for the length of the recording.
+
 ## Sharp edges
 
 - **Bracket notation is deliberate.** `tsconfig.json` sets
@@ -103,9 +128,19 @@ are lists of parts (`screen.000.mp4`) from day one, never a single file.
   to match.
 - **There is no dev server.** Windows load from `loom://app` in development exactly as
   in a packaged app, so origin, CSP and asset paths cannot differ between them.
-- **Every write for one project is serialized** through `ProjectStore`'s per-project
-  queue. Checking a revision outside it lets two batches both read revision _n_ and
-  both append as _n + 1_.
+- **Every `edit.json`/`project.json` write is serialized** through `ProjectStore`'s
+  per-project queue. Checking a revision outside it lets two batches both read
+  revision _n_ and both append as _n + 1_. **Media appends are a separate queue**, per
+  part, on purpose: they share no revision, write a different file, and must not be
+  able to queue behind a snapshot's recursive bundle-size walk — anything queued in
+  memory is exactly what a crash costs.
+- **A crash test that does not kill production code proves nothing.** Phase 0 shipped
+  one that killed a copy of `writeAtomic`. Both gates now kill the real path, both
+  have a control that must fail, and `npm run verify:mutation` breaks the writer on
+  disk and requires the tests to notice. Add a mutation when you add a property.
+- **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
+  ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
+  additionally when the machine happens to have it.
 - **`fsync` on macOS is not `F_FULLFSYNC`.** What `writeAtomic` promises is that a
   _process_ death leaves the old bytes or the new ones, never a mixture — proved by
   `packages/format/test/kill-mid-write.test.ts`, which includes a naive-writer control

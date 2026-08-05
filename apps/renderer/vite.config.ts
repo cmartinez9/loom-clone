@@ -7,9 +7,10 @@
  * in watch mode and reloads the windows, which keeps origin, CSP and asset paths
  * identical to production.
  *
- * Later phases add an entry here per window: `recorder.html`, `countdown.html`,
- * `overlay.html`, `editor.html`, plus the two hidden pages `capture.html` and
- * `export.html` (architecture report §1.2).
+ * One entry per window in the §1.2 table. Phase 0 shipped `library.html`; phase 1
+ * adds the recorder HUD and the hidden capture page. `countdown.html`,
+ * `overlay.html`, `editor.html` and `export.html` arrive with the phases that
+ * have something to put in them.
  */
 
 import { defineConfig } from 'vite';
@@ -35,6 +36,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         library: resolve(root, 'library.html'),
+        recorder: resolve(root, 'recorder.html'),
+        capture: resolve(root, 'capture.html'),
       },
     },
   },

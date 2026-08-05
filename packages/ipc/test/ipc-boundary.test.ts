@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
   CHANNEL,
+  EVENT_CHANNELS,
   INVOKE_CHANNELS,
   LOOM_HOST,
   LOOM_SCHEME,
@@ -116,10 +117,30 @@ describe('the preload surface', () => {
     expect([...bound].sort()).toEqual(Object.keys(CHANNEL).sort());
   });
 
-  it('separates invoke channels from send-only ones with no overlap', () => {
-    const all = new Set(Object.values(CHANNEL));
-    expect(new Set([...INVOKE_CHANNELS, ...SEND_CHANNELS])).toEqual(all);
-    for (const channel of INVOKE_CHANNELS) expect(SEND_CHANNELS).not.toContain(channel);
+  it('partitions every channel into invoke, send-only or event, with no overlap', () => {
+    const all = Object.values(CHANNEL);
+    const classified = [...INVOKE_CHANNELS, ...SEND_CHANNELS, ...EVENT_CHANNELS];
+    expect(new Set(classified)).toEqual(new Set(all));
+    // A channel in two kinds would be a channel whose direction is a matter of
+    // opinion, which is how a renderer ends up able to push a status event.
+    expect(classified.length, 'a channel appears in more than one kind').toBe(all.length);
+  });
+
+  it('never sends or invokes on an event channel', async () => {
+    const code = stripComments(await readFile(PRELOAD, 'utf8'));
+    const outbound = [...code.matchAll(/ipcRenderer\.(?:invoke|send)\(CHANNEL\.(\w+)/g)].map(
+      ([, name]) => CHANNEL[name as keyof typeof CHANNEL],
+    );
+    for (const channel of EVENT_CHANNELS) {
+      expect(outbound, `${channel} is main -> renderer only`).not.toContain(channel);
+    }
+    // And every event channel really is subscribed to, so the list is not aspirational.
+    for (const channel of EVENT_CHANNELS) {
+      const name = Object.entries(CHANNEL).find(([, value]) => value === channel)?.[0];
+      expect(code, `${channel} is declared an event but never subscribed`).toMatch(
+        new RegExp(`(?:ipcRenderer\\.on|subscribe)\\(CHANNEL\\.${name ?? ''}\\b`),
+      );
+    }
   });
 });
 
