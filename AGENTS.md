@@ -39,6 +39,7 @@ node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame 
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 node scripts/smoke-capture.mjs --synthetic       # ...with a canvas and an oscillator instead
 node packages/sampler/native/build.mjs --force   # rebuild only the native sampler
+node scripts/gate-load.mjs 20 45                 # the only way to load the box for a gate run
 ./dist/native/loom-input-sampler probe           # what input capture can do right now
 npx electron scripts/screenshot.cjs --out shots --theme light   # capture the real windows
 ```
@@ -330,19 +331,17 @@ a gap lives in `recording.json`, never in the container.
   and the mutation survived all three. Quiet, the same mutation now fails in four runs
   of four, and in three of those four on §8's own number rather than on this branch at
   all, the controls having cleared the budget outright (8.40–11.10 ms).
-  **The deferred branch also has an accepted flake, and it is the same limit read from
-  the other side.** One clean quiet run in nine failed: a genuine 49.10 ms host stall at
-  play frame 3, against a worst spin of 32.10 ms and so a ceiling of 48.15 ms, on a
-  compositor with nothing wrong with it. The mechanism is `TRACKS_CONTROL`'s own premise
-  — the frame and the spin are sampled separately, so a stall lands in one or the other
-  — and the pacing fix below makes it marginally likelier by trading control exposure
-  from a quarter of the clock to a fifth: 166–170 play spins a run, against about 204
-  before it. **Roughly 1 in 9, on a clean compositor**, measured on this machine.
-  It is accepted rather than fixed, and the arithmetic is why: this gate is 100% red
-  today. Do not paper over it, do not retry it, and do not widen a bound to hide it —
-  `loom-gate-exposure-matched-control` is now the fix for **both** this flake and the
-  middle band above, since matching the control's exposure to the frame's own cost puts
-  the stall in both windows or neither, and it is raised in priority accordingly.
+  **This gate has no measured flake rate on a clean compositor, and the figure that
+  used to stand here was an artefact of the box rather than of the gate.** A previous
+  round recorded roughly 1 in 9 — one quiet run failing on a 49.10 ms host stall at play
+  frame 3 — and that machine was afterwards found pinned at load 132 by 42 orphaned
+  busy-loops, 22 of them left by a worktree whose parent died before its cleanup ran.
+  Re-measured on the same box once they were gone, at a load average of 8 across 18
+  cores: **nine consecutive quiet runs, nine passes.** Eight held §8's own number on both
+  phases against controls reading 8.40–10.20 ms; the ninth deferred play on a 21.00 ms
+  spin and cleared that branch too, on a 0.50 ms worst frame. The worst frame of the nine
+  was 11.30 ms of 960. So `loom-gate-exposure-matched-control` is the fix for the middle
+  band above and for nothing else.
   **A control paced per frame is a bug**: half a budget per frame is a whole thread on a
   120 Hz panel, and the version that did that starved decode until every scrub target
   timed out at four seconds. It is paced by the wall clock instead, **from the end of
@@ -364,6 +363,13 @@ a gap lives in `recording.json`, never in the container.
   they were left describing a period that no longer existed.
   `test/budget-control.test.ts` pins the pacing with an injected clock and spin, and
   `framesPerSpin` against a simulated fixed-refresh scheduler.
+  **Load this gate's box with `scripts/gate-load.mjs` and never with an ad-hoc
+  `while :; do :; done &`.** Every reading above that was taken under load needs the box
+  saturated on purpose, and the ad-hoc version of that is what left 42 spinners pinning
+  this shared machine for nine hours and put a fabricated flake rate in this file. A
+  `trap` does not cover it, because the failure case _is_ the parent dying before its
+  cleanup runs; the helper's spinners each carry their own deadline and exit on it
+  unwatched, capped well under one gate launch.
 - **Test files run one at a time, and anything measuring the machine measures it
   twice.** Three gates time the box they run on: the phase-5 sampler's 120 Hz, phase
   6's worst-frame budget, and phase 3's twenty-minute A/V sync, which saturates the
