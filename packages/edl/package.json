@@ -1,9 +1,9 @@
 {
-  "name": "@loom/compositor",
+  "name": "@loom/edl",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The one compositor: a WebGL2 Compositor class over pure draw calls. Preview and export both call it.",
+  "description": "The timeline model: tracks, channels, keyframes, curve and spring evaluation, compile/resolve, inverse ops and undo/redo.",
   "exports": {
     ".": {
       "types": "./src/index.ts",
@@ -11,7 +11,6 @@
     }
   },
   "dependencies": {
-    "@loom/edl": "0.1.0",
     "@loom/format": "0.1.0"
   }
 }

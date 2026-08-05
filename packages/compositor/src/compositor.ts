@@ -39,9 +39,10 @@
  *
  * A third, quieter one falls out of those: the source texture is uploaded once per
  * *frame of the recording*, not once per composite. `render` still draws on every
- * call — state changes between two composites of the same frame, and phase 7's zoom
- * will change it every tick — but it does not re-upload pixels the texture already
- * holds. See the comment on the upload; it is where the budget actually goes.
+ * call — state changes between two composites of the same frame, and a spring-driven
+ * zoom (`@loom/edl`) changes it every tick — but it does not re-upload pixels the
+ * texture already holds. See the comment on the upload; it is where the budget
+ * actually goes.
  */
 
 import { contentRect, rectToNdc, sourceSampleRect } from './geometry.ts';
@@ -55,7 +56,7 @@ import {
   type RenderTarget,
 } from './gl-util.ts';
 import { GpuTimer } from './gpu-timer.ts';
-import type { ResolvedState } from './resolved-state.ts';
+import type { ResolvedState } from '@loom/edl';
 import { SCREEN_FRAGMENT_SHADER, SCREEN_VERTEX_SHADER, UNIT_QUAD } from './shaders.ts';
 
 /**

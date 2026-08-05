@@ -21,8 +21,12 @@
  * the same `Compositor` from a fixed-timestamp loop instead of this one, which is
  * how §4.5's "may differ: scheduling; must not differ: state" line is drawn in code.
  *
- * `resolve()` is phase 7's. Until then the loop fills in a throwaway `ResolvedState`
- * directly — the compositor's `resolved-state.ts` says what that is and why.
+ * Phase 7 landed the model, so the loop no longer fills a state in by hand: it calls
+ * `resolve(compiled, t)` on a `CompiledTimeline` and hands the result straight to
+ * the compositor. A project with no edits is not a special case — it is
+ * `identityTimeline(durationSec)`, a real compile of a one-clip document — so there
+ * is exactly one path from a timeline time to a composite, and the exporter walks
+ * the same one (§4.5).
  *
  * ## The four anti-stutter rules, and where each one is
  *
@@ -41,7 +45,8 @@
  *    *scheduling* difference and never a *state* difference.
  */
 
-import type { CompositorFrames, ResolvedState } from '@loom/compositor';
+import type { CompositorFrames } from '@loom/compositor';
+import { identityTimeline, resolve, type CompiledTimeline, type ResolvedState } from '@loom/edl';
 import type { Seconds } from '@loom/format';
 import { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
 
@@ -87,8 +92,19 @@ export const rafScheduler: FrameScheduler = {
 export interface PreviewLoopOptions {
   compositor: PreviewCompositor;
   screen: PreviewSource;
-  /** Timeline duration. Playback stops here. */
+  /**
+   * Timeline duration. Playback stops here.
+   *
+   * It builds the default timeline below, and a caller who supplies `timeline`
+   * instead states the duration in its clip list; there is only ever one of them.
+   */
   durationSec: Seconds;
+  /**
+   * The compiled timeline `resolve` reads. Defaults to `identityTimeline(durationSec)`
+   * — the recording as captured — so a caller that has a duration and no project
+   * still goes through the real model rather than around it.
+   */
+  timeline?: CompiledTimeline;
   /** §4.2's lookahead target. */
   lookaheadSec?: number;
   /** How far behind the playhead frames are kept before being closed. */
@@ -120,16 +136,17 @@ export class PreviewLoop {
   readonly #onError: (error: Error) => void;
   readonly #onStall: (info: { atSec: Seconds; forMs: number }) => void;
 
-  /** Mutated in place every frame — never reallocated (§4.3). */
-  readonly #state: ResolvedState = {
-    timelineTime: 0,
-    sourceTime: 0,
-    clipIndex: 0,
-    zoom: { amount: 1, center: [0.5, 0.5] },
-  };
   readonly #frames: CompositorFrames = { screen: null };
 
-  #durationSec: Seconds;
+  /**
+   * Owned by the `CompiledTimeline`, not by the loop: `resolve` returns the same
+   * object every call and overwrites it, which is how §3.6 gets "no allocation".
+   * The loop reads it within the turn and keeps no reference past `render`.
+   */
+  #timeline: CompiledTimeline;
+  /** True while `#timeline` is the loop's own `identityTimeline`, not a caller's. */
+  #ownsTimeline: boolean;
+
   #time: Seconds = 0;
   #playing = false;
   #scrubbing = false;
@@ -148,7 +165,8 @@ export class PreviewLoop {
     this.#now = options.now ?? (() => performance.now());
     this.#lookaheadSec = options.lookaheadSec ?? 0.5;
     this.#retainBehindSec = options.retainBehindSec ?? 0.1;
-    this.#durationSec = Math.max(0, options.durationSec);
+    this.#ownsTimeline = options.timeline === undefined;
+    this.#timeline = options.timeline ?? identityTimeline(Math.max(0, options.durationSec));
     this.#onError = options.onError ?? (() => undefined);
     this.#onStall = options.onStall ?? (() => undefined);
     this.metrics = new FrameMetrics(4096, FRAME_BUDGET_MS);
@@ -167,11 +185,59 @@ export class PreviewLoop {
   get scrubbing(): boolean {
     return this.#scrubbing;
   }
+  /**
+   * The compiled timeline's duration, and never a second copy of it.
+   *
+   * `resolve` clamps into `CompiledTimeline.durationSec` (§3.6), so a duration the
+   * loop held separately could outrun the one the state comes from: the playhead
+   * would keep advancing while `sourceTime` stuck at the old end, and the preview
+   * would freeze on the last frame with no error anywhere.
+   */
   get durationSec(): Seconds {
-    return this.#durationSec;
+    return this.#timeline.durationSec;
   }
+  /**
+   * Re-length a loop that is showing the recording as captured.
+   *
+   * That is the only case the duration is the loop's to set: a compiled project's
+   * duration is its clip list, and changing it means handing over a recompiled
+   * {@link PreviewLoop.timeline}. Silently discarding a caller's timeline here would
+   * leave a valid loop showing the wrong picture, so it is refused instead.
+   */
   set durationSec(value: Seconds) {
-    this.#durationSec = Math.max(0, value);
+    if (!this.#ownsTimeline) {
+      throw new Error(
+        'durationSec is the compiled timeline’s; assign `timeline` a recompiled one instead',
+      );
+    }
+    this.#timeline = identityTimeline(Math.max(0, value));
+    this.#clampTime();
+  }
+  get timeline(): CompiledTimeline {
+    return this.#timeline;
+  }
+  /**
+   * Swap in a recompiled timeline — §3.6's *"`compile` is called on load and on any
+   * op that changes a spring channel (debounced 100 ms)"*.
+   *
+   * Assignment, not a rebuild: the next frame resolves against the new timeline and
+   * every frame before it resolved against the old one. There is no instant at
+   * which half of one and half of the other is on screen.
+   *
+   * A shorter timeline takes the playhead with it. `resolve` clamps internally, so
+   * the composite would be right either way — but `time` is what a scrub bar reads,
+   * and a paused loop reporting 25 s of a 12 s project is a playhead off the end of
+   * its own track until something happens to call `seek`.
+   */
+  set timeline(value: CompiledTimeline) {
+    this.#timeline = value;
+    this.#ownsTimeline = false;
+    this.#clampTime();
+  }
+
+  #clampTime(): void {
+    const duration = this.durationSec;
+    if (this.#time > duration) this.#time = duration;
   }
   /** High-water mark of live frames observed by the loop. The gate asserts on it. */
   get peakLiveFrames(): number {
@@ -196,7 +262,7 @@ export class PreviewLoop {
   }
 
   play(): void {
-    if (this.#time >= this.#durationSec) this.#time = 0;
+    if (this.#time >= this.durationSec) this.#time = 0;
     this.#playing = true;
     this.#scrubbing = false;
     this.#lastTickMs = null;
@@ -218,7 +284,7 @@ export class PreviewLoop {
    * was reading, and never blocks this call.
    */
   seek(t: Seconds, options: { scrubbing?: boolean } = {}): void {
-    this.#time = Math.min(Math.max(0, t), this.#durationSec);
+    this.#time = Math.min(Math.max(0, t), this.durationSec);
     this.#scrubbing = options.scrubbing ?? false;
     this.#lastTickMs = null;
     this.#resetStallWatch();
@@ -247,23 +313,23 @@ export class PreviewLoop {
     const started = this.#now();
 
     if (this.#playing) {
+      const durationSec = this.#timeline.durationSec;
       const last = this.#lastTickMs;
-      if (last !== null)
-        this.#time = Math.min(this.#durationSec, this.#time + (nowMs - last) / 1000);
+      if (last !== null) this.#time = Math.min(durationSec, this.#time + (nowMs - last) / 1000);
       this.#lastTickMs = nowMs;
-      if (this.#time >= this.#durationSec) this.#playing = false;
+      if (this.#time >= durationSec) this.#playing = false;
     }
 
     const t = this.#time;
-    // Phase 7 replaces these four assignments with `resolve(compiled, t)`. Screen
-    // only, one clip, no zoom: the identity transform (§8's throwaway state).
-    this.#state.timelineTime = t;
-    this.#state.sourceTime = t;
-    this.#state.clipIndex = 0;
+    // §3.6's one hot-path function. No allocation, no simulation: the spring was
+    // integrated on the fixed 8 ms grid at compile time and sampling it here is an
+    // index and a lerp. Integrating at frame rate instead — even "just for preview"
+    // — is §3.4's one forbidden shortcut, and worth 82.6 px at 3456 wide.
+    const state = resolve(this.#timeline, t);
 
-    const frame = this.#screen.frameAt(this.#state.sourceTime);
+    const frame = this.#screen.frameAt(state.sourceTime);
     this.#frames.screen = frame;
-    this.#compositor.render(this.#frames, this.#state);
+    this.#compositor.render(this.#frames, state);
     this.#compositor.present();
     // Held only for the length of the draw. The ring still owns it; dropping the
     // reference here means no path out of this function keeps a frame alive.

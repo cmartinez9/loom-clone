@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import type { CompositorFrames, ResolvedState } from '@loom/compositor';
+import type { CompositorFrames } from '@loom/compositor';
+import { identityTimeline, type ResolvedState } from '@loom/edl';
 import {
   PreviewLoop,
   type FrameScheduler,
@@ -155,6 +156,45 @@ describe('PreviewLoop', () => {
     expect(loop.time).toBe(10);
     expect(loop.playing).toBe(false);
     loop.stop();
+  });
+
+  it('keeps the duration and the compiled timeline the same number', () => {
+    // `resolve` clamps into `CompiledTimeline.durationSec`, so a duration held apart
+    // from the timeline would let the playhead run past a `sourceTime` that had
+    // stopped moving — the preview frozen on the last frame, with no error anywhere.
+    const source = stubSource();
+    const { loop, scheduler } = loopWith(source);
+    loop.durationSec = 30;
+    expect(loop.durationSec).toBe(30);
+    expect(loop.timeline.durationSec).toBe(30);
+
+    loop.play();
+    scheduler.tick(0);
+    scheduler.tick(20_000);
+    expect(loop.time).toBeCloseTo(20, 6);
+    expect(loop.playing).toBe(true);
+    loop.stop();
+
+    // And a caller who compiled their own timeline owns the duration: re-lengthing
+    // it here would silently throw their edits away.
+    loop.timeline = identityTimeline(12);
+    expect(loop.durationSec).toBe(12);
+    // A shorter timeline takes the playhead with it. `resolve` clamps internally so
+    // the picture is right either way, but `time` is what a scrub bar reads, and a
+    // paused loop reporting 20 s of a 12 s project is a playhead off its own track.
+    expect(loop.time).toBe(12);
+    expect(() => {
+      loop.durationSec = 40;
+    }).toThrow(/timeline/);
+  });
+
+  it('brings the playhead back inside a shortened duration', () => {
+    const source = stubSource();
+    const { loop } = loopWith(source);
+    loop.durationSec = 30;
+    loop.seek(25);
+    loop.durationSec = 12;
+    expect(loop.time).toBe(12);
   });
 
   it('does not advance while paused, so a seek stays put', () => {

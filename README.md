@@ -6,9 +6,9 @@ a recording is a folder on your disk that you can open in Finder.
 ## Status
 
 **Phase 4 of 14: the webcam track and multi-part recordings**, on top of phase 3's
-audio and A/V sync machinery, plus the phase 5 cursor and click sampler and phase 6's
-decode path and WebGL2 compositor, built early and out of order because they are
-self-contained.
+audio and A/V sync machinery, plus the phase 5 cursor and click sampler, phase 6's
+decode path and WebGL2 compositor, and phase 7's timeline model, built early and out
+of order because they are self-contained.
 
 What runs today: the app launches, records the screen with the microphone and the
 system's own audio output alongside it, and lists the recordings it finds under
@@ -17,7 +17,8 @@ audio needs no driver and no admin prompt, which is why the floor is macOS 14. T
 camera records as a track of its own when a recording asks for one, but it is opt-in
 and the HUD has no toggle yet: opening a camera lights the hardware indicator, so it
 should follow from a user asking, and the asking is phase 2's permission flow and
-later HUD work. The editor is phase 7, deliberately absent rather than stubbed.
+later HUD work. The editor window that will drive phase 7's timeline model is later
+still, deliberately absent rather than stubbed.
 
 The property phase 1 established: **a recording survives the process being killed.**
 Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
@@ -45,9 +46,6 @@ macOS itself delivers — and checking both parts' boundaries, with three contro
 must fail. What no dev run can exercise is a real camera or a real cable; `AGENTS.md`
 carries those forward.
 
-`npm run verify:mutation` proves all three gates by breaking the capture path one way
-at a time and requiring a test to fail each time.
-
 The native input sampler is complete alongside it, but nothing starts it yet, because
 the permission flow that turns it on is phase 2.
 
@@ -55,6 +53,18 @@ Phase 6's one decode path and WebGL2 compositor — the pair preview and export 
 share — are complete alongside it too, built ahead of the capture spine against
 synthetic fixtures and held to a 16 ms frame budget on a 4K fixture at a 1440p viewport
 by a gate that runs in `npm test`. No shipping window drives the preview loop yet.
+
+The property phase 7 establishes: **an edit means the same thing every time it is
+read.** Tracks, keyframes and the springs that move a zoom live in one model, resolved
+once per frame by the preview and — when phase 8 lands — by the exporter, so there is
+no second reading to drift from the first. `npm test` proves it two ways: `resolve()`
+after a random sequence of edits matches `resolve()` after those same edits are saved,
+reloaded and replayed from the journal, and two independent precomputes of a spring
+channel come out byte-identical.
+
+`npm run verify:mutation` proves all four gates are real by breaking capture and the
+timeline model one way at a time — editing the production source on disk — and
+requiring a test to fail each time.
 
 ## Requirements
 

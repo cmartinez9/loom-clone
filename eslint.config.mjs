@@ -192,16 +192,22 @@ export default tseslint.config(
     },
   },
 
-  // ---- decode and compositor stay framework-free -----------------------------
+  // ---- edl, decode and compositor stay framework-free ------------------------
   // Architecture report §1.3: *"`edl` and `compositor` being framework-free is what
   // lets a headless test render frame 1,234 of a fixture project and compare it
   // byte-for-byte against the exporter's frame 1,234."* `decode` is the same bargain
   // for the other half of §4.5: one decode path, reachable from preview, from export
-  // and from a test, because it can reach nothing itself. They use DOM *types*
-  // (`VideoFrame`, `WebGL2RenderingContext`) and one DOM *value* each — `fetch` and
-  // the GL context they are handed — and nothing beyond that.
+  // and from a test, because it can reach nothing itself. `decode` and `compositor`
+  // use DOM *types* (`VideoFrame`, `WebGL2RenderingContext`) and one DOM *value*
+  // each — `fetch` and the GL context they are handed. `edl` uses neither: it is
+  // arithmetic over an `EditDocument` and reaches a recording only through the two
+  // stream interfaces it declares.
   {
-    files: ['packages/decode/src/**/*.ts', 'packages/compositor/src/**/*.ts'],
+    files: [
+      'packages/decode/src/**/*.ts',
+      'packages/compositor/src/**/*.ts',
+      'packages/edl/src/**/*.ts',
+    ],
     languageOptions: {
       globals: { ...globals.browser },
     },
@@ -213,9 +219,9 @@ export default tseslint.config(
             {
               group: ['node:*', 'electron', '@loom/format/fs', '@loom/ipc'],
               message:
-                'decode and compositor are pure: no node, no electron, no I/O. They ' +
+                'edl, decode and compositor are pure: no node, no electron, no I/O. They ' +
                 'reach the world through the seams they declare — a ByteRangeReader, a ' +
-                'DecoderFactory, a GL context (architecture report §1.3).',
+                'DecoderFactory, a GL context, a CursorEventStream (architecture report §1.3).',
             },
           ],
         },

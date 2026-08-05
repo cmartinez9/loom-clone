@@ -1,6 +1,6 @@
 /**
- * The mutation proof for the capture gates: phase 1's crash gate, phase 3's A/V
- * sync gate and phase 4's camera-unplug gate.
+ * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
+ * phase 4's camera-unplug gate and phase 7's timeline model.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -38,6 +38,13 @@ const AUDIO_MUX = 'packages/mux/test/audio-part.test.ts';
 /** The phase 4 gate: unplug the camera, keep the screen, two parts placed right. */
 const PHASE4 = 'test/phase4-gate.test.ts';
 const RECORDER = 'apps/main/test/recorder-session.test.ts';
+/** Phase 7's two gates, and the tests that carry the model's other properties. */
+const EDL_DETERMINISM = 'packages/edl/test/spring-determinism.test.ts';
+const EDL_SPRING = 'packages/edl/test/spring.test.ts';
+const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
+const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
+const EDL_HISTORY = 'packages/edl/test/history.test.ts';
+const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -194,6 +201,85 @@ const MUTATIONS = [
     find: '      if (chunk.part === state.part) this.appendChunk(active, state, chunk);',
     replace: '      if (chunk.part !== state.part) this.appendChunk(active, state, chunk);',
     mustFail: [PHASE4, RECORDER],
+  },
+
+  // ---- phase 7: the timeline model ---------------------------------------
+  {
+    name: 'spring-integrated-at-frame-rate',
+    breaks:
+      'the fixed 8 ms grid (§3.4). Integrating at 60 fps instead is the one thing ' +
+      'the report says never to do: a 60 fps preview and a 30 fps export then put ' +
+      'the zoom in visibly different places, measured at 82.6 px on a 3456-wide ' +
+      'source, and a single dropped preview frame shifts the framing for the rest ' +
+      'of the shot.',
+    file: 'packages/edl/src/spring.ts',
+    find: 'export const SPRING_GRID_SEC = 0.008;',
+    replace: 'export const SPRING_GRID_SEC = 1 / 60;',
+    mustFail: [EDL_DETERMINISM],
+  },
+  {
+    name: 'spring-integrated-numerically-not-analytically',
+    breaks:
+      "the closed-form solution (§3.4: *'exact at any step size and identical on " +
+      "every machine'*). A forward-Euler step gives an answer that depends on how " +
+      'the interval was divided and accumulates its own error over a thirty-minute ' +
+      'channel, so two builds sampling the same channel differently disagree.',
+    file: 'packages/edl/src/spring.ts',
+    find:
+      '    const x = decay * (x0 * cos + b * sin);\n' +
+      '    const v = decay * (v0 * cos - ((omega0 * omega0 * x0 + zeta * omega0 * v0) / omegaD) * sin);',
+    replace:
+      '    const acceleration = -omega0 * omega0 * x0 - 2 * zeta * omega0 * v0;\n' +
+      '    const v = v0 + acceleration * dt;\n' +
+      '    const x = x0 + v * dt;',
+    mustFail: [EDL_SPRING],
+  },
+  {
+    name: 'clip-speed-ignored-in-the-time-mapping',
+    breaks:
+      'the clip list being the *only* mapping between the two time domains (§3.1). ' +
+      'Dropping `speed` leaves every effect on a sped-up clip pointing at the wrong ' +
+      'content, and preview and export at the wrong source frame.',
+    file: 'packages/edl/src/clips.ts',
+    find: '  return sourceStart + (timelineTime - start) * speed;',
+    replace: '  return sourceStart + (timelineTime - start);',
+    mustFail: [EDL_RESOLVE],
+  },
+  {
+    name: 'ease-read-from-the-incoming-keyframe',
+    breaks:
+      "§3.4's *'the ease on the outgoing keyframe governs the segment'*. Reading " +
+      'the next key instead applies every ease one segment late — a timeline that ' +
+      'still animates, and animates wrongly everywhere.',
+    file: 'packages/edl/src/channel.ts',
+    find: '    const ease = this.#eases[i];',
+    replace: '    const ease = this.#eases[i + 1];',
+    mustFail: [EDL_CHANNEL, EDL_RESOLVE],
+  },
+  {
+    name: 'undo-restores-a-track-on-top-of-the-stack',
+    breaks:
+      'track order surviving an undo. §3.5 resolves tracks in array order, so an ' +
+      'inverse that appends instead of re-inserting silently changes which zoom ' +
+      'wins — the "my other zoom took over after undo" bug, which leaves a valid ' +
+      'document and a wrong picture.',
+    file: 'packages/edl/src/inverse.ts',
+    find: "      return { op: 'track.add', track: structuredClone(track), at: doc.tracks.indexOf(track) };",
+    replace: "      return { op: 'track.add', track: structuredClone(track) };",
+    mustFail: [EDL_HISTORY],
+  },
+  {
+    name: 'undo-of-an-added-key-does-not-remove-it',
+    breaks:
+      'a removal reaching the document at all. `patch.remove` is the one form of ' +
+      '"take this key off" that survives `JSON.stringify`, so it is the whole of ' +
+      'what makes an undo crash-safe: with it ignored, undoing "add a generator ' +
+      'block" leaves the block in place and the editor shows a document its own ' +
+      'file does not describe.',
+    file: 'packages/format/src/journal/apply.ts',
+    find: '      removeTrackKeys(fields, remove, op);',
+    replace: '      removeTrackKeys(fields, undefined, op);',
+    mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
   },
 ];
 

@@ -20,7 +20,7 @@
  *  - The shader converts to GL's bottom-left origin; nothing above it does.
  */
 
-import type { ResolvedZoom } from './resolved-state.ts';
+import type { ResolvedZoom } from '@loom/edl';
 
 export interface Rect {
   x: number;
