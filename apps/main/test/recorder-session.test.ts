@@ -180,8 +180,8 @@ async function until(predicate: () => boolean, what: string): Promise<void> {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-async function untilState(id: RecordingId, state: ProjectState): Promise<void> {
-  for (let attempt = 0; attempt < 400; attempt++) {
+async function untilState(id: RecordingId, state: ProjectState, attempts = 400): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     if ((await store.list()).find((s) => s.id === id)?.state === state) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -933,6 +933,31 @@ describe('a Microphone grant withdrawn mid-recording (§7.3, decision-mic-revoca
     await stopping;
 
     expect((await readRecordingDoc(id)).tracks.mic?.parts[0]?.endReason).toBe('permission-revoked');
+  });
+
+  it('keeps the revoked verdict when the capture page never answers the stop', async () => {
+    // The evidence is perishable and the report is not what carries it: the read that
+    // said "revoked" was taken while the track was stopping, minutes before finalize.
+    // A capture renderer that dies inside its own stop leaves no measurements at all,
+    // and the part is then described from the bytes on disk — which must not turn the
+    // answer main already has into `crash`, the word for a track nobody classified.
+    harness.micAccess = 'denied';
+    const { id, contents } = await recordThenMicEnds();
+    await until(() => stopCommands(contents).length === 1, 'the stop');
+
+    // No `captureEnded` ever arrives, so the stop times out and finalize runs on a
+    // null report.
+    await untilState(id, 'editable', 2_000);
+
+    const doc = await readRecordingDoc(id);
+    expect(validateRecordingDoc(doc).ok).toBe(true);
+    const mic = doc.tracks.mic?.parts[0];
+    expect(mic, 'the .m4a on disk was left referenced by nothing').toBeDefined();
+    expect(mic?.durationSec).toBeGreaterThan(0);
+    expect(mic?.endedEarly).toBe(true);
+    expect(mic?.endReason).toBe('permission-revoked');
+    // And the notice outlived the recording it stopped, which is when the user reads it.
+    expect(lastStatus(contents).revoked?.kind).toBe('microphone');
   });
 
   it('refuses a mic end report from a recording that opened no microphone', async () => {

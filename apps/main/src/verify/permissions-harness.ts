@@ -899,8 +899,32 @@ async function checkMicrophoneRevocation(options: HarnessOptions): Promise<Check
     );
 
     // Enough of a recording to be worth keeping, so "the footage survived" is a
-    // claim about frames rather than about an empty file.
-    await waitFor(() => recorder.status().frameCount > 0, 15_000);
+    // claim about frames rather than about an empty file. A capture that never
+    // produced one — Screen Recording not granted, `getDisplayMedia` refused — is a
+    // run that could not look at anything, so it says so rather than reporting the
+    // revocation it never got to watch as broken.
+    const capturing = await waitFor(() => recorder.status().frameCount > 0, 15_000);
+    if (!capturing) {
+      const stalled = recorder.status();
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'The recording produced no frames, so there was nothing for a revocation to ' +
+          `happen to. Screen Recording is ${readMediaStatus('screen')} and the recorder is ` +
+          `${stalled.phase}${stalled.error === null ? '' : `: ${stalled.error}`}. Grant Screen ` +
+          'Recording and re-run — this check needs a recording that is actually running.',
+        data: {
+          screen: readMediaStatus('screen'),
+          microphone: readMediaStatus('microphone'),
+          phase: stalled.phase,
+          error: stalled.error,
+          frameCountBefore: stalled.frameCount,
+        },
+      };
+    }
     const frameCountBefore = recorder.status().frameCount;
 
     const wasRevoked = await waitFor(() => readMediaStatus('microphone') !== 'granted', windowMs);

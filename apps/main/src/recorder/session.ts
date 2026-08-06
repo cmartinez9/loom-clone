@@ -1438,7 +1438,12 @@ export class RecorderSession {
         `[recorder] ${track} produced media but no measurements; it is described from the ` +
           'bytes that were written, at the nominal rate and starting with the screen',
       );
-      out[track] = fromBytes;
+      // A track classified while it was stopping keeps that answer on this branch
+      // too: it came from a live TCC read at the moment the track ended, and a
+      // missing end report says nothing about why the track went. `writtenAudio`'s
+      // `crash` is for the tracks nobody has an answer for (see {@link Active.audioEnd}).
+      const decided = active.audioEnd.get(track);
+      out[track] = decided === undefined ? fromBytes : { ...fromBytes, endReason: decided };
     }
     return out;
   }

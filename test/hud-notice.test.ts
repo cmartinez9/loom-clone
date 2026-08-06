@@ -134,6 +134,20 @@ async function runProbe(fit: boolean): Promise<HudReport> {
   }
 }
 
+/**
+ * The one `--fit` run, shared by the two gates that read different labels out of it.
+ *
+ * A probe is a full esbuild, a full vite build and an Electron launch through the
+ * whole sequence, and both gates below read the *same* report — the camera labels and
+ * the §7.3 revocation labels come out of one pass. The control is deliberately not
+ * shared: `--no-fit` is a different run of the harness and has to stay independent.
+ */
+let fittedRun: Promise<HudReport> | null = null;
+function fittedProbe(): Promise<HudReport> {
+  fittedRun ??= runProbe(true);
+  return fittedRun;
+}
+
 function describeRun(report: HudReport): string {
   return [
     '',
@@ -161,7 +175,7 @@ describe('the recorder HUD says what §7.4 requires, where a user can read it', 
   it(
     'grows to show the camera notice and shrinks back to 420x92 when it clears',
     async () => {
-      const report = await runProbe(true);
+      const report = await fittedProbe();
       const detail = describeRun(report);
       console.log(detail);
 
@@ -218,7 +232,7 @@ describe('the recorder HUD says what §7.4 requires, where a user can read it', 
   it(
     'shows a revoked Microphone grant as a revoked permission, on screen, after the stop',
     async () => {
-      const report = await runProbe(true);
+      const report = await fittedProbe();
       const detail = describeRun(report);
       console.log(detail);
 
