@@ -79,12 +79,20 @@ import {
   type PartEndReason,
   type PermissionState,
   type RecordingDoc,
+  type RecordingEvents,
   type RecordingId,
   type VideoTrackKey,
 } from '@loom/format';
 import { performance } from 'node:perf_hooks';
 import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
 import { PERMISSIONS, toRecordingState, type PermissionKind } from '@loom/permissions';
+import { describeClickCapability, type InputSampler } from '@loom/sampler';
+import {
+  monotonicUs,
+  readHelperClock,
+  startInputSampler,
+  type HelperClockReading,
+} from '../input-sampler.ts';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
@@ -212,6 +220,16 @@ export interface RecorderSessionOptions {
   stopTimeoutMs?: number;
   /** How often the recorder pushes status to the HUD. */
   statusIntervalMs?: number;
+  /**
+   * Where `loom-input-sampler` lives.
+   *
+   * Passed rather than left to `@loom/sampler`'s default because only `dist/` knows
+   * its own layout, and in a packaged app the binary sits in `app.asar.unpacked/`
+   * (`input-sampler.ts`). `undefined` falls back to that default, which is what a
+   * test with no `dist/` gets — and a helper that is not there costs the event logs
+   * and nothing else.
+   */
+  inputHelperPath?: string | undefined;
 }
 
 /** One audio track's state while it is being recorded. */
@@ -335,6 +353,40 @@ interface Active {
    * disconnected — which is the misreport this whole path exists to remove.
    */
   audioEnd: Map<AudioTrackKey, PartEndReason>;
+  /**
+   * A reading of the input helper's clock, taken while the capture page was still
+   * opening its stream.
+   *
+   * Started in {@link RecorderSession.start} rather than when it is needed, because
+   * it costs a process and the moment it is needed — the recording clock's origin —
+   * is the one moment nothing may be waited on. Resolves to `null` when the helper
+   * could not be run, which costs the event logs and nothing else.
+   */
+  inputClock: Promise<HelperClockReading | null>;
+  /**
+   * The cursor and click sampler, once the recording clock's origin was known.
+   *
+   * `null` before {@link Active.sampling} resolves, and after the sampler has been
+   * stopped — the field is the *live* sampler, not the record of one.
+   */
+  sampler: InputSampler | null;
+  /**
+   * The in-flight start, so a stop cannot race one.
+   *
+   * Never rejects: a sampler that will not start is reported and the recording
+   * carries on (§7.3's rule for the microphone, applied to a log that needs no
+   * permission at all). `null` until the origin lands, which is also what says a
+   * stop has nothing to wait for.
+   */
+  sampling: Promise<void> | null;
+  /**
+   * What the sampler wrote, read once, at the moment it stopped.
+   *
+   * Kept rather than re-derived because the sampler is dropped as soon as it stops
+   * and `recording.json` is written after that — and because `available` is a claim
+   * about the whole session that only the sampler that ran it can make.
+   */
+  events: RecordingEvents | null;
   /** The first write that failed. A recording that cannot be written is over. */
   writeError: Error | null;
   /** What the camera is doing, for the §7.4 banner. */
@@ -370,7 +422,12 @@ export class RecorderSession {
   private metaChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: RecorderSessionOptions) {
-    this.options = { stopTimeoutMs: 5_000, statusIntervalMs: 250, ...options };
+    this.options = {
+      stopTimeoutMs: 5_000,
+      statusIntervalMs: 250,
+      inputHelperPath: undefined,
+      ...options,
+    };
   }
 
   // ------------------------------------------------------------------- wiring
@@ -590,6 +647,17 @@ export class RecorderSession {
         originUs: null,
         audio: new Map(),
         audioEnd: new Map(),
+        // Kicked off here and awaited at the origin, so the helper's start-up cost
+        // is paid while `getDisplayMedia` is opening its stream rather than in the
+        // frame handler. Never rejects — `probeInput` reports a helper it could not
+        // run instead of throwing, and the `catch` covers everything else.
+        inputClock: readHelperClock(this.options.inputHelperPath).catch((error: unknown) => {
+          console.error('[recorder] the input helper clock could not be read:', error);
+          return null;
+        }),
+        sampler: null,
+        sampling: null,
+        events: null,
         writeError: null,
         // A camera that was asked for is *starting*, not missing: `getUserMedia`
         // and the first frame take a moment, and calling that `unavailable` would
@@ -664,6 +732,14 @@ export class RecorderSession {
       return;
     }
 
+    // Before anything else touches the bundle, and unconditionally: the sampler
+    // writes from its own timers, and `ProjectStore`'s event-log calls refuse a
+    // project that has been closed rather than reopening it. Stopping here rather
+    // than in the `finally` beside `store.close` is the same "stop the producer,
+    // then close the project" ordering the store's event-log section states from
+    // the other side — and it also means the counts written below are final.
+    await this.stopSampling(active);
+
     const { store } = this.options;
     // Closed *before* the bundle is, and outside the try, because closing the
     // drawing log is a write into a project that has to still be open —
@@ -702,7 +778,7 @@ export class RecorderSession {
 
       const finalized = finalizedRecordingDoc(
         provisional,
-        { video, audio },
+        { video, audio, ...(active.events === null ? {} : { events: active.events }) },
         new Date().toISOString(),
       );
       await store.writeRecordingDoc(
@@ -743,6 +819,165 @@ export class RecorderSession {
       console.error('[recorder] shutdown failed:', error);
     } finally {
       this.uninstall();
+    }
+  }
+
+  // ------------------------------------------------------------------ sampling
+
+  /**
+   * Start sampling the pointer into this recording's `events/` logs.
+   *
+   * Called exactly once per recording, from the reference track's first frame —
+   * because that frame *is* the recording clock's origin (§5.4 mechanism 2), and
+   * §2.5 requires the log's `t` to share it. Starting at `start()` instead would put
+   * `t = 0` wherever `getDisplayMedia` happened to be in opening its stream, which
+   * is hundreds of milliseconds before the first frame and a constant lead on every
+   * generated camera move.
+   *
+   * **Deliberately not awaited, and it cannot throw.** This is the frame handler:
+   * spawning the helper is two awaits and blocking here would build the queue a
+   * `SIGKILL` is charged for. The promise is kept so a stop has something to wait on
+   * — see {@link RecorderSession.stopSampling} — and nothing on it reaches the
+   * recording. Cursor position needs no permission and clicks are additive to the
+   * video, so a sampler that will not start costs the logs and nothing else.
+   */
+  private beginSampling(active: Active, originAtUs: number): void {
+    if (active.sampling !== null) return;
+    active.sampling = this.startSampling(active, originAtUs).catch((error: unknown) => {
+      console.error('[recorder] the input sampler could not be started:', error);
+    });
+  }
+
+  /**
+   * Put the origin on the helper's clock, then start.
+   *
+   * `t0Us` is on `CLOCK_UPTIME_RAW`, which nothing in Node can read (see
+   * {@link HelperClockReading}). What this process *can* do is measure a duration:
+   * `originAtUs` and the reading's `atUs` are both on one monotonic clock, and the
+   * two clocks tick at the same rate, so the elapsed time between them carries over
+   * unchanged. The origin on the helper's clock is therefore the reading plus that
+   * elapsed time — with the reading taken *before* the origin, so the term is
+   * positive and no extrapolation is involved.
+   *
+   * **What the residual is, and which way it points.** `originAtUs` is when the
+   * first frame *arrived in this process*, not when the screen produced it; the
+   * encode and the IPC hop in between are unmeasured here, and they make the origin
+   * slightly late, which labels every cursor sample slightly early. Half the probe's
+   * own duration adds to that, unsigned. Both are tens of milliseconds against a
+   * §6.5 pre-roll of 600 ms. Closing the gap properly means relating the capture
+   * renderer's `performance.now()` to this clock, which is new IPC and new §5.4
+   * arithmetic; it is recorded in AGENTS.md as an open item rather than guessed at.
+   */
+  private async startSampling(active: Active, originAtUs: number): Promise<void> {
+    const clock = await active.inputClock;
+    if (clock === null) {
+      console.error(
+        '[recorder] the input helper did not report its clock, so this recording has no ' +
+          'cursor log; the recording itself is unaffected',
+      );
+      return;
+    }
+
+    const sampler = await startInputSampler({
+      store: this.options.store,
+      id: active.id,
+      t0Us: Math.round(clock.tUs + (originAtUs - clock.atUs)),
+      // Electron's `Display.id` is the `CGDirectDisplayID` on macOS, and it is the
+      // display `recording.json` says was recorded — so the positions in the log are
+      // normalized against the same rectangle §2.5's reader will assume.
+      ...(active.provisional === null ? {} : { displayId: active.provisional.display.id }),
+      // Always asked for, never conditioned on `AXIsProcessTrusted()`. `false` means
+      // "this caller opted out" and reads back as `not-requested`; the app never
+      // opts out — it asked the user for Accessibility on the promise of this log.
+      // A denied grant must therefore reach `recording.json` as the tap's own
+      // `accessibility-denied`, which is a different thing to tell somebody, and
+      // which only the helper is in a position to say.
+      clicks: true,
+      ...(this.options.inputHelperPath === undefined
+        ? {}
+        : { helperPath: this.options.inputHelperPath }),
+    });
+    active.sampler = sampler;
+
+    // Declared in `recording.json` now rather than only at finalize, so a recording
+    // that is `SIGKILL`ed has something pointing at the logs it already wrote — the
+    // same reason a part is declared before its first byte. The counts are zero here
+    // for the same reason a provisional part's `frameCount` is: nothing has been
+    // measured yet, and a clean stop replaces them.
+    //
+    // On `metaChain` because it is a read-modify-write of the one document the track
+    // announcements are also rewriting, and those are three encoders deep by now.
+    this.metaChain = this.metaChain.then(
+      () => this.declareEvents(active, sampler.recordingEvents()),
+      () => undefined,
+    );
+
+    // The uncertainty is printed rather than assumed small. It is half the width of
+    // the interval the helper's clock was read in, and it is the one term in the
+    // origin that this process can actually see — so a machine where the probe takes
+    // a second says so here rather than producing a quietly misplaced log.
+    console.log(
+      `[recorder] sampling the pointer, origin known to ±${clock.uncertaintyUs.toFixed(0)} µs; ` +
+        describeClickCapability(sampler.capability),
+    );
+  }
+
+  /** Write the sampler's `events` fragment into the provisional document. */
+  private async declareEvents(active: Active, events: RecordingEvents): Promise<void> {
+    if (this.active !== active || active.provisional === null) return;
+    const provisional = { ...active.provisional, events };
+    try {
+      await this.options.store.writeRecordingDoc(active.id, provisional);
+      active.provisional = provisional;
+    } catch (error) {
+      // The logs are being written either way; what is lost is a crashed bundle
+      // naming them. Not worth failing a recording for.
+      console.error('[recorder] declaring the event logs in recording.json failed:', error);
+    }
+  }
+
+  /**
+   * Stop sampling and take the account of what was written.
+   *
+   * Awaits the start first. That wait is bounded by `@loom/sampler`'s own
+   * `startTimeoutMs`, and in practice it has long since resolved — the origin is the
+   * first frame and a stop is at least a recording later. What it rules out is the
+   * one ordering that matters: a sampler that finishes starting *after* the bundle
+   * has been closed, whose every later write is then a typed refusal.
+   *
+   * `available` is read from the sampler rather than inferred from the log: a tap
+   * that was never live and a session in which nobody clicked produce the same empty
+   * file, and `recording.json` must not conflate them (§7.3).
+   */
+  private async stopSampling(active: Active): Promise<void> {
+    const sampling = active.sampling;
+    if (sampling === null) return;
+    active.sampling = null;
+    try {
+      await sampling;
+      const sampler = active.sampler;
+      if (sampler === null) return;
+      active.sampler = null;
+      try {
+        await sampler.stop();
+      } finally {
+        // Whatever it managed to write is still worth describing, so this is taken
+        // even when the stop reported an abandoned helper.
+        active.events = sampler.recordingEvents();
+      }
+      const health = sampler.health;
+      // `clicks` is `null` rather than `0` when the tap was never live, and it is
+      // reported that way here too: "0 clicks" and "clicks unavailable" are the two
+      // things this whole path exists to keep apart.
+      const clicks =
+        health.clicks === null ? 'clicks unavailable' : `${String(health.clicks)} clicks`;
+      const dropped = health.dropped > 0 ? `, ${String(health.dropped)} lines dropped` : '';
+      console.log(
+        `[recorder] input sampler stopped: ${String(health.samples)} cursor samples, ` +
+          `${clicks}${dropped}`,
+      );
+    } catch (error) {
+      console.error('[recorder] stopping the input sampler failed:', error);
     }
   }
 
@@ -1674,8 +1909,22 @@ export class RecorderSession {
     state.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
     state.lastArrivalMs = monotonicMs();
     // The recording clock's origin is the reference track's first frame, and this
-    // is where it is learned (§5.4 mechanism 2).
-    if (state.track === REFERENCE_TRACK) active.originUs ??= chunk.timestampUs;
+    // is where it is learned (§5.4 mechanism 2). It is also the instant the cursor
+    // log has to be measured from, so it is where sampling begins — see
+    // {@link RecorderSession.beginSampling}. The monotonic reading is taken here,
+    // synchronously, because everything after this line is a queue.
+    if (state.track === REFERENCE_TRACK && active.originUs === null) {
+      active.originUs = chunk.timestampUs;
+      // Guarded, not merely careful. Everything below this line is the capture
+      // spine, and sampling is an accessory to it: the recording is what the user
+      // pressed record for, and no defect in the pointer log — not even a
+      // synchronous throw before the first `await` — may reach it.
+      try {
+        this.beginSampling(active, monotonicUs());
+      } catch (error) {
+        console.error('[recorder] the input sampler could not be started:', error);
+      }
+    }
 
     void this.options.store
       .appendMediaChunk(active.id, state.track, {

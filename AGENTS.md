@@ -98,9 +98,11 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    PermissionManager, OverlayController, loom:// protocol, IPC.
-                   `verify/marker.ts` is the paint-capture-count instrument phases 2
-                   and 12 both prove content protection with — one instrument, so
-                   there is one opinion about what counts as evidence.
+                   `input-sampler.ts` is the sampler's only seam onto the world — the
+                   `EventLogSink` backed by `ProjectStore`, and the clock reading
+                   `t0Us` is derived from. `verify/marker.ts` is the paint-capture-count
+                   instrument phases 2 and 12 both prove content protection with — one
+                   instrument, so there is one opinion about what counts as evidence.
 apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
                    capture page (screen in `capture/main.ts`, camera in
                    `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
@@ -236,6 +238,38 @@ timestamp and epoch offset and they are all placed in one pass at finalize, thro
 already used). The camera is opt-in: `webcamDeviceId` defaults to `null`, because
 opening one lights the hardware indicator and that should follow from a user asking.
 
+## The event logs, in one paragraph
+
+Every recording samples the pointer. `RecorderSession` starts an `InputSampler`
+(§2.5, 120 Hz) at the **reference track's first frame** and stops it **before**
+`store.close`, and `apps/main/test/recorder-events.test.ts` drives both through the
+recorder itself. Two details are the whole of it. **It starts at the first frame, not
+at `start()`**, because that frame _is_ the recording clock's origin (§5.4 mechanism 2) and §2.5 requires the log's `t` to share it — starting earlier would put `t = 0`
+wherever `getDisplayMedia` happened to be in opening its stream, a constant few-tenths
+lead on every generated camera move. **And it always asks for clicks**, never
+conditioning the request on `AXIsProcessTrusted()`: `clicks: false` means "this caller
+opted out" and reads back as `not-requested`, which is a lie about a grant the user
+declined — the app asked for Accessibility on the promise of this log, so a denial must
+reach `recording.json` as the tap's own `accessibility-denied`. Cursor position needs
+no permission and is written either way; `clicks.ndjson` exists only once the tap is
+live, and `available` is read from the sampler rather than inferred from the file,
+because a dead tap and a quiet session produce the same empty log. Nothing in the
+sampling path may reach the capture spine: the call is inside a `try`, the start is
+never awaited, and every failure is a `console.error` and a recording that carries on.
+
+**The origin is measured, and the residual is known.** `t0Us` is on the helper's
+`CLOCK_UPTIME_RAW`, which nothing in Node can read — `process.hrtime` is
+`mach_continuous_time`, the same _rate_ but a different epoch. So `readHelperClock`
+takes one paired reading (a `probe`, fired at `start()` so its cost lands while the
+stream is opening) and the origin is that reading plus the elapsed time to the first
+frame, both measured on `process.hrtime`. Measured on a real synthetic-source run:
+first sample at **t = 0.024 s**, log covering 3.87 s of a 4.05 s recording. What is
+_not_ measured is the encode and IPC between the screen producing that frame and main
+receiving it, which makes the origin slightly late and every sample slightly early —
+tens of milliseconds against §6.5's 600 ms pre-roll. **Closing that gap is an open
+item**, in the carried-forward list below; it needs the capture renderer's
+`performance.now()` related to main's clock, which is new IPC and new §5.4 arithmetic.
+
 ## The timeline model, in one paragraph
 
 Report §3, and `packages/edl` is all of it. Two time domains — **source** (seconds
@@ -292,6 +326,14 @@ The corpus was recorded with Accessibility granted, so its `clicks.ndjson` are r
 `manifest.json`'s `clickCapture` and **fails loudly** if a future corpus is recorded
 without the grant, rather than quietly becoming "auto-zoom declines politely ten
 times".
+
+**What that gate does not prove, and what does.** It proves the generators work over
+real sampler output. It says nothing about the _product_ producing that output — and
+for ten phases the product did not: `record-cursor-corpus.mjs` did the wiring
+`RecorderSession` lacked, so the corpus could only ever have been made by the script
+that makes it. `apps/main/test/recorder-events.test.ts` is the other half and is
+deliberately built the opposite way round: every bundle in it comes out of
+`RecorderSession`, and nothing in it constructs an `InputSampler` or writes a file.
 
 **The comfort ladder is a settled divergence, not an open one.**
 `data/loom-scope/decision-comfort-ladder.md` records the captain's decision and the
@@ -637,6 +679,10 @@ was not a control.
   than a silent re-open that re-takes the bundle `.lock` and holds a closed recording
   for the rest of the session. `applyOps` is the deliberate exception and still opens
   a closed project: it is a renderer-driven user action, not a background timer.
+  `RecorderSession.finalize` is where the order is kept — `stopSampling` before
+  anything else touches the bundle, not in the `finally` beside `store.close` — and
+  `sampler-stopped-after-the-bundle-is-closed` in `npm run verify:mutation` is what
+  keeps it kept.
 - **A spawned helper is not asar-aware.** Electron patches `fs` to read through
   `app.asar`; `child_process.spawn` hands the literal path to `uv_spawn`, which does
   not. Anything executable resolved under `dist/` goes through
@@ -907,7 +953,7 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward: four closed, four still open, one from phase 2 still open
+## Carried forward: four closed, four still open, one from phase 2 and one from the event logs
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
@@ -958,7 +1004,8 @@ M4A → finalize path end to end, on Chromium's real capture clocks. Without
 `--synthetic` the script refuses to start when the grant is missing and names what to
 grant, rather than failing three layers down in `desktopCapturer` with "Failed to get
 sources". Run it after any change to capture: it is the only thing that watches the
-two clocks, and it is what caught both of phase 3's real bugs.
+two clocks — three, now that it reports the cursor log's sample count and whether the
+click tap was live — and it is what caught both of phase 3's real bugs.
 
 **And one phase 2 opened, now closed in code and open on hardware:**
 
@@ -1029,6 +1076,24 @@ What none of them can establish is on hardware — see carried-forward item 8.
    with `measured: true`, and the phase-10 gate reads that field and fails loudly if a
    future corpus is recorded without the grant. The reading, what the instrument refuses
    to report and why, are in § Post-grant click rate and latency — measured, below.
+
+**And one the event-log wiring opened:**
+
+10. **The cursor log's origin carries the first frame's encode and IPC latency.**
+    `RecorderSession` names the recording clock's origin on the helper's clock from a
+    paired `process.hrtime`/`CLOCK_UPTIME_RAW` reading and the elapsed time to the
+    first screen chunk — but "the first screen chunk" is measured when it _arrives in
+    main_, and the frame was captured a little earlier. The origin is therefore
+    slightly late and every cursor sample slightly early, by whatever encode plus IPC
+    cost that one frame. Measured indirectly at 24 ms of total lead-in on a synthetic
+    run; not measured directly, because doing so needs the capture renderer's
+    `performance.now()` related to main's clock — the same `TrackEpochEstimator`
+    problem one process out, and new IPC plus new §5.4 arithmetic rather than a
+    constant. Tens of milliseconds against §6.5's 600 ms pre-roll, so it is recorded
+    rather than guessed at. **A crash-recovered bundle is the other half:** the logs
+    are declared in `recording.json` when sampling starts, so they are discoverable,
+    but their counts stay at the zero a provisional document carries — `recoverBundle`
+    rebuilds tracks from the frame indices and does not read `events/`.
 
 ## Post-grant click rate and latency — measured, and the last open item closed
 

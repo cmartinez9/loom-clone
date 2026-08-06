@@ -96,6 +96,11 @@ const recorder = new RecorderSession({
   // what `recording.json` should carry; `os.release()` is the Darwin kernel
   // version, which nobody can act on.
   osVersion: process.getSystemVersion(),
+  // The cursor and click sampler every recording runs. Same reason the permission
+  // probe is handed a path rather than left to the package default: only `dist/`
+  // knows its own layout, and inside a packaged app the binary lives in
+  // `app.asar.unpacked/` (`input-sampler.ts`).
+  inputHelperPath: helperPathFor(distRoot),
 });
 
 /**

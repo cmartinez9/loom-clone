@@ -8,17 +8,17 @@
  * same atomic writes as `edit.json`. Report §0, rule 2: main is the only writer, and
  * within main there is one.
  *
- * Nothing here starts a sampler on its own, and nothing yet does: phase 2's
- * permission flow only *probes* the tap (`probeInput`, from `permissions.ts`), and no
- * recording samples into a log. The phase that wires it in calls
- * {@link startInputSampler} with the recording's id and the clock origin from
- * `recording.json`.
+ * `RecorderSession` is the caller. It starts a sampler for every recording, at the
+ * instant the recording clock's origin becomes known, and stops it before the bundle
+ * is closed — see `recorder/session.ts`'s sampling section for the ordering and for
+ * what the origin costs to measure.
  */
 
 import { join } from 'node:path';
 import {
   HELPER_BASENAME,
   InputSampler,
+  probeInput,
   unpackedHelperPath,
   type ClickCapability,
   type EventLogSink,
@@ -62,6 +62,66 @@ export class ProjectStoreEventSink implements EventLogSink {
   writeCursorIndex(doc: CursorIndexDoc): Promise<void> {
     return this.store.writeCursorIndex(this.id, doc);
   }
+}
+
+/**
+ * One reading of the helper's clock, paired with this process's own.
+ *
+ * The sampler's `t0Us` is on the helper's `CLOCK_UPTIME_RAW`, which nothing in Node
+ * can read: `process.hrtime` is `mach_continuous_time`, the same *rate* but a
+ * different epoch — the two differ by however long the machine has been asleep since
+ * boot. So they are related the only way they can be, by reading one at a known
+ * instant on the other.
+ *
+ * {@link atUs} is the **midpoint** of the interval the reading was taken in, so the
+ * error is at most half the probe's own duration rather than all of it, and it is
+ * centred rather than one-sided. {@link uncertaintyUs} is that half-width, reported
+ * rather than assumed small — a probe that took a second is a reading nothing should
+ * be placed against.
+ */
+export interface HelperClockReading {
+  /** The helper's `CLOCK_UPTIME_RAW` microsecond. */
+  tUs: number;
+  /** When that instant was, on this process's monotonic clock, in microseconds. */
+  atUs: number;
+  /** Half the width of the interval `tUs` was read in. */
+  uncertaintyUs: number;
+}
+
+/**
+ * This process's monotonic clock, in microseconds — the clock
+ * {@link HelperClockReading.atUs} is on.
+ *
+ * `process.hrtime`, not `performance.now()`. Two reasons, and the second is the one
+ * that bit: it is `mach_continuous_time` on macOS, the same *rate* as the helper's
+ * `CLOCK_UPTIME_RAW`, which is the whole assumption a reading is carried across on —
+ * and it is a `process` API, so it exists in every main-process context. `performance`
+ * is a global, and a global can be absent: `test/phase4-gate.test.ts` installs a fake
+ * capture platform over `globalThis` and the recorder ran without one.
+ */
+export function monotonicUs(): number {
+  return Number(process.hrtime.bigint()) / 1000;
+}
+
+/**
+ * Read the helper's clock, so an instant this process observed can be named on it.
+ *
+ * Costs one run of the native helper (`probe`, which changes nothing and prompts for
+ * nothing). `null` when the helper could not be run or did not report a timestamp —
+ * and a `null` here means the recording gets no cursor log, deliberately: placing a
+ * log against a fabricated origin is worse than not writing one, because the
+ * generators would consume it and frame the shot against the wrong second.
+ */
+export async function readHelperClock(helperPath?: string): Promise<HelperClockReading | null> {
+  const before = monotonicUs();
+  const probe = await probeInput(helperPath === undefined ? {} : { helperPath });
+  const after = monotonicUs();
+  if (probe.tUs === null) return null;
+  return {
+    tUs: probe.tUs,
+    atUs: (before + after) / 2,
+    uncertaintyUs: (after - before) / 2,
+  };
 }
 
 export interface StartInputSamplerOptions {

@@ -73,6 +73,21 @@ export interface InputProbe {
   os: string;
   clicks: ClickTapState;
   display: HelperDisplayInfo | null;
+  /**
+   * The helper's own `CLOCK_UPTIME_RAW` microsecond, as it answered — the clock
+   * every `tUs` on the wire is measured on, and therefore the clock an
+   * `InputSampler`'s `t0Us` has to be expressed in.
+   *
+   * `null`, never `0`, when the helper did not answer: a recording that placed its
+   * cursor log at absolute uptime zero would carry timestamps a month into the
+   * future, and `MAX_SOURCE_TIME_SEC` in `@loom/edl` would silently drop every
+   * sample. A caller with no reading must decline to sample rather than guess one.
+   *
+   * A reading is only meaningful with the instant it was taken at on the caller's
+   * own clock; `readHelperClock` in `apps/main/src/input-sampler.ts` is the pairing
+   * this exists for.
+   */
+  tUs: number | null;
   /** Populated when the helper failed; empty otherwise. */
   problem: string;
 }
@@ -101,6 +116,7 @@ function unavailable(
       tapEnabled: false,
     },
     display: null,
+    tUs: null,
     problem,
   };
 }
@@ -153,6 +169,7 @@ export async function probeInput(options: ProbeOptions = {}): Promise<InputProbe
     os: parsed.os,
     clicks: parsed.clicks,
     display: parsed.display,
+    tUs: parsed.tUs,
     problem: '',
   };
 }
