@@ -1129,6 +1129,20 @@ was not a control.
   the withheld branch end to end, widen the control's own target for one run
   (`new EnvironmentControl(FRAME_BUDGET_MS * 1.5, CONTROL_PERIOD_MS)` in `harness.ts`) and
   revert it — the same shape as overriding `gpuCost` for the deferred branch below.
+  **That has been run, on `e7f06a3`**, and the head is named because it is what makes this
+  falsifiable later: a reader on a diverged head can see the observation may no longer
+  apply, where an undated "it works" cannot go stale visibly. Observed — the banner
+  printed; both phases reported `NOT JUDGED`, scrub over 20 spins and play over 125, each
+  naming the control's own overrun; and vitest reported `1 skipped` with the reason
+  `§8's frame budget was NOT JUDGED and this is not a pass…`, not a pass. Every non-timing
+  assertion ran and held first, which is what the `skip()` being last is for.
+  **What it establishes and what it does not**, because the difference is the whole value
+  of the record: it exercises the _reporting_ path — `withheldJudgement`, the banner and
+  the `skip()` — against a control that genuinely exceeded the budget, so
+  `instrumentOutOfCalibration` fired for its real reason. It does **not** reproduce a
+  stalled host: the spin was long because it was asked for more work, not because the
+  scheduler took the thread away. Everything downstream of `control.maxMs` is identical on
+  both, and nothing upstream of it is exercised here.
   **Two facts no file owns.** The deferred branch **cannot be exercised end to end on
   Apple Silicon**: `--disable-accelerated-video-decode` flips the decode probe, but
   ANGLE-Metal binds decoded frames as IOSurfaces whatever the decode preference, and four
