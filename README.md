@@ -11,8 +11,10 @@ recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
 WebGL2 compositor, phase 7's timeline model, phase 8's exporter, phase 9's
 delete-after-export retention, phase 10's cursor-follow and auto-zoom generators,
 phase 11's annotations and phase 12's live drawing overlay, built early and out of
-order because they are self-contained — and the editor window that finally puts the
-decode path, the compositor and the timeline model in front of a person.
+order because they are self-contained — the editor window that finally puts the
+decode path, the compositor and the timeline model in front of a person, and the two
+safety surfaces taken early out of phase 13's polish: the disk monitor, and telling
+you when a recording was recovered.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -188,13 +190,37 @@ frame and stopped. The trim itself is read back twice by a store that has never 
 that recording — once while the editor still holds it, once after the window closed —
 which is the round trip a person makes by quitting and coming back.
 
-`npm run verify:mutation` proves those gates are real by breaking capture, the
-timeline model, the generators, the annotation path, the drawing overlay, the event logs
-and the editor one way at a time — editing the production source on disk rather than a
-copy of it — and requiring a test to fail each time. `scripts/mutation-check.mjs`'s
-registry is what it breaks and where that list lives. The one property it deliberately
-leaves uncovered, because no test in `npm test` can catch it, is named in `AGENTS.md`
-rather than papered over.
+Two pieces of phase 13 are here ahead of the rest of its polish, because they are
+functional gaps rather than cosmetics. The first: **the recording stops itself before
+the disk fills.** The library says how long you can still record; a recording will not
+start below 3 GB free, and says so where it already says a permission is missing;
+below 5 GB the HUD warns you and keeps recording; and below 1 GB the app ends the
+recording the ordinary way — flushed, finalized, in your library and playable — rather
+than letting a write fail part-way through a frame. The estimate is measured from your
+own recordings when there are any to measure, and says which of the two it is, because
+an idle screen and full-screen animation are 35× apart in what a minute costs. The
+monitor is an accessory and never a dependency: a volume it cannot read refuses
+nothing, stops nothing and slows nothing. `npm test` proves it by driving a real
+recording's volume down past both floors and requiring the file that comes back to
+remux under AVFoundation with every frame that went in — with eight controls, among
+them a volume that never drops and a reader that fails every poll, both of which must
+leave the recording running.
+
+The second: **a recording recovered after a crash now says so.** The rule is never to
+discard silently and never to pretend a repaired recording was clean — and the repair
+has run at every launch since phase 1 while reporting only to a console you do not
+have, which broke the second half of that by omission. The library now carries what the
+pass found — how much was kept, how many frames, and how many bytes of an unfinished
+fragment were discarded — every figure measured by the repair itself rather than quoted
+from a constant, and no claim about a loss window at all. A recording that could not be
+repaired says that instead, and is still in the library rather than quietly gone.
+
+`npm run verify:mutation` proves those gates are real by breaking the production source
+on disk — one property at a time, in the real file rather than a copy of it — and
+requiring a test to fail each time. `scripts/mutation-check.mjs`'s registry is what it
+breaks and where that list lives. The one property it deliberately leaves uncovered,
+because no test in `npm test` can catch it, is named in `AGENTS.md` rather than papered
+over.
 
 ## Requirements
 
