@@ -1071,6 +1071,22 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
 - **An empty `activeRanges` means never active, and "always" is `[[0, 1e9]]`** — the
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
+- **A lost GL context is silent, and an export must refuse rather than encode through
+  it.** Every GL call becomes a no-op and the canvas keeps its last contents, so the
+  preview holding a stale picture for a tick (§4.3) becomes, in an export, black or
+  stale frames handed to `new VideoFrame(canvas)` and written into a file that then
+  passes all five of §7.5's checks and is recorded verified-good. That is the one
+  failure the captain's retention decision cannot survive: phase 9 deletes the user's
+  **only** copy of the raw sources on the strength of that record.
+  `Compositor.readPixels` already refuses for the same reason; the export path never
+  calls it, so `ExportRenderLoop` consults `ExportCompositor.contextLost` before and
+  after **every** composite and fails with `ExportContextLostError`. The check is
+  **sticky** — a context never recovers, and a loss landing between two reads must not
+  slip through a later one that happens to read healthy. Pinned by
+  `export-encodes-through-a-lost-context` and by a control proving the fake really
+  models the silent no-op. Note the golden gate's relaunch predicate does **not** cover
+  this: that protects the _gate's measurement_ from a runner whose GPU process dies,
+  and a real user has no second attempt and no comparator.
 - **The export encoder runs `latencyMode: 'realtime'`, and that is not a leftover.**
   Quality mode lets VideoToolbox reorder frames; a reordered stream needs a `ctts`
   table, `FastStartWriter` writes none, and the failure mode is a file that presents

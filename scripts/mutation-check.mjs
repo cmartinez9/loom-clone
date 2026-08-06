@@ -355,6 +355,22 @@ const MUTATIONS = [
   },
   // ---------------------------------------------------------------- phase 8
   {
+    name: 'export-encodes-through-a-lost-context',
+    breaks:
+      'the export refuses when the GL context dies. A lost context is SILENT — every ' +
+      'call is a no-op and the canvas keeps its last contents — so without this the ' +
+      'loop keeps compositing, `new VideoFrame(canvas)` keeps handing the encoder ' +
+      'stale pixels, and the export finishes on a file of black frames that passes ' +
+      'every one of §7.5\u2019s five checks and is recorded verified-good. Phase 9 then ' +
+      'deletes the user\u2019s only copy of the raw sources on the strength of it. The ' +
+      'gate\u2019s relaunch predicate does not cover this: it protects the gate\u2019s ' +
+      'measurement, and a real user has no second attempt.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    if (this.#contextLostAt === null && !this.#compositor.contextLost) return;',
+    replace: '    if (true as boolean) return;',
+    mustFail: [EXPORT_LOOP],
+  },
+  {
     name: 'export-composites-a-stale-frame',
     breaks:
       'the exporter checks that the frame it was handed is the one the index puts ' +
