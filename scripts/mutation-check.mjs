@@ -52,7 +52,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -188,7 +188,7 @@ const PREVIEW_LOOP = 'apps/renderer/test/preview-loop.test.ts';
  * Each mutation is a one-line edit that breaks exactly one of the properties the
  * gate rests on, plus the tests that must notice.
  */
-const MUTATIONS = [
+export const MUTATIONS = [
   {
     name: 'fragments-buffered-until-stop',
     breaks:
@@ -1503,213 +1503,229 @@ const MUTATIONS = [
   },
 ];
 
-const only = process.argv.includes('--only')
-  ? process.argv[process.argv.indexOf('--only') + 1]
-  : null;
-const selected = only === null ? MUTATIONS : MUTATIONS.filter((m) => m.name === only);
-if (selected.length === 0) {
-  console.error(`no mutation named ${only}; known: ${MUTATIONS.map((m) => m.name).join(', ')}`);
-  process.exit(2);
-}
-
-/** Original bytes of every file we touch, so an interrupt cannot leave one broken. */
-const originals = new Map();
-
-function restoreAll() {
-  for (const [path, text] of originals) writeFileSync(path, text);
-  originals.clear();
-}
-
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    restoreAll();
-    process.exit(130);
-  });
-}
-
-/** Where vitest's machine-readable report lands, one run at a time. */
-const reportDir = mkdtempSync(join(tmpdir(), 'loom-mutation-'));
-const reportPath = join(reportDir, 'vitest.json');
-
 /**
- * Run one gate over the broken source and say which of **three** things happened.
+ * Everything below this line **runs the suite**, and everything above it is data.
  *
- * An exit code answers two of them and the third has to be read out of the run: a gate
- * that reports *skipped* exits 0, exactly as a gate that ran and noticed nothing does.
- * That is not a distinction this script could ignore once a gate had a withheld verdict
- * in it — `test/phase8-gate.test.ts` reports `skipped` when every launch lost its WebGL
- * context (see `test/export-golden/verdict.ts`), and CI run 31099311259 is what happens
- * without it: the runner's GPU process died on both launches, the gate correctly said it
- * had no verdict, and this script read that silence as `SURVIVED` and reported a hole in
- * a gate that had not been given the chance to measure anything.
- *
- *  - `caught`     — the gate failed. Whatever else the run says, a failure is a failure,
- *                   and a vitest that could not start at all belongs here too.
- *  - `survived`   — the gate ran, judged, and did not notice. A real hole.
- *  - `no-verdict` — **every** test in the file withheld. Nothing judged the mutation, so
- *                   nothing here says the gate measures it and nothing says it does not.
- *
- * Read off `assertionResults`, per test, rather than off vitest's file status — a file
- * whose only test skipped still reports `passed` — and never off the summary text, which
- * is a reporter's prose. If the report is unreadable the run falls back to the exit code,
- * which is the behaviour this had before.
- *
- * The report is **deleted before every run**, so an unreadable one means this run wrote
- * nothing rather than that the previous run's answer is still lying there. One path is
- * shared by all ~96 mutations and `--outputFile.json` is written at exit, so a vitest that
- * exits 0 without reaching it would otherwise be graded off its predecessor's statuses:
- * an all-skipped predecessor would turn a genuine `survived` — a real hole, and the one
- * thing this script exists to report — into a `no-verdict` that does not fail the build.
- * The `catch` below cannot see that, because a stale file parses.
+ * The split is what lets `test/mutation-registry.test.ts` import {@link MUTATIONS}
+ * and check the registry against the tree on every `npm test`, in milliseconds,
+ * without spawning a single `vitest`. Importing this module must therefore stay
+ * free of side effects — which is what this guard is for.
  */
-function runTests(files) {
-  rmSync(reportPath, { force: true });
-  const result = spawnSync(
-    'npx',
-    [
-      'vitest',
-      'run',
-      ...files,
-      '--reporter=default',
-      '--reporter=json',
-      `--outputFile.json=${reportPath}`,
-    ],
-    { cwd: root, encoding: 'utf8', env: { ...process.env, CI: '1' } },
-  );
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  if (result.status !== 0) return { verdict: 'caught', output };
-  let tests = [];
-  try {
-    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
-    tests = (report.testResults ?? []).flatMap((file) => file.assertionResults ?? []);
-  } catch {
-    return { verdict: 'survived', output };
+if (import.meta.url !== pathToFileURL(process.argv[1] ?? '').href) {
+  // Imported, not run. The registry above is the whole public surface.
+} else {
+  main();
+}
+
+function main() {
+  const only = process.argv.includes('--only')
+    ? process.argv[process.argv.indexOf('--only') + 1]
+    : null;
+  const selected = only === null ? MUTATIONS : MUTATIONS.filter((m) => m.name === only);
+  if (selected.length === 0) {
+    console.error(`no mutation named ${only}; known: ${MUTATIONS.map((m) => m.name).join(', ')}`);
+    process.exit(2);
   }
-  const withheld = tests.length > 0 && tests.every((test) => test.status === 'skipped');
-  return { verdict: withheld ? 'no-verdict' : 'survived', output };
-}
 
-/** A child's own words, set under the label line that introduced them. */
-function indented(text) {
-  return text
-    .trimEnd()
-    .split('\n')
-    .map((line) => (line.trim() === '' ? '' : `      ${line}`))
-    .join('\n');
-}
+  /** Original bytes of every file we touch, so an interrupt cannot leave one broken. */
+  const originals = new Map();
 
-const results = [];
-try {
-  for (const mutation of selected) {
-    const path = resolve(root, mutation.file);
-    const original = readFileSync(path, 'utf8');
-    const occurrences = original.split(mutation.find).length - 1;
-    if (occurrences !== 1) {
-      console.error(
-        `mutation ${mutation.name}: expected exactly one occurrence of its target in ` +
-          `${mutation.file}, found ${occurrences}. The source moved; update the mutation.`,
-      );
-      results.push({ name: mutation.name, verdict: 'stale' });
-      continue;
-    }
+  function restoreAll() {
+    for (const [path, text] of originals) writeFileSync(path, text);
+    originals.clear();
+  }
 
-    originals.set(path, original);
-    writeFileSync(path, original.replace(mutation.find, mutation.replace));
-    console.log(`\n── ${mutation.name}`);
-    console.log(`   breaks: ${mutation.breaks}`);
-
-    const caughtBy = [];
-    const survived = [];
-    const noVerdict = [];
-    for (const file of mutation.mustFail) {
-      const { verdict, output } = runTests([file]);
-      if (verdict === 'caught') caughtBy.push(file);
-      else if (verdict === 'no-verdict') noVerdict.push(file);
-      else survived.push(file);
-      const label =
-        verdict === 'caught'
-          ? 'caught by '
-          : verdict === 'no-verdict'
-            ? 'NO VERDICT'
-            : 'SURVIVED  ';
-      console.log(`   ${label} ${file}`);
-      // A withheld verdict is the one outcome whose whole content is in the gate's own
-      // words. `caught` and `survived` are answers and the label carries them; this one
-      // is the absence of an answer, and only the gate's NOT JUDGED banner says what took
-      // the instrument away — which is the difference between a host to re-run on and a
-      // gate to fix. `spawnSync` pipes rather than inherits, so it is printed here or
-      // nowhere, and CI run 31099311259 is what "nowhere" reads like afterwards.
-      if (verdict === 'no-verdict' && output.trim() !== '') console.log(indented(output));
-    }
-
-    writeFileSync(path, original);
-    originals.delete(path);
-    results.push({
-      name: mutation.name,
-      // A gate that withheld cannot make a hole, and it cannot close one either. So a
-      // mutation is only ever `no verdict` where **no** file judged it: one gate that
-      // caught it proves it, and one that judged and did not is still a hole.
-      verdict: caughtBy.length > 0 ? 'caught' : survived.length > 0 ? 'survived' : 'no verdict',
-      caughtBy,
-      survived,
-      noVerdict,
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => {
+      restoreAll();
+      process.exit(130);
     });
   }
-} finally {
-  restoreAll();
-  rmSync(reportDir, { recursive: true, force: true });
-}
 
-/**
- * Name every mutation whose only guards can withhold — on every run, from the registry
- * alone, whatever this run happened to measure. See {@link WITHHOLDABLE_GUARDS}.
- *
- * Deliberately **not** conditioned on anything this run observed. A mutation that goes
- * unproven on a Tuesday and again on a Thursday leaves no single run looking wrong, so
- * the exposure has to be visible from the registry rather than from the outcomes.
- */
-function warnSolelyWithholdable(mutations) {
-  const exposed = mutations.filter(
-    (m) => m.mustFail.length > 0 && m.mustFail.every((file) => WITHHOLDABLE_GUARDS.has(file)),
-  );
-  if (exposed.length === 0) return;
+  /** Where vitest's machine-readable report lands, one run at a time. */
+  const reportDir = mkdtempSync(join(tmpdir(), 'loom-mutation-'));
+  const reportPath = join(reportDir, 'vitest.json');
+
+  /**
+   * Run one gate over the broken source and say which of **three** things happened.
+   *
+   * An exit code answers two of them and the third has to be read out of the run: a gate
+   * that reports *skipped* exits 0, exactly as a gate that ran and noticed nothing does.
+   * That is not a distinction this script could ignore once a gate had a withheld verdict
+   * in it — `test/phase8-gate.test.ts` reports `skipped` when every launch lost its WebGL
+   * context (see `test/export-golden/verdict.ts`), and CI run 31099311259 is what happens
+   * without it: the runner's GPU process died on both launches, the gate correctly said it
+   * had no verdict, and this script read that silence as `SURVIVED` and reported a hole in
+   * a gate that had not been given the chance to measure anything.
+   *
+   *  - `caught`     — the gate failed. Whatever else the run says, a failure is a failure,
+   *                   and a vitest that could not start at all belongs here too.
+   *  - `survived`   — the gate ran, judged, and did not notice. A real hole.
+   *  - `no-verdict` — **every** test in the file withheld. Nothing judged the mutation, so
+   *                   nothing here says the gate measures it and nothing says it does not.
+   *
+   * Read off `assertionResults`, per test, rather than off vitest's file status — a file
+   * whose only test skipped still reports `passed` — and never off the summary text, which
+   * is a reporter's prose. If the report is unreadable the run falls back to the exit code,
+   * which is the behaviour this had before.
+   *
+   * The report is **deleted before every run**, so an unreadable one means this run wrote
+   * nothing rather than that the previous run's answer is still lying there. One path is
+   * shared by all ~96 mutations and `--outputFile.json` is written at exit, so a vitest that
+   * exits 0 without reaching it would otherwise be graded off its predecessor's statuses:
+   * an all-skipped predecessor would turn a genuine `survived` — a real hole, and the one
+   * thing this script exists to report — into a `no-verdict` that does not fail the build.
+   * The `catch` below cannot see that, because a stale file parses.
+   */
+  function runTests(files) {
+    rmSync(reportPath, { force: true });
+    const result = spawnSync(
+      'npx',
+      [
+        'vitest',
+        'run',
+        ...files,
+        '--reporter=default',
+        '--reporter=json',
+        `--outputFile.json=${reportPath}`,
+      ],
+      { cwd: root, encoding: 'utf8', env: { ...process.env, CI: '1' } },
+    );
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.status !== 0) return { verdict: 'caught', output };
+    let tests = [];
+    try {
+      const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+      tests = (report.testResults ?? []).flatMap((file) => file.assertionResults ?? []);
+    } catch {
+      return { verdict: 'survived', output };
+    }
+    const withheld = tests.length > 0 && tests.every((test) => test.status === 'skipped');
+    return { verdict: withheld ? 'no-verdict' : 'survived', output };
+  }
+
+  /** A child's own words, set under the label line that introduced them. */
+  function indented(text) {
+    return text
+      .trimEnd()
+      .split('\n')
+      .map((line) => (line.trim() === '' ? '' : `      ${line}`))
+      .join('\n');
+  }
+
+  const results = [];
+  try {
+    for (const mutation of selected) {
+      const path = resolve(root, mutation.file);
+      const original = readFileSync(path, 'utf8');
+      const occurrences = original.split(mutation.find).length - 1;
+      if (occurrences !== 1) {
+        console.error(
+          `mutation ${mutation.name}: expected exactly one occurrence of its target in ` +
+            `${mutation.file}, found ${occurrences}. The source moved; update the mutation.`,
+        );
+        results.push({ name: mutation.name, verdict: 'stale' });
+        continue;
+      }
+
+      originals.set(path, original);
+      writeFileSync(path, original.replace(mutation.find, mutation.replace));
+      console.log(`\n── ${mutation.name}`);
+      console.log(`   breaks: ${mutation.breaks}`);
+
+      const caughtBy = [];
+      const survived = [];
+      const noVerdict = [];
+      for (const file of mutation.mustFail) {
+        const { verdict, output } = runTests([file]);
+        if (verdict === 'caught') caughtBy.push(file);
+        else if (verdict === 'no-verdict') noVerdict.push(file);
+        else survived.push(file);
+        const label =
+          verdict === 'caught'
+            ? 'caught by '
+            : verdict === 'no-verdict'
+              ? 'NO VERDICT'
+              : 'SURVIVED  ';
+        console.log(`   ${label} ${file}`);
+        // A withheld verdict is the one outcome whose whole content is in the gate's own
+        // words. `caught` and `survived` are answers and the label carries them; this one
+        // is the absence of an answer, and only the gate's NOT JUDGED banner says what took
+        // the instrument away — which is the difference between a host to re-run on and a
+        // gate to fix. `spawnSync` pipes rather than inherits, so it is printed here or
+        // nowhere, and CI run 31099311259 is what "nowhere" reads like afterwards.
+        if (verdict === 'no-verdict' && output.trim() !== '') console.log(indented(output));
+      }
+
+      writeFileSync(path, original);
+      originals.delete(path);
+      results.push({
+        name: mutation.name,
+        // A gate that withheld cannot make a hole, and it cannot close one either. So a
+        // mutation is only ever `no verdict` where **no** file judged it: one gate that
+        // caught it proves it, and one that judged and did not is still a hole.
+        verdict: caughtBy.length > 0 ? 'caught' : survived.length > 0 ? 'survived' : 'no verdict',
+        caughtBy,
+        survived,
+        noVerdict,
+      });
+    }
+  } finally {
+    restoreAll();
+    rmSync(reportDir, { recursive: true, force: true });
+  }
+
+  /**
+   * Name every mutation whose only guards can withhold — on every run, from the registry
+   * alone, whatever this run happened to measure. See {@link WITHHOLDABLE_GUARDS}.
+   *
+   * Deliberately **not** conditioned on anything this run observed. A mutation that goes
+   * unproven on a Tuesday and again on a Thursday leaves no single run looking wrong, so
+   * the exposure has to be visible from the registry rather than from the outcomes.
+   */
+  function warnSolelyWithholdable(mutations) {
+    const exposed = mutations.filter(
+      (m) => m.mustFail.length > 0 && m.mustFail.every((file) => WITHHOLDABLE_GUARDS.has(file)),
+    );
+    if (exposed.length === 0) return;
+    console.log(
+      `\n── coverage exposure (structural, not a result of this run)\n` +
+        `   ${String(exposed.length)} mutation(s) are guarded ONLY by a gate that can ` +
+        `withhold its verdict.\n   On a host whose instrument fails they are unproven ` +
+        `rather than caught, and no single\n   run looks wrong when that repeats. Each ` +
+        `wants a second guard that cannot withhold:\n` +
+        exposed.map((m) => `     ${m.name}  [${m.mustFail.join(', ')}]`).join('\n'),
+    );
+  }
+
+  console.log('\n── summary');
+  for (const result of results) {
+    console.log(`   ${result.verdict.padEnd(10)} ${result.name}`);
+  }
+  warnSolelyWithholdable(selected);
+
+  const holes = results.filter((r) => r.verdict === 'survived' || r.verdict === 'stale');
+  const withheld = results.filter((r) => r.verdict === 'no verdict');
+  // Printed before the exit, and on a green run too: a mutation nothing judged is the one
+  // thing this script cannot claim either way, and a reader who only sees the last line
+  // would take it for a proof it is not.
+  if (withheld.length > 0) {
+    console.error(
+      `\n${withheld.length} mutation(s) got NO VERDICT: every gate that judges them ` +
+        `withheld, so this run neither proves nor disproves them — see the withheld ` +
+        `verdict each one printed. Re-run them with --only on a host whose instrument ` +
+        `works:\n` +
+        withheld.map((r) => `   node scripts/mutation-check.mjs --only ${r.name}`).join('\n'),
+    );
+  }
+  if (holes.length > 0) {
+    console.error(
+      `\n${holes.length} mutation(s) were not caught. The gate does not measure what it claims.`,
+    );
+    process.exit(1);
+  }
   console.log(
-    `\n── coverage exposure (structural, not a result of this run)\n` +
-      `   ${String(exposed.length)} mutation(s) are guarded ONLY by a gate that can ` +
-      `withhold its verdict.\n   On a host whose instrument fails they are unproven ` +
-      `rather than caught, and no single\n   run looks wrong when that repeats. Each ` +
-      `wants a second guard that cannot withhold:\n` +
-      exposed.map((m) => `     ${m.name}  [${m.mustFail.join(', ')}]`).join('\n'),
+    `\nall ${String(results.length - withheld.length)} judged mutations were caught` +
+      (withheld.length === 0 ? '.' : `; ${String(withheld.length)} got no verdict.`),
   );
 }
-
-console.log('\n── summary');
-for (const result of results) {
-  console.log(`   ${result.verdict.padEnd(10)} ${result.name}`);
-}
-warnSolelyWithholdable(selected);
-
-const holes = results.filter((r) => r.verdict === 'survived' || r.verdict === 'stale');
-const withheld = results.filter((r) => r.verdict === 'no verdict');
-// Printed before the exit, and on a green run too: a mutation nothing judged is the one
-// thing this script cannot claim either way, and a reader who only sees the last line
-// would take it for a proof it is not.
-if (withheld.length > 0) {
-  console.error(
-    `\n${withheld.length} mutation(s) got NO VERDICT: every gate that judges them ` +
-      `withheld, so this run neither proves nor disproves them — see the withheld ` +
-      `verdict each one printed. Re-run them with --only on a host whose instrument ` +
-      `works:\n` +
-      withheld.map((r) => `   node scripts/mutation-check.mjs --only ${r.name}`).join('\n'),
-  );
-}
-if (holes.length > 0) {
-  console.error(
-    `\n${holes.length} mutation(s) were not caught. The gate does not measure what it claims.`,
-  );
-  process.exit(1);
-}
-console.log(
-  `\nall ${String(results.length - withheld.length)} judged mutations were caught` +
-    (withheld.length === 0 ? '.' : `; ${String(withheld.length)} got no verdict.`),
-);
