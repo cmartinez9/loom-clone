@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, the generators,
                           # annotations, the drawing overlay and the event logs
-                          # 62 ways; each must fail a gate
+                          # 70 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -1042,7 +1042,19 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   `test/golden/`) checks the other axis — that annotations are not vacuous — over one
   painted frame with a two-line stand-in where the export loop belongs. The seam
   between them is `ExportRenderLoop.renderAt`, which takes a timeline instant rather
-  than a frame number for exactly that reason.
+  than a frame number for exactly that reason. They also declare separate window
+  globals — `window.exportGolden` and `window.golden` — because both harnesses are in
+  one TypeScript program and one name cannot hold two shapes.
+- **An export draws annotation shapes and redactions; annotation _text_ is not wired
+  to it yet.** `Compositor.render` takes annotations off the `ResolvedState` both
+  loops already compute, so blur, mask and the four shapes reach an export with no
+  export-side wiring at all. Glyphs are the exception: they need a `TextAtlas` on
+  `CompositorFrames`, `ExportRenderLoop` builds its frames without one, and a `text`
+  span with no atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`)
+  rather than refused — `PreviewLoop` reports that count through `onError` and the
+  export loop does not read it. Nothing authors an annotation today, because the
+  editor is a later phase; hand the export window the same atlas object before
+  anything can.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 
