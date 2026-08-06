@@ -53,7 +53,12 @@ import {
   ExportDestinationError,
   ProjectStore,
 } from '../src/project-store.ts';
-import { ExportSession, bitrateFor, safeFileName } from '../src/export/session.ts';
+import {
+  ExportRecordingBusyError,
+  ExportSession,
+  bitrateFor,
+  safeFileName,
+} from '../src/export/session.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
 const fixture = loadEncodedFixture();
@@ -141,6 +146,7 @@ beforeEach(async () => {
   const clipboard: string[] = [];
   const revealed: string[] = [];
   let opens = 0;
+  let jobIds = 0;
   const session = new ExportSession({
     store,
     openWindow: () => {
@@ -163,7 +169,10 @@ beforeEach(async () => {
       revealed.push(path);
       return true;
     },
-    newJobId: () => 'job-1',
+    // One per press, and numbered rather than constant: two exports of one recording
+    // are a case this file now drives, and a session that minted one id for both
+    // would be testing something no shipping build does.
+    newJobId: () => `job-${(jobIds += 1)}`,
   });
 
   harness = {
@@ -984,6 +993,183 @@ describe('the project an export opened', () => {
     await harness.session.start(harness.recordingId, { name: 'Failed' });
     expect((await settled()).phase).toBe('failed');
     expect(await lockBecomesFree()).toBe(true);
+  }, 60_000);
+});
+
+/**
+ * Two exports of **one recording**, which is the collision phase 9 made expensive.
+ *
+ * The destination claim below is `ProjectStore`'s and spans a *writer's* life. It
+ * does not reach this: a second job whose `beginExport` lands after the first
+ * released the name renames over an export that has already been verified, hashed
+ * and recorded — and if that second job then fails verification, `discardExport`
+ * unlinks the shared path. Before phase 9 that cost an old export; now the first job
+ * has already deleted the sources, so it costs the user both their footage and their
+ * finished file, which nothing else in this application does.
+ *
+ * So it is refused rather than made safe, in **main**, because a renderer cannot be
+ * trusted to decline a capability. The refusal is only worth having if it also lets
+ * go: a guard that never released would make the *second* export of any recording
+ * impossible for the life of the app, which is why the settled, cancelled and failed
+ * paths each have a test here rather than an assumption.
+ */
+describe('two exports of one recording', () => {
+  /** The jobs the stand-in window has been handed, in order, without encoding them. */
+  function collectStarts(): ExportJob[] {
+    const started: ExportJob[] = [];
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') started.push(command.job);
+    });
+    return started;
+  }
+
+  /** Wait until the window has actually been handed a job, so "live" is not a guess. */
+  async function handedAJob(started: ExportJob[], count = 1): Promise<ExportJob> {
+    for (let i = 0; i < 400; i++) {
+      const job = started[count - 1];
+      if (job !== undefined) return job;
+      await new Promise((done) => setTimeout(done, 5));
+    }
+    throw new Error(`the export window was never handed job ${count}`);
+  }
+
+  async function refusalOf(name: string): Promise<unknown> {
+    return harness.session
+      .start(harness.recordingId, { name })
+      .then(() => null)
+      .catch((error: unknown) => error);
+  }
+
+  /**
+   * Export the same recording again, waiting out the claim the last job still holds.
+   *
+   * Polled for the same reason `lockBecomesFree` above is: `#finish` broadcasts the
+   * terminal phase from inside `#run`'s `try`, and the claim is given back in the
+   * `finally` — *after* the bundle hold, deliberately, because `ProjectStore.close`
+   * drops the project from its map before it awaits the `.lock` release. So a job
+   * that has settled has not necessarily let go yet, and the property under test is
+   * that it does. Only the busy refusal is waited out; any other error is raised.
+   */
+  async function startWhenFree(overrides: ExportSettingsOverride): Promise<{ jobId: string }> {
+    for (let i = 0; i < 400; i++) {
+      try {
+        return await harness.session.start(harness.recordingId, overrides);
+      } catch (error) {
+        if (!(error instanceof ExportRecordingBusyError)) throw error;
+        await new Promise((done) => setTimeout(done, 5));
+      }
+    }
+    throw new Error('the recording was never given back for a second export');
+  }
+
+  it('refuses the second while the first is live, and names what is busy', async () => {
+    answerVerification();
+    const started = collectStarts();
+    const first = await harness.session.start(harness.recordingId, { name: 'First' });
+    const job = await handedAJob(started);
+    expect(job.jobId).toBe(first.jobId);
+
+    const refusal = await refusalOf('Second');
+    expect(refusal).toBeInstanceOf(ExportRecordingBusyError);
+    expect(refusal).toBeInstanceOf(Error);
+    if (!(refusal instanceof ExportRecordingBusyError)) return;
+    // Named, both halves — what is busy, and who has it — the shape
+    // `ExportDestinationBusyError` already uses.
+    expect(refusal.recordingId).toBe(harness.recordingId);
+    expect(refusal.heldBy).toBe(first.jobId);
+    expect(refusal.message).toContain(harness.recordingId);
+    expect(refusal.message).toContain(first.jobId);
+
+    // Refused *before* `openProject`, so it took no second hold on the bundle: the
+    // export that is running is the only holder, and its own release frees the lock.
+    // A refusal that opened the project first would leave it locked for the session.
+    expect(started).toHaveLength(1);
+    expect(harness.opens()).toBe(1);
+
+    // And the export it was protecting is unharmed — the half that matters. A guard
+    // that refused the second while breaking the first would be worse than the race.
+    encodeLikeTheWindow(job.jobId, framesFor(job));
+    const outcome = await settled();
+    expect(outcome.phase).toBe('done');
+    expect(outcome.result?.path).toBe(await exportedPath('First.mp4'));
+    expect(await readdir(harness.exportsDir)).toEqual(['First.mp4']);
+  }, 60_000);
+
+  it('exports the same recording again once the first has settled', async () => {
+    // Without this, "refuses a second export" and "refuses every second export" read
+    // identically — and the second is a guard that breaks re-exporting for ever.
+    answerVerification();
+    const started = collectStarts();
+    await harness.session.start(harness.recordingId, { name: 'Once', keepSources: true });
+    const first = await handedAJob(started);
+    encodeLikeTheWindow(first.jobId, framesFor(first));
+    expect((await settled()).phase).toBe('done');
+
+    // The stand-in window is closed on every exit path, exactly as the real one is;
+    // a second job in the real app opens its own.
+    harness.window.destroyed = false;
+    harness.progress.length = 0;
+    const second = await startWhenFree({ name: 'Twice', keepSources: true });
+    expect(second.jobId).not.toBe(first.jobId);
+    const job = await handedAJob(started, 2);
+    encodeLikeTheWindow(job.jobId, framesFor(job));
+    expect((await settled()).phase).toBe('done');
+    expect((await readdir(harness.exportsDir)).sort()).toEqual(['Once.mp4', 'Twice.mp4']);
+  }, 60_000);
+
+  it('gives the recording back when the job holding it is cancelled', async () => {
+    answerVerification();
+    const started = collectStarts();
+    const first = await harness.session.start(harness.recordingId, { name: 'Abandoned' });
+    await handedAJob(started);
+    harness.session.cancel(first.jobId);
+    expect((await settled()).phase).toBe('cancelled');
+
+    harness.window.destroyed = false;
+    harness.progress.length = 0;
+    const retry = await startWhenFree({ name: 'Retry' });
+    expect(retry.jobId).not.toBe(first.jobId);
+    const job = await handedAJob(started, 2);
+    encodeLikeTheWindow(job.jobId, framesFor(job));
+    expect((await settled()).phase).toBe('done');
+  }, 60_000);
+
+  it('gives the recording back when the job holding it fails', async () => {
+    // The path a user is most likely to meet twice: an export that failed is an
+    // export they will try again, and a claim leaked here would refuse them for ever.
+    answerVerification(false);
+    const started = collectStarts();
+    const first = await harness.session.start(harness.recordingId, { name: 'Broken' });
+    const job = await handedAJob(started);
+    encodeLikeTheWindow(job.jobId, framesFor(job));
+    expect((await settled()).phase).toBe('failed');
+
+    harness.window.destroyed = false;
+    harness.progress.length = 0;
+    const retry = await startWhenFree({ name: 'Broken' });
+    expect(retry.jobId).not.toBe(first.jobId);
+  }, 60_000);
+
+  it('leaves an export of a different recording alone', async () => {
+    // The refusal is per recording, not a global one-at-a-time lock: two recordings
+    // exporting at once is ordinary, and only the shared `<name>.mp4` is a problem —
+    // which `ExportDestinationBusyError` below is what stands between.
+    answerVerification();
+    const other = await harness.store.create('Another');
+    await writeFile(
+      join(other.paths.dir, 'edit.json'),
+      JSON.stringify({
+        ...newEditDocument(),
+        clips: [{ id: 'whole', sourceStart: 0, sourceEnd: FIXTURE_SEC, speed: 1 }],
+      }),
+      'utf8',
+    );
+    const started = collectStarts();
+    await harness.session.start(harness.recordingId, { name: 'Mine' });
+    await handedAJob(started);
+    await expect(harness.session.start(other.id, { name: 'Theirs' })).resolves.toHaveProperty(
+      'jobId',
+    );
   }, 60_000);
 });
 

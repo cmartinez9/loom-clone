@@ -174,6 +174,36 @@ export class ExportWindowUnavailable extends Error {
 }
 
 /**
+ * Raised when a recording is asked to export while one of its own exports is live.
+ *
+ * `ExportDestinationBusyError`'s shape, one level up, and for a failure phase 9
+ * created. Two jobs for one recording resolve the same `<name>.mp4` — `defaults()`
+ * derives the name from the project's — and the destination claim in `ProjectStore`
+ * only spans a writer's life, so a second job whose `beginExport` lands *after* the
+ * first released the name renames over an export that has already been verified,
+ * hashed and recorded. If that second job then fails verification, `discardExport`
+ * unlinks the shared path — and the first job has by then deleted the sources. That
+ * is the only outcome in this application that leaves the user neither their footage
+ * nor their finished file, so it is refused rather than made safe: a user has no
+ * reason to export one recording twice at once, and refusing is deterministic where
+ * holding an invariant across two jobs, a `rename(2)` and a deletion is not.
+ */
+export class ExportRecordingBusyError extends Error {
+  readonly recordingId: RecordingId;
+  /** The job that got there first. */
+  readonly heldBy: string;
+  constructor(recordingId: RecordingId, heldBy: string) {
+    super(
+      `export job ${JSON.stringify(heldBy)} is already exporting recording ${recordingId}; ` +
+        'one recording cannot be exported twice at once',
+    );
+    this.name = 'ExportRecordingBusyError';
+    this.recordingId = recordingId;
+    this.heldBy = heldBy;
+  }
+}
+
+/**
  * How the two passes share the progress bar.
  *
  * Audio is seconds of work and video is minutes (§5.7), so a 50/50 split would sit
@@ -275,6 +305,16 @@ interface CopySources {
 export class ExportSession {
   readonly #options: ExportSessionOptions;
   readonly #jobs = new Map<string, Job>();
+  /**
+   * The recording each live job is exporting, so a second one can be refused.
+   *
+   * A second map rather than a scan of {@link #jobs}, because the claim has to be
+   * taken **before the first `await`** in {@link ExportSession.start} — a job is not
+   * in `#jobs` until its settings have been read, its path resolved and its bundle
+   * opened, which is four awaits during which two presses of one button are both
+   * still "the first". `#run`'s `finally` gives it back on every exit path.
+   */
+  readonly #exporting = new Map<RecordingId, string>();
 
   constructor(options: ExportSessionOptions) {
     this.#options = options;
@@ -354,6 +394,12 @@ export class ExportSession {
    * already refuses it at the IPC boundary, and this is the invariant restated where
    * the path is actually composed, so a future caller inside main cannot reintroduce
    * it by writing plain TypeScript.
+   *
+   * The second refusal is {@link ExportRecordingBusyError}, and it is here rather than
+   * in the library window for the reason a destination is: a renderer cannot be
+   * trusted to decline a capability. It is taken **before `openProject`** so a refusal
+   * cannot leave a bundle hold behind, and before the first `await` so two presses in
+   * one turn cannot both find the recording idle.
    */
   async start(id: RecordingId, overrides: ExportSettingsOverride): Promise<{ jobId: string }> {
     if ('outputDir' in overrides) {
@@ -362,23 +408,38 @@ export class ExportSession {
           'through export:chooseFolder',
       );
     }
-    const settings = { ...(await this.defaults(id)), ...overrides };
+    const heldBy = this.#exporting.get(id);
+    if (heldBy !== undefined) throw new ExportRecordingBusyError(id, heldBy);
     const jobId = (this.#options.newJobId ?? randomUUID)();
-    // `resolve` + `realpath` on the directory and a containment check on the join, so
-    // a symlink standing where the Exports folder should be cannot walk the export out
-    // of it. `safeFileName` has already turned every separator in the name into a
-    // space, so the join is a single path segment; this checks that rather than
-    // assuming it.
-    const outputPath = await this.#options.store.resolveExportPath(
-      settings.outputDir,
-      `${safeFileName(settings.name)}.mp4`,
-    );
-    // Opened, not read: the export records itself in `project.json` when it is done,
-    // and `recordExport` requires the project to be open — the same rule the event
-    // logs follow. Opening here also takes the bundle lock for the export's life, and
-    // `#run`'s `finally` hands it back through `releaseProject` — which closes only if
-    // nothing else (an editor, say) is holding the same project.
-    const opened = await this.#options.store.openProject(id);
+    // Claimed synchronously, so the window between "this recording is free" and "this
+    // job owns it" contains no `await` for a second press to arrive in.
+    this.#exporting.set(id, jobId);
+    let settings: ExportSettings;
+    let outputPath: string;
+    let opened: Awaited<ReturnType<ProjectStore['openProject']>>;
+    try {
+      settings = { ...(await this.defaults(id)), ...overrides };
+      // `resolve` + `realpath` on the directory and a containment check on the join, so
+      // a symlink standing where the Exports folder should be cannot walk the export out
+      // of it. `safeFileName` has already turned every separator in the name into a
+      // space, so the join is a single path segment; this checks that rather than
+      // assuming it.
+      outputPath = await this.#options.store.resolveExportPath(
+        settings.outputDir,
+        `${safeFileName(settings.name)}.mp4`,
+      );
+      // Opened, not read: the export records itself in `project.json` when it is done,
+      // and `recordExport` requires the project to be open — the same rule the event
+      // logs follow. Opening here also takes the bundle lock for the export's life, and
+      // `#run`'s `finally` hands it back through `releaseProject` — which closes only if
+      // nothing else (an editor, say) is holding the same project.
+      opened = await this.#options.store.openProject(id);
+    } catch (error) {
+      // Nothing is holding the recording yet — no bundle lock, no job — so the claim
+      // goes back here rather than in `#run`'s `finally`, which this never reaches.
+      this.#release(id, jobId);
+      throw error;
+    }
     // From here the hold exists, and `#run`'s `finally` is what gives it back — so
     // anything between here and the job being handed to `#run` has to release it
     // itself. A `compile` that throws on a malformed document would otherwise leave
@@ -401,6 +462,7 @@ export class ExportSession {
       job = this.#newJob({ jobId, id, settings, outputPath, timeline, eligibility, hasAudio });
     } catch (error) {
       await this.#options.store.releaseProject(id).catch(() => undefined);
+      this.#release(id, jobId);
       throw error;
     }
     this.#jobs.set(jobId, job);
@@ -450,6 +512,17 @@ export class ExportSession {
     };
   }
 
+  /**
+   * Give the recording back, if this job is the one holding it.
+   *
+   * Keyed by job id and not by recording alone, so a release can only ever free the
+   * claim it took — the same discipline `discardExport(jobId)` follows for the one
+   * `rm` that points outside a bundle.
+   */
+  #release(id: RecordingId, jobId: string): void {
+    if (this.#exporting.get(id) === jobId) this.#exporting.delete(id);
+  }
+
   cancel(jobId: string): void {
     const job = this.#jobs.get(jobId);
     if (job === undefined || job.cancelled) return;
@@ -469,6 +542,7 @@ export class ExportSession {
       this.#options.closeWindow(job.id);
     }
     this.#jobs.clear();
+    this.#exporting.clear();
   }
 
   /** Break every wait this job has outstanding. See {@link Job.waiters}. */
@@ -689,6 +763,10 @@ export class ExportSession {
         sourcesKept: job.settings.keepSources,
         sourcesDeleted: retention.deleted,
         retentionReasons: retention.reasons,
+        // Carried rather than only logged: the library has three outcomes to tell
+        // apart and this is the only field that separates the escape hatch from a
+        // recording that has lost some of its media.
+        ...(retention.error === undefined ? {} : { retentionError: retention.error }),
         mode: job.mode,
       };
       this.#finish(job, { phase: 'done', result });
@@ -734,6 +812,15 @@ export class ExportSession {
       await this.#options.store.releaseProject(job.recordingId).catch((error: unknown) => {
         console.error('[export] could not release the project:', error);
       });
+      // The recording's claim last, and **after** the release above rather than
+      // beside the job it belonged to. `ProjectStore.close` drops the project from
+      // its map before it awaits the `.lock` release, so a second export admitted at
+      // the instant this one finished would find nothing open, take the lock itself,
+      // and fail on the file the first job is still letting go of. Released on every
+      // exit path — done, failed and cancelled alike — because a guard that never
+      // released would refuse every *later* export of a recording that has one,
+      // which is a worse failure than the one it exists to prevent.
+      this.#release(job.recordingId, job.id);
     }
   }
 

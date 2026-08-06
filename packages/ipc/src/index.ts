@@ -1034,6 +1034,16 @@ export interface ExportResult {
   sourcesDeleted: boolean;
   /** Why the sources are still there. Empty exactly when `sourcesDeleted`. */
   retentionReasons: string[];
+  /**
+   * Set only for the third state: a deletion that was authorised and failed part-way.
+   *
+   * Its presence is what tells the escape hatch — *"the original recording was
+   * kept"* — apart from a bundle that has lost some of its media, which the reasons
+   * alone cannot do: both arrive with `sourcesDeleted: false` and a sentence. A
+   * signal that cannot be inspected is not a signal, and this one is the difference
+   * between reassuring the user and misleading them.
+   */
+  retentionError?: string;
   mode: ExportMode;
 }
 

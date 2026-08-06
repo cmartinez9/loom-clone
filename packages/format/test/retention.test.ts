@@ -131,4 +131,34 @@ describe('§7.5 obligation 2 — the words the user is shown', () => {
     // buys is that a failed export deletes nothing.
     expect(RETENTION_COPY.deleteHint).toMatch(/failed export deletes nothing/);
   });
+
+  it('has a sentence for each of the three things that can become of the sources', () => {
+    // `sourcesDeleted` is not a boolean about the checkbox: deleted, kept, and
+    // authorised-but-unfinished are three outcomes, and a surface with two sentences
+    // has to report one of them wrongly. All three live here so the warning shown
+    // before the export and the note shown after it cannot drift apart.
+    expect(new Set(Object.values(RETENTION_COPY)).size).toBe(Object.keys(RETENTION_COPY).length);
+    expect(RETENTION_COPY.exported).toMatch(/deleted/);
+    expect(RETENTION_COPY.kept).toMatch(/kept/);
+    expect(RETENTION_COPY.deletionFailed).not.toBe(RETENTION_COPY.kept);
+  });
+
+  it('says plainly what a half-finished deletion left behind, and what happens next', () => {
+    // The captain's standard for damage: name what did not survive rather than
+    // reassure. Each clause is asserted because dropping any one of them turns this
+    // back into a sentence that implies a clean outcome the disk does not support.
+    const copy = RETENTION_COPY.deletionFailed;
+    // ...that it was authorised, and did not finish.
+    expect(copy).toMatch(/authorised/);
+    expect(copy).toMatch(/did not finish/);
+    // ...what is gone, in the same terms the warning used before the export.
+    expect(copy).toMatch(/screen, camera, audio and cursor/);
+    // ...the consequence the user will otherwise meet by surprise.
+    expect(copy).toMatch(/may no longer open for editing/);
+    // ...and that the app finishes it, which is true because step 1 wrote the
+    // retention record before anything was unlinked.
+    expect(copy).toMatch(/next time it starts/);
+    // Not a claim the recording is intact, in any of its words.
+    expect(copy).not.toMatch(/\bkept\b/);
+  });
 });

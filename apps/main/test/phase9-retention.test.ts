@@ -56,7 +56,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -680,5 +680,60 @@ describe('§7.5 ordering — a deletion that was interrupted is finished, not fo
     expect((await projectDoc()).state).toBe('exported');
     // Idempotent: a second launch finds nothing left to finish.
     expect(await harness.store.listInterruptedRetention()).toEqual([]);
+  });
+
+  it('does not call a deletion it could not perform "exported"', async () => {
+    // Only `ENOENT` means "already deleted". Every other failure to *read* a source
+    // directory — `EACCES` on a volume whose permissions changed, `EIO`, `ENOTDIR` —
+    // means the sources may still be there, and reporting the directory as emptied
+    // would advance the state to `exported` beside media that never went. That is the
+    // first state `retention-crash.test.ts`'s `contradictions()` declares forbidden,
+    // and the only one that is unrecoverable: `listInterruptedRetention` skips an
+    // `exported` recording, so no later launch would ever look at it again.
+    //
+    // The damage is `ENOTDIR` rather than a `chmod`, because a test that runs as root
+    // can read a directory with no permission bits and would silently stop testing
+    // anything.
+    await harness.store.openProject(harness.recordingId);
+    await harness.store.recordRetention(harness.recordingId, {
+      sourcesDeletedAt: new Date().toISOString(),
+      reason: 'export-verified',
+    });
+    await harness.store.releaseProject(harness.recordingId);
+    await rm(join(harness.bundleDir, 'media'), { recursive: true, force: true });
+    await writeFile(join(harness.bundleDir, 'media'), 'not a directory', 'utf8');
+
+    const outcomes = await resumeInterruptedRetention(harness.store);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]?.finished).toBe(false);
+    expect(outcomes[0]?.error ?? '').toMatch(/ENOTDIR|not a directory/i);
+
+    // The state never advanced, so the library still calls this recording editable...
+    expect((await projectDoc()).state).not.toBe('exported');
+    // ...and it is still on the list the next launch works from, which is the whole
+    // reason the failure has to reach the caller rather than be swallowed.
+    expect(await harness.store.listInterruptedRetention()).toHaveLength(1);
+    // Nothing else was taken on the way past: the directory it never read is not a
+    // licence to empty the one after it.
+    expect(await readdir(join(harness.bundleDir, 'events'))).not.toEqual([]);
+  });
+
+  it('CONTROL: the same resume finishes once the directory can be read again', async () => {
+    // Without this, "a failed readdir leaves the state alone" and "a resume never
+    // finishes anything" read identically.
+    await harness.store.openProject(harness.recordingId);
+    await harness.store.recordRetention(harness.recordingId, {
+      sourcesDeletedAt: new Date().toISOString(),
+      reason: 'export-verified',
+    });
+    await harness.store.releaseProject(harness.recordingId);
+    await rm(join(harness.bundleDir, 'media'), { recursive: true, force: true });
+    await writeFile(join(harness.bundleDir, 'media'), 'not a directory', 'utf8');
+    expect((await resumeInterruptedRetention(harness.store))[0]?.finished).toBe(false);
+
+    await rm(join(harness.bundleDir, 'media'), { force: true });
+    await mkdir(join(harness.bundleDir, 'media'));
+    expect((await resumeInterruptedRetention(harness.store))[0]?.finished).toBe(true);
+    expect((await projectDoc()).state).toBe('exported');
   });
 });

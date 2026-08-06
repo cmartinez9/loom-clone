@@ -16,6 +16,7 @@ import { RETENTION_COPY } from '@loom/format';
 import type { ProjectState, RecordingSummary } from '@loom/format';
 import type { ExportProgress, PreflightReport, RecorderStatus } from '@loom/ipc';
 import { describePermission } from '@loom/permissions';
+import { exportNotice } from './export-notice.ts';
 
 const loom = window.loom;
 
@@ -63,6 +64,11 @@ interface ExportSheet {
 let exportSheet: ExportSheet | null = null;
 /** The live status line, so progress does not have to re-render the library. */
 let exportStatusNode: HTMLElement | null = null;
+
+/** Whether a job this window started is still running. */
+function exportInFlight(): boolean {
+  return exportSheet?.jobId != null && !exportSheet.done;
+}
 
 // ---------------------------------------------------------------- state chips
 
@@ -289,18 +295,13 @@ function onExportProgress(progress: ExportProgress): void {
   const sheet = exportSheet;
   if (sheet?.jobId !== progress.jobId) return;
   if (progress.phase === 'done') {
-    const result = progress.result;
     sheet.done = true;
-    // What actually happened to the sources, from `sourcesDeleted` and never
-    // inferred from the checkbox: a deletion that was authorised and then failed is
-    // a third state, and telling the user their recording is final when it is not
-    // would be the same lie in the other direction.
-    sheet.status =
-      result === undefined
-        ? 'Exported.'
-        : result.sourcesDeleted
-          ? `Exported to ${result.path}. ${RETENTION_COPY.exported}`
-          : `Exported to ${result.path}. The original recording was kept.`;
+    // What actually happened to the sources, from `sourcesDeleted` and
+    // `retentionError` and never inferred from the checkbox: a deletion that was
+    // authorised and then failed is a third state, and telling the user their
+    // recording is final — or that it was kept — when neither is true would be the
+    // same lie in one direction or the other. See {@link exportNotice}.
+    sheet.status = exportNotice(progress.result);
   } else if (progress.phase === 'failed') {
     sheet.done = true;
     sheet.status = `The export failed, and nothing was deleted: ${progress.error ?? 'no detail'}`;
@@ -364,7 +365,15 @@ function renderActions(summary: RecordingSummary): HTMLElement {
   if (summary.state === 'editable' && summary.unreadable === undefined) {
     const exportButton = button('Export', 'btn btn-sm');
     exportButton.prepend(iconSpan('export', 14));
+    // Defence in depth for the refusal that matters, which is main's
+    // (`ExportRecordingBusyError`): there is one sheet, so opening a second one over a
+    // live job takes away the only surface reporting its progress and the only Cancel
+    // button it has — and it was the first step of the sequence that got two jobs of
+    // one recording running at once. A renderer cannot be trusted to decline a
+    // capability, so this is a courtesy on top of the guarantee, not the guarantee.
+    exportButton.disabled = exportInFlight();
     exportButton.addEventListener('click', () => {
+      if (exportInFlight()) return;
       pendingDelete = null;
       exportSheet = { id: summary.id, keep: false, jobId: null, status: '', done: false };
       void refresh();

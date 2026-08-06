@@ -1189,8 +1189,8 @@ const MUTATIONS = [
       'later launch finishes it and nothing can explain it.',
     file: 'apps/main/src/export/retention.ts',
     find:
-      '    await store.recordRetention(id, { sourcesDeletedAt: isoTimestamp(), reason: ' +
-      "'export-verified' });\n    await step('recorded', id);\n" +
+      '    await store.recordRetention(id, newRetentionRecord(isoTimestamp()));\n' +
+      "    await step('recorded', id);\n" +
       '    const removed = await store.deleteSources(id, RETENTION_SOURCE_DIRECTORIES, {',
     replace: '    const removed = await store.deleteSources(id, RETENTION_SOURCE_DIRECTORIES, {',
     mustFail: [PHASE9, RETENTION_CRASH],
@@ -1234,6 +1234,37 @@ const MUTATIONS = [
     find: "    return summaries.filter((s) => s.sourcesDeleted && s.state !== 'exported');",
     replace: "    return summaries.filter((s) => s.state !== 'exported');",
     mustFail: [PHASE9],
+  },
+  {
+    name: 'retention-treats-an-unreadable-directory-as-an-empty-one',
+    breaks:
+      'the one distinction `deleteBundleSources` is allowed to make. Only `ENOENT` ' +
+      'means "already deleted"; swallowing `EACCES`, `EIO` or `ENOTDIR` reports a ' +
+      "directory it could not read as one it emptied, and the caller's next act is " +
+      '`state: "exported"` — a library that says the recording is final beside every ' +
+      'source still on disk, which no later launch will revisit because ' +
+      '`listInterruptedRetention` skips an exported recording.',
+    file: 'packages/format/src/fs/bundle.ts',
+    find: "  if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;\n  throw error;",
+    replace: '  void error;\n  return null;',
+    mustFail: [PHASE9],
+  },
+  {
+    name: 'two-exports-of-one-recording-are-allowed-to-race',
+    breaks:
+      'the refusal phase 9 made necessary. Two jobs for one recording resolve the ' +
+      'same `<name>.mp4`, and the destination claim in `ProjectStore` only spans a ' +
+      "writer's life — so the second renames over an export the first already had " +
+      'verified, hashed and recorded, and a `discardExport` on its own failure unlinks ' +
+      'it. The first job has by then deleted the sources, which leaves the user ' +
+      'neither their footage nor their finished file: the one outcome nothing else in ' +
+      'this application can produce.',
+    file: 'apps/main/src/export/session.ts',
+    find:
+      '    const heldBy = this.#exporting.get(id);\n' +
+      '    if (heldBy !== undefined) throw new ExportRecordingBusyError(id, heldBy);',
+    replace: '    const heldBy = this.#exporting.get(id);\n    void heldBy;',
+    mustFail: [EXPORT_SESSION],
   },
   {
     name: 'a-failed-verification-does-not-stop-the-export',

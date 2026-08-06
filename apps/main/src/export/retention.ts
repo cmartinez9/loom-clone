@@ -56,15 +56,17 @@
  * outcome instead of throwing, and the export carries it on `ExportResult`.
  */
 
-import { RETENTION_SOURCE_DIRECTORIES, isoTimestamp, mayDeleteSources } from '@loom/format';
-import type { ExportRecord, RecordingId, RecordingSummary } from '@loom/format';
+import {
+  RETENTION_SOURCE_DIRECTORIES,
+  isoTimestamp,
+  mayDeleteSources,
+  newRetentionRecord,
+} from '@loom/format';
+import type { ExportRecord, RecordingId, RecordingSummary, RetentionRecord } from '@loom/format';
 
 /** What {@link applyRetention} needs of `ProjectStore`. Satisfied structurally. */
 export interface RetentionStore {
-  recordRetention: (
-    id: RecordingId,
-    retention: { sourcesDeletedAt: string; reason: 'export-verified' },
-  ) => Promise<void>;
+  recordRetention: (id: RecordingId, retention: RetentionRecord) => Promise<void>;
   deleteSources: (
     id: RecordingId,
     directories: readonly ('media' | 'events' | 'cursors' | 'thumbs')[],
@@ -130,10 +132,7 @@ export async function applyRetention(
     // §7.5's three steps, in §7.5's order. See the table above: this order is what
     // makes a crash at any instant recoverable, and the reverse of it is what makes a
     // recording that looks editable with half its media.
-    await store.recordRetention(id, {
-      sourcesDeletedAt: isoTimestamp(),
-      reason: 'export-verified',
-    });
+    await store.recordRetention(id, newRetentionRecord(isoTimestamp()));
     await step('recorded', id);
     const removed = await store.deleteSources(id, RETENTION_SOURCE_DIRECTORIES, {
       betweenEntries: (path) => step('entry', path),

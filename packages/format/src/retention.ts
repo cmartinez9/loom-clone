@@ -68,6 +68,27 @@ export const RETENTION_COPY = {
   deleteHint: 'The export is checked before anything is deleted. A failed export deletes nothing.',
   /** After the fact, on a recording whose sources are gone. */
   exported: 'The sources were deleted after the export was verified. This recording is final.',
+  /** After the fact, when the escape hatch or a refusal left the sources alone. */
+  kept: 'The original recording was kept.',
+  /**
+   * After the fact, on the third state: authorised, begun, and not finished.
+   *
+   * It exists because `sourcesDeleted` has three outcomes and {@link RETENTION_COPY}
+   * had two sentences, so a half-deleted recording was being reported with
+   * {@link RETENTION_COPY.kept} — a false assurance about data that is partly gone,
+   * discovered only when the user tries to edit it. The captain's standard is the one
+   * he set for a damaged recording that still opens: say what happened, name what
+   * survived and what did not, and do not imply an outcome the disk does not support.
+   *
+   * The last sentence is a statement of fact rather than a hope: step 1 wrote the
+   * `retention` record before anything was unlinked, so `listInterruptedRetention`
+   * finds this recording and `resumeInterruptedRetention` finishes it at the next
+   * launch.
+   */
+  deletionFailed:
+    'Removing the original recording was authorised and did not finish. Some of its ' +
+    'screen, camera, audio and cursor data has been deleted, so it may no longer open ' +
+    'for editing. The app will finish removing it the next time it starts.',
 } as const;
 
 /** Why the sources may not go. Every reason, so a caller can say all of them. */

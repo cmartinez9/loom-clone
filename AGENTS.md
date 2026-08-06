@@ -384,7 +384,14 @@ clipboard, and `#run`'s `catch` discards the output, so a cleanup error there wo
 the user's finished video away. `ExportResult.sourcesDeleted` is what actually happened
 and is **not** the negation of `sourcesKept` — an authorised deletion that failed
 part-way is a third state, and a surface that inferred "final" from the checkbox would
-be lying in both directions.
+be lying in both directions. That third state is `retentionError`, carried beside
+`retentionReasons` for the same reason phase 8 carries the other three: a signal that
+cannot be inspected is not a signal. The library says all three in
+`apps/renderer/src/library/export-notice.ts` — pure, so what the user is told is pinned
+by `npm test` rather than eyeballed — out of `RETENTION_COPY`'s `exported`, `kept` and
+`deletionFailed`, which is where the before-the-export warning lives so the two cannot
+drift. Telling someone their recording "was kept" when half its media is gone is worse
+than silence: it is a false assurance they discover only when they try to edit.
 
 **The gate is `apps/main/test/phase9-retention.test.ts`**: the real `ExportSession` over
 a real bundle with real bytes in `media/` and `events/`, failed at **each** of
@@ -423,6 +430,29 @@ deletion unconditional, which is the mutation the gate exists for.
   function.** Same bargain as `WriteAtomicPacing`, and the same justification: a harness
   that wrote §7.5's three steps out itself would keep passing after they were reordered.
   Production callers pass nothing.
+- **Only `ENOENT` means "already deleted".** `deleteBundleSources` tolerates a directory
+  that is not there — that is what makes the resume idempotent — and **raises everything
+  else**. A swallowed `EACCES`/`EIO`/`ENOTDIR` reports a directory it could not read as
+  one it emptied, and the caller's next act is `state: "exported"`: the library saying
+  the recording is final beside every source still on disk. That is the first state
+  `contradictions()` forbids and the only unrecoverable one, because
+  `listInterruptedRetention` skips an `exported` recording and no later launch would
+  look at it again. `retention-treats-an-unreadable-directory-as-an-empty-one` is the
+  mutation.
+- **Two exports of one recording are refused; two recordings sharing one _name_ are
+  not.** `ExportSession.start` throws `ExportRecordingBusyError` when a live job already
+  holds that `RecordingId` — claimed before the first `await` and before `openProject`,
+  released in `#run`'s `finally` on every exit path. It is refused rather than made safe
+  because the alternative is an invariant held across two jobs, a `rename(2)` and a
+  deletion, guarding a case nobody wants. **What it does not reach**: two _different_
+  recordings whose `safeFileName(project.name)` collides (two "Untitled"s) still resolve
+  to the same `<name>.mp4`. Phase 8 accepted that knowingly in `discardExport`'s docblock
+  — _"an earlier good export sharing the name is what that costs"_ — when it cost an old
+  export; with retention it can cost a deleted recording's only file, because the second
+  job's `rename(2)` replaces a verified export and its `discardExport` unlinks the shared
+  path. `ProjectStore`'s destination claim only spans a **writer's** life, so it does not
+  close it either. Recorded rather than fixed: it needs a durable claim on the output
+  name, which is a decision, not a patch.
 
 ## The generators, in one paragraph
 

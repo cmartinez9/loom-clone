@@ -326,6 +326,36 @@ export async function directorySize(dir: string): Promise<number> {
 }
 
 /**
+ * Widens the deletion window so a `SIGKILL` can be aimed inside it.
+ *
+ * The same bargain — and the same justification — as {@link WriteAtomicPacing}: set
+ * only by `apps/main/test/retention-crash.test.ts`, so that test can kill *this*
+ * function part-way through rather than a copy of it. A harness that re-implemented
+ * the loop would keep passing after a regression here, and the regression here costs
+ * the user their footage. Production callers pass nothing.
+ */
+export interface DeleteSourcesPacing {
+  /** Awaited after each entry is unlinked, with the path that went. */
+  betweenEntries?: (path: string) => Promise<void>;
+}
+
+/**
+ * `null` for the one error that means "already deleted"; everything else is raised.
+ *
+ * The distinction is the whole of §7.5's crash story. `ENOENT` is the state a
+ * previous run left and the reason this function is idempotent. Any *other* failure
+ * to read or sync a directory — `EACCES`, `EIO`, `ENOTDIR`, `EMFILE` — means the
+ * sources may still be there, and swallowing it reports an emptied bundle to a caller
+ * whose next act is `state: "exported"`. That is the one end state the ordering
+ * exists to make impossible, and it is unrecoverable: `listInterruptedRetention`
+ * skips an `exported` recording, so no later launch would ever look at it again.
+ */
+function missingIsFine(error: unknown): null {
+  if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+  throw error;
+}
+
+/**
  * Unlink the raw sources of one bundle. Architecture report §7.5, step 2.
  *
  * The captain's retention decision deletes the user's **only** copy of their raw
@@ -346,21 +376,11 @@ export async function directorySize(dir: string): Promise<number> {
  * without a directory sync and neither is `unlink(2)`; without this, `state:
  * "exported"` could reach the disk while the media it claims to have deleted comes
  * back, which is the one end state §7.5's ordering exists to make impossible.
- */
-
-/**
- * Widens the deletion window so a `SIGKILL` can be aimed inside it.
  *
- * The same bargain — and the same justification — as {@link WriteAtomicPacing}: set
- * only by `apps/main/test/retention-crash.test.ts`, so that test can kill *this*
- * function part-way through rather than a copy of it. A harness that re-implemented
- * the loop would keep passing after a regression here, and the regression here costs
- * the user their footage. Production callers pass nothing.
+ * Only a missing directory is tolerated — see {@link missingIsFine}. Anything else
+ * is raised, so a deletion that could not happen reaches the caller as a failure
+ * rather than as a success it will act on.
  */
-export interface DeleteSourcesPacing {
-  /** Awaited after each entry is unlinked, with the path that went. */
-  betweenEntries?: (path: string) => Promise<void>;
-}
 export async function deleteBundleSources(
   paths: BundlePaths,
   directories: readonly ('media' | 'events' | 'cursors' | 'thumbs')[],
@@ -369,7 +389,7 @@ export async function deleteBundleSources(
   const removed: string[] = [];
   for (const name of directories) {
     const dir = paths[name];
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+    const entries = await readdir(dir, { withFileTypes: true }).catch(missingIsFine);
     // A directory that is not there is a deletion that already happened, not an
     // error: this runs again after a crash, on purpose.
     if (entries === null) continue;
@@ -379,7 +399,7 @@ export async function deleteBundleSources(
       removed.push(path);
       if (pacing.betweenEntries !== undefined) await pacing.betweenEntries(path);
     }
-    const handle = await open(dir, 'r').catch(() => null);
+    const handle = await open(dir, 'r').catch(missingIsFine);
     if (handle !== null) {
       try {
         await handle.sync();
