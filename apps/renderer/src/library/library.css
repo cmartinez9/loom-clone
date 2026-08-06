@@ -139,6 +139,53 @@ h1.t-d1 {
   margin-left: auto;
 }
 
+/* ---------- §7.1's recovery notice ----------
+   The permission banner's shape in the "something happened and it is fine" key
+   rather than the danger key: a repaired recording is good news reported honestly,
+   not a fault, and painting it in `--danger` would send a user looking for something
+   to fix. `--audio` is the same ochre §7.4's camera notice already uses for
+   "a thing happened to your recording". */
+.recovery-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  padding: 11px 13px;
+  border: var(--line) solid var(--audio);
+  border-radius: var(--r-sm);
+  background: var(--audio-wash);
+}
+
+/* The same `[hidden]` trap `recorder.css` documents: an author `display` outranks
+   the UA's `[hidden] { display: none }`, so a flex banner needs this or it sits over
+   the library permanently. */
+.recovery-banner[hidden] {
+  display: none;
+}
+
+.recovery-banner .ic-slot {
+  flex: none;
+  margin-top: 1px;
+  color: var(--audio);
+}
+
+.recovery-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.recovery-banner p {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--ui-sm);
+  line-height: 1.55;
+}
+
+.recovery-heading {
+  font-weight: 600;
+}
+
 /* ---------- rows ---------- */
 .rows {
   list-style: none;

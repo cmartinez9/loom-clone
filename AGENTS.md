@@ -111,6 +111,10 @@ apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    §7.5 verification, `retention.ts` — the delete-after-export path
                    and its launch-time resume — the file clipboard, §5.3's
                    stream-copy plan), loom:// protocol, IPC.
+                   `recorder/disk-monitor.ts` is §7.2's 2 s poll and `disk.ts` the four
+                   lines that compose its preflight reading — the decision and the copy
+                   are `@loom/ipc`'s, the syscall is `ProjectStore.diskSpace`'s, and
+                   this is what sits between them.
                    `input-sampler.ts` is the sampler's only seam onto the world — the
                    `EventLogSink` backed by `ProjectStore`, and the clock reading
                    `t0Us` is derived from. `verify/marker.ts` is the paint-capture-count
@@ -959,6 +963,92 @@ turning the flag off at runtime. Breaking the flag at the role is what would tes
 and there is no longer a mutation that does: the property's only guard is the harness
 check's control window, and it has survived a version of this measurement whose control
 was not a control.
+
+## The disk monitor, in one paragraph
+
+Report §7.2, phase 13, and it is deliberately three layers. The **decision and the
+copy** are pure and live together in `@loom/ipc` — `DISK_THRESHOLDS`, `classifyDisk`,
+`diskRefusesStart`, `diskRequiresStop`, `measureCaptureRate`, `DISK_COPY` — for
+`exportFrameCount`'s reason (main acts on them, the HUD and library render them, and a
+threshold with two copies is a banner saying one thing beside a monitor doing another)
+and for `RETENTION_COPY`'s (the promise and the act read from one place). The
+**measurement** is `ProjectStore.diskSpace()`, `statfs` on the recordings root, because
+§0 rule 2 puts every syscall against the disk behind that class; `bavail` not `bfree`,
+since the difference is root's reserve. The **act** is
+`apps/main/src/recorder/disk-monitor.ts`, a 2 s poll wired into `RecorderSession` with
+its reader injected — the default is the shipping `store.diskSpace()` and a test drives
+it instead, which is the only way to watch a threshold being crossed without filling a
+real volume. §7.2's stop is the **ordinary `stop()`**: the capture page flushes, parts
+finalize from the end report, the bundle reaches `editable`, and that is what makes the
+file playable rather than the half-written fragment the section exists to prevent. The
+capture page therefore reports a perfectly ordinary `reason: 'stopped'` and only main
+knows why — `Active.stopReason`, set at the instant the monitor decides, is what
+`endReasonFor` reads, and it is what finally **produces** `PartEndReason`'s `disk-full`.
+The preflight floor is enforced in `RecorderSession.start` and not only reported by
+`recorder.preflight`: a refusal that lives in the advice alone is one a menu item or
+`smoke-capture.mjs` walks past. It is carried on `PreflightReport.disk` rather than
+folded into `blocking`, which stays permissions-only — a full disk has no pane to open.
+
+**The monitor is an accessory and the recording outranks it**, the same rule §7.3 gives
+audio and §7.4 the camera, applied to an instrument rather than a device: every callback
+is wrapped, a `statfs` that throws becomes a reading of `level: 'unknown'`, and every
+predicate answers "no" for `unknown` — so a volume this process cannot measure refuses
+nothing and stops nothing. A monitor that could fail a recording would be a new way to
+lose footage installed by the thing meant to prevent one.
+
+**The capacity estimate is measured, and says whose measurement it is.**
+`CaptureRate.source` is `measured` or `reference` and is never smoothed away: during a
+recording the rate is that recording's own bytes (counted at the `appendMediaChunk`
+seam, `Active.bytesWritten`) over its own media seconds past a 2 s floor; before one it
+is `measureCaptureRate` over the user's own library, weighted by seconds; and
+`REFERENCE_CAPTURE_RATE_BYTES_PER_SEC` — research §5.6's 76 MB/min — answers only a
+first run. §5.6 measured a 35× spread between an idle screen and full-screen animation,
+so a bare "≈ 42 min available" from that constant is a sentence about somebody else's
+screen.
+
+**§7.2's "< 2 min of headroom" clause cannot fire, and is kept at §7.2's value anyway** —
+the shape `minDurationSec: 1.0` already has in `auto-zoom.ts`. Two minutes of headroom
+is below the 1 GB stop for any rate under 500 MB/min and §5.6's _worst_ measured content
+is 146 MB/min, so the byte floors are always reached first. It is implemented rather than
+dropped because it is the report's, and because a spec clause silently omitted is worse
+than one that is inert and says so; `packages/ipc/test/disk.test.ts` pins both halves.
+
+**The gate is `apps/main/test/phase13-disk.test.ts`**: the real `RecorderSession` writing
+the real H.264 fixture through the real `ProjectStore`, with the volume's answer driven
+down past 5 GB and then past 1 GB, ending `editable` with a part marked `disk-full`, a
+`media/screen.000.mp4` `/usr/bin/avconvert` remuxes, and a frame index carrying every
+frame that went in. Four controls, because each assertion passes for a wrong reason
+without one: a volume that never drops must not stop the recording and must write no
+`disk-full`; that recording's file must play too, so playability is about the interrupted
+run rather than the fixture; a reader that throws on every poll must leave the recording
+running; and the banner must have been _published_ below 5 GB and absent above it. Six
+`disk`/`preflight`/`monitor` entries in `npm run verify:mutation` break the production
+source on disk, none of them guarded only by a gate that can withhold.
+
+## Crash recovery is told to the user, and where its numbers come from
+
+Report §7.1 step 5 — _"Show the user: 'Recovered 4:52 of a 4:58 recording.' Never
+silently discard, never silently pretend it was clean."_ The repair has run at launch
+since phase 1 and reported to a `console.log` the user does not have, which is the
+second half of that sentence reached by omission. `RecorderSession.recoverOnLaunch` now
+**keeps** what it found (`recoveryReports()`), because the pass runs before any window
+exists and there is nobody to push to; the library **pulls** it on load through
+`library.recovery()`. `RECOVERY_COPY` in `@loom/ipc` is the words, and **every figure in
+them is the repair's own** — `recoveredSec`, `frameCount`, `truncatedBytes`, measured by
+scanning the fragments that survived. It states no loss window at all: this project's
+guarantee is frame-level (the fragment writer holds one sample), a stale string claiming
+otherwise has already had to be corrected here once, and both
+`packages/ipc/test/disk.test.ts` and `apps/main/test/recovery-notice.test.ts` refuse one.
+
+**Two library state notes were wrong about when recovery happens and are corrected.**
+`needs-recovery` said the bundle would be repaired _"when opened"_; it is repaired at
+launch, and a bundle still in that state when the library renders is one this launch's
+pass began and could not finish — `recoverBundle` writes the state before it repairs
+anything — so the next launch retries it. `recording` said _"was in progress when the
+app last closed"_, which contradicted the pulsing record dot beside it. Both now say
+what actually happened. `apps/main/test/recovery-notice.test.ts` is the gate, over a real
+crashed bundle through the shipping pass, with the control that an ordinary launch has
+nothing to say.
 
 ## Sharp edges
 

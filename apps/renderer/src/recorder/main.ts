@@ -23,7 +23,7 @@ import '@loom/design/css';
 import './recorder.css';
 import { formatDuration } from '@loom/design';
 import { PERMISSIONS } from '@loom/permissions';
-import type { OverlayStatus, RecorderStatus } from '@loom/ipc';
+import { DISK_COPY, type OverlayStatus, type RecorderStatus } from '@loom/ipc';
 
 const loom = window.loom;
 
@@ -36,6 +36,7 @@ const stopButton = must('stop') as HTMLButtonElement;
 const drawButton = must('draw') as HTMLButtonElement;
 const errorLine = must('error');
 const cameraLine = must('camera');
+const diskLine = must('disk');
 const revokedShelf = must('revoked');
 const revokedText = must('revoked-text');
 const revokedSettings = must('revoked-settings') as HTMLButtonElement;
@@ -129,6 +130,8 @@ render({
   camera: 'off',
   cameraParts: 0,
   revoked: null,
+  disk: null,
+  diskStop: null,
 });
 
 function render(status: RecorderStatus): void {
@@ -150,6 +153,7 @@ function render(status: RecorderStatus): void {
   counts.textContent = live || status.phase === 'finalizing' ? parts.join(' · ') : '';
 
   renderCamera(status);
+  renderDisk(status);
   renderRevoked(status);
 
   if (status.error !== null) {
@@ -174,7 +178,11 @@ function render(status: RecorderStatus): void {
  * second for the length of a recording, and the answer is the same every time.
  */
 function reportNoticeHeight(): void {
-  const height = cameraLine.offsetHeight + revokedShelf.offsetHeight + errorLine.offsetHeight;
+  const height =
+    cameraLine.offsetHeight +
+    diskLine.offsetHeight +
+    revokedShelf.offsetHeight +
+    errorLine.offsetHeight;
   if (height === reportedNoticeHeight) return;
   reportedNoticeHeight = height;
   loom.recorder.noticeHeight(height);
@@ -213,6 +221,44 @@ function renderCamera(status: RecorderStatus): void {
       ? 'Camera disconnected — still recording screen and audio.'
       : 'Camera unavailable — still recording screen and audio.';
   cameraLine.hidden = false;
+}
+
+/**
+ * §7.2's disk notices — the banner while recording, and what the stop left behind.
+ *
+ * Two states through one element, in the order the user meets them.
+ *
+ * **The stop notice wins and outlives the recording**, for exactly §7.3's reasons:
+ * by the time anyone reads it the recorder is back to `idle`, the recording it
+ * describes has finalized, and the one thing a user needs to know is that their
+ * footage is not lost. `DISK_COPY.stopped` says what happened; the duration says how
+ * much survived, and it is measured — `RecorderSession` reads it off the reference
+ * track at the instant the recording ended, not off a wall clock.
+ *
+ * **The banner is gated on the phase**, like §7.4's camera line and unlike §7.3's
+ * shelf: "space is running out" is a fact about a recording in progress, and leaving
+ * it up afterwards would be nagging about a recording that already finished.
+ *
+ * A reading of `unknown` shows nothing at all. A volume this app could not measure
+ * is not a volume it may make claims about — see `DiskLevel` — and a banner reading
+ * "free space could not be measured" on every recording is a banner nobody reads
+ * when it matters.
+ */
+function renderDisk(status: RecorderStatus): void {
+  const stopped = status.diskStop;
+  if (stopped !== null) {
+    diskLine.textContent = `${DISK_COPY.stopped} ${formatDuration(stopped.recordedSec)} is in your library.`;
+    diskLine.hidden = false;
+    return;
+  }
+  const recording = status.phase === 'recording' || status.phase === 'finalizing';
+  const disk = status.disk;
+  if (!recording || disk === null || (disk.level !== 'low' && disk.level !== 'critical')) {
+    diskLine.hidden = true;
+    return;
+  }
+  diskLine.textContent = DISK_COPY.banner(disk);
+  diskLine.hidden = false;
 }
 
 /**

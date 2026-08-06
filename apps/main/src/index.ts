@@ -250,7 +250,14 @@ async function main(): Promise<void> {
   const permissions = createPermissionManager();
 
   installLoomProtocol({ store, rendererRoot });
-  registerIpc({ store, appVersion: app.getVersion(), exports: exportSession });
+  registerIpc({
+    store,
+    appVersion: app.getVersion(),
+    exports: exportSession,
+    // Read through the recorder rather than snapshotted: `recoverOnLaunch` has not
+    // run yet at this point in startup. See `IpcContext.recovery`.
+    recovery: () => recorder.recoveryReports(),
+  });
   registerExportRenderIpc({
     exports: exportSession,
     isExportWindow: (window) => windows.roleOf(window) === 'export',

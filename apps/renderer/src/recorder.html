@@ -60,6 +60,14 @@
     <p class="hud-notice t-label" id="camera" hidden></p>
 
     <!--
+      §7.2's low-disk banner, and the notice its clean stop leaves behind. One
+      element for both: they are the same subject in sequence — "space is running
+      out" and then "space ran out, here is what was saved" — and a user who watched
+      the first should find the second where the first was.
+    -->
+    <p class="hud-notice t-label" id="disk" hidden></p>
+
+    <!--
       §7.3's revoked-permission notice, and the captain's
       `decision-mic-revocation.md`. Its own shelf rather than the error line,
       because the recording stopped but did not fail — everything captured up to

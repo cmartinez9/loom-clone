@@ -71,6 +71,14 @@
       -->
       <div class="perm-banner" id="perm-banner" role="status" hidden></div>
 
+      <!--
+        §7.1 step 5: *"Show the user: 'Recovered 4:52 of a 4:58 recording.' Never
+        silently discard, never silently pretend it was clean."* Recovery runs at
+        launch, before this window exists, so this is filled from a pull —
+        `library.recovery()` — rather than from an event nobody was there to receive.
+      -->
+      <div class="recovery-banner" id="recovery-banner" role="status" hidden></div>
+
       <ul class="rows" id="rows" aria-live="polite"></ul>
     </main>
   </body>
