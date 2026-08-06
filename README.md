@@ -165,12 +165,10 @@ means capturing the screen, so it lives in `npm run verify:permissions` beside p
 carries the readings an unpackaged dev run of the test it replaced produced, and says
 plainly that they are not evidence the shipped check has reproduced them.
 
-`npm run verify:mutation` proves those gates are real by breaking capture, the
-timeline model, the export, retention, the generators, the annotation path, the
-drawing overlay and the event logs one way at a time — editing the production source
-on disk — and requiring a test to fail each time. The one property it deliberately
-leaves uncovered, because no test in `npm test` can catch it, is named in `AGENTS.md`
-rather than papered over.
+`npm run verify:mutation` proves those gates are real by breaking the production source
+behind them one property at a time — editing it on disk — and requiring a test to fail
+each time. The one property it deliberately leaves uncovered, because no test in
+`npm test` can catch it, is named in `AGENTS.md` rather than papered over.
 
 ## Requirements
 
