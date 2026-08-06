@@ -111,6 +111,7 @@ export {
   compileClips,
   sourceDurationSec,
   sourceTimeAt,
+  timelineTimeAt,
   type CompiledClips,
 } from './clips.ts';
 

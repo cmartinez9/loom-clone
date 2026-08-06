@@ -122,10 +122,11 @@ apps/renderer/     renderer windows. First-run setup, library — including the 
                    capture page (screen in `capture/main.ts`, camera in
                    `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
                    the live drawing overlay (`overlay/main.ts`), the hidden export page
-                   (`export/`), the preview loop, and `media/` — the loom:// readers
+                   (`export/`), the preview loop, `media/` — the loom:// readers
                    both of them share, including `TrackReader`, which is what turns a
                    multi-part track into the one-part seam preview and export already
-                   speak. The editor later.
+                   speak — and `editor/`, the editor window: the preview host, the
+                   timeline and trimming.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -144,6 +145,16 @@ an adapter has to decide (where the `avcC` description comes from after a restar
 since `recording.json` does not carry it). `apps/renderer/src/media/loom-media.ts` is
 the adapter that answered it — out of the part's own initialisation segment, never a
 second copy beside it — and its header says why.
+
+**Two adapters currently answer that question, and that is a duplication to settle,
+not a design.** Phase 8's `media/track-reader.ts` (`TrackReader`, `openVideoTrack`)
+and phase 14's `editor/screen-source.ts` (`ScreenSource`) were written independently,
+both implement `PreviewSource` over a track's parts, and both read `avcC` out of the
+part's own initialisation segment. §4.5 puts *"which source frame is selected for a
+given time"* on the list preview and export may never disagree about, so two
+implementations of that selection is exactly the thing that list exists to prevent —
+one of them has to go, and `TrackReader` is the one both loops were already built to
+share.
 
 ## The four rules that are not style preferences
 
@@ -631,6 +642,118 @@ re-derive them here.
   `CGEventPost(kCGEventMouseMoved)` does not — synthesizing an _event_ is gated by
   Accessibility, moving the _pointer_ is not. That is why a corpus can be recorded on a
   machine with no grant, and why clicks cannot be.
+
+## The editor, in one paragraph
+
+Report §8 has a phase for the timeline _model_ (7), the _generators_ (10) and
+_annotations_ (11), and no phase that builds the window they live in; the captain
+settled that in `data/loom-scope/decision-editor-scope.md` ("full editor", with
+**track stacking and blending UI out of the MVP** and **manual zoom alongside the
+automatic generators**). `apps/renderer/src/editor/` is the shell half: the window,
+the preview host, playback transport, the timeline and trimming. The library's
+**Open** button sends `loom.editor.open(id)`; `apps/main/src/editor.ts` shows the
+`editor` role keyed by the recording — which is what §1.2's `multiple: true` already
+meant by one editor per recording — and puts the id in the page's URL, so a window is
+_told_ what it is showing. That module also owns the other half of the lifetime:
+**closing an editor closes the project**, because `openProject` took the bundle
+`.lock` and a lock held by a window nobody can see is a recording the app cannot
+record over with nothing on screen to explain it. It refuses to open the bundle the
+recorder is using, and refuses to close that one, for a sharper reason: `close()`
+aborts every media part still open, and those are capture's own file descriptors.
+
+**The framework question `library/main.ts` deferred to "phase 6 or 7" is answered
+here: vanilla TypeScript against the Pressroom design system, like the other four
+windows.** The argument is in `editor/main.ts`'s header and is not only consistency —
+the two things this window does sixty times a second are a WebGL draw and two style
+writes, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
+inherits the choice; re-taking it is a decision to write down, not one to drift into.
+
+**The timeline is drawn in _source_ time**, and that is the load-bearing layout
+decision (`timeline-geometry.ts` argues it). Its full width is the recording as
+captured; the trimmed-away head and tail stay on screen, dimmed, with the handles
+still on them. §3.2 anchors effect tracks in source time _"so that trimming does not
+re-time your zooms"_, so a timeline-time ruler would draw those tracks sliding under
+a trim they are explicitly independent of — and a keyframe placed by hand, which is
+`loom-p15`'s job, would not stay over the frame it was placed on. The playhead is
+the one thing that crosses: it is drawn at `resolve(...).sourceTime`, and a scrub
+converts back with `timelineTimeAt`. **A trim is `clips.set` with one clip and no new
+primitive**, at `speed: 1` always — `trim.ts` says why a speed control is not a local
+change.
+
+**There is no audio, deliberately.** §5.4 mechanism 4 requires playback time to come
+from the audio output's played-sample count and `PreviewLoop` accumulates
+`requestAnimationFrame` deltas, so sound against that clock would walk away from the
+scrub bar at the device's own error — 90 ms over thirty minutes at §5.5's 50 ppm.
+`packages/format/src/sync/align.ts`'s table now records mechanism 4 as unimplemented
+and says where it belongs; adding sound means implementing it first.
+
+**The gate is `test/editor-gate.test.ts`**, a real Electron run: a real `.loomrec`
+built from the committed H.264 fixture through the shipping writer, the real library
+window, its real Open button, the real editor. Its one assertion worth the whole
+gate: _trim two seconds off the front, and the picture at timeline 0 is
+**byte-for-byte** the picture that was at source 2.0 s before the trim_ — with the
+control beside it that source 0 and source 2.0 differ, or the equality would pass on
+any recording of a still screen and on a preview that decoded nothing after its first
+frame. `testsrc2` is what makes a pixel hash a fingerprint of a source instant. Five
+`preview-*`/`a-trim-*`/`the-part-*`/`the-timeline-*` entries in `npm run
+verify:mutation` break the production source and require it to notice. It
+deliberately does **not** time the frame budget: §8's 16.67 ms is
+`test/phase6-gate.test.ts`'s, and a second opinion about one number is a weaker one.
+
+## Sharp edges — the editor
+
+- **`ScreenSource` is seam S4's bridge, and both halves of it were undocumented.**
+  `SourceReader` knows one part in **part-relative** time (its sidecar's `pts` starts
+  at zero for that part) while `ResolvedState.sourceTime` is an offset on the
+  **recording clock** spanning every part. One reader per part, and every crossing
+  goes through `trackSourceTimeSec`. The other half is the `avcC`: `recording.json`
+  does not carry the codec description and `MetaMsg` is long gone by the time an
+  editor opens a bundle, so it is read back out of the container's own initialisation
+  segment with `parseInitSegment`. A source time inside a §7.4 hole selects the part
+  **after** it and the arithmetic then answers correctly with no special case —
+  negative part time, no frame in the index, `frameAt` null, the compositor holds, and
+  the watchdog stays quiet because time in which nothing was captured is not a stall.
+- **`edit.output.size` is `[1920, 1080]` on every bundle and nothing sets it from the
+  recording.** `newEditDocument()` is the only thing that writes it, so a 3456×2234
+  capture previews — and will export — letterboxed into 1080p. The editor shows the
+  number as a measured fact rather than overriding the document, which is how this was
+  noticed at all. Whoever owns output settings has to decide it; do not paper over it
+  in a renderer, because the exporter reads the same field.
+- **An author `display` outranks the UA's `[hidden] { display: none }`.** Every panel
+  in this window that toggles is a grid or a flex box, so without the `[hidden]` rule
+  at the top of `editor.css` the refusal card and the empty trouble line sit over the
+  editor permanently. `library.css` and `recorder.css` already carried the same note;
+  the editor still shipped without it until a screenshot showed it.
+- **`.stage` is `@loom/design`'s, not yours.** `components.css` owns a `.stage`
+  primitive — the one dark, theme-invariant surface — and a second rule of that name
+  in a page stylesheet takes its background depending on which sheet the bundler
+  emitted last. The editor's mat is `.mat`.
+- **A `<canvas>` cannot be fitted to a ratio in CSS alone.** It is a replaced element
+  with an intrinsic size, so every "contain this ratio in that box" goes circular: the
+  wrapper's size comes from the canvas and the canvas's percentage `max-*` resolve
+  against the wrapper. `fitStage` in `editor/main.ts` measures the mat and sets the
+  size in pixels; it is the one place that arithmetic lives.
+- **The lane area is `overflow: hidden`, so both ends of the recording need an
+  inset.** A trim handle centred on `x = widthPx` has half of itself — including its
+  hit target — clipped away, and "trim the very end" is a grab that lands on nothing.
+  `EDGE_PX` in `timeline-geometry.ts` is that inset. It was found by the gate dragging
+  a real pointer, not by reading the stylesheet, which is the argument for the gate
+  driving real input rather than synthetic events.
+- **A failed `applyOps` is repaired by the next edit, not latched.** The editor
+  applied the batch optimistically, so a send that failed leaves it one revision ahead
+  of disk with no op that could reconcile it; §2.7's conflict path is the repair —
+  main refuses the next batch and hands back what it holds. `EditorProject` remembers
+  only which of the two happened, so the reload names a disk error as one instead of
+  sending somebody looking for a second editor window that does not exist.
+- **`window.__loomEditor` is a read-only probe, not a capability.** `editor/probe.ts`
+  argues it: the gate has to be able to tell "the trim moved the picture" from "the
+  playhead moved and the picture did not", nothing in the DOM can, and a frame counter
+  counts a stale frame just as happily. A renderer can already read its own canvas, so
+  it grants nothing. Keep it read-only.
+- **The preview is rendered at `edit.output.size`, not at the window size.** CSS
+  scales the element; the composite is what the exporter will encode, at the
+  resolution it will encode it, and it does not change because somebody dragged a
+  corner. It also keeps the frame budget off the window geometry.
 
 ## Annotations, in one paragraph
 

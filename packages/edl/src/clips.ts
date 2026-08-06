@@ -96,6 +96,43 @@ export function sourceTimeAt(clips: CompiledClips, index: number, timelineTime: 
 }
 
 /**
+ * The inverse of {@link sourceTimeAt}: where a *source* instant lands on the
+ * timeline, or `null` when no clip covers it.
+ *
+ * It lives here rather than in whichever consumer needed it first because §3.1's
+ * *"the only thing that maps between them is the clip list"* is a claim about this
+ * module, and a second implementation of the mapping — however small — is a second
+ * thing that can disagree with `resolve`. `packages/edl/test/clips.test.ts` pins the
+ * two against each other rather than against arithmetic written out twice.
+ *
+ * **`null` is a real answer and the caller has to mean something by it.** A source
+ * instant that has been trimmed away, or that falls in the hole between two clips,
+ * is not on the output at all; there is no timeline time to return and the nearest
+ * one is a decision (clamp to the cut, or refuse) that belongs to whoever is asking.
+ * The editor's ruler draws the whole *source* extent, so the trimmed-away head and
+ * tail are exactly the region this answers `null` for, and it clamps the playhead
+ * rather than inventing a position for a frame the output does not contain.
+ *
+ * A source time covered by more than one clip — the same material used twice — is
+ * answered with its **first** occurrence. That is the only choice that is stable
+ * under editing: the alternatives (last, or nearest to some other time) move the
+ * answer when an unrelated clip is added.
+ */
+export function timelineTimeAt(clips: CompiledClips, sourceTime: Seconds): Seconds | null {
+  for (let i = 0; i < clips.count; i++) {
+    const sourceStart = clips.sourceStarts[i] ?? 0;
+    const speed = clips.speeds[i] ?? 1;
+    const start = clips.starts[i] ?? 0;
+    const next =
+      i + 1 < clips.count ? (clips.starts[i + 1] ?? clips.durationSec) : clips.durationSec;
+    const sourceEnd = sourceStart + (next - start) * speed;
+    if (sourceTime < sourceStart || sourceTime > sourceEnd) continue;
+    return start + (sourceTime - sourceStart) / speed;
+  }
+  return null;
+}
+
+/**
  * Where the captured material ends, on the recording clock.
  *
  * The video tracks, not the audio ones: §5.4 aligns tracks by `startTimeSec` on one

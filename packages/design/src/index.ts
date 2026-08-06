@@ -15,4 +15,10 @@
 export { ICONS, icon, isIconName, mountIcons, type IconName } from './icons.ts';
 
 /** Formatting helpers for the values this design language sets in Martian Mono. */
-export { formatBytes, formatDuration, formatTimecode, formatRelativeDate } from './format.ts';
+export {
+  formatBytes,
+  formatDuration,
+  formatTimecode,
+  formatTimecodeCentis,
+  formatRelativeDate,
+} from './format.ts';

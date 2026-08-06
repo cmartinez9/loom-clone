@@ -65,6 +65,7 @@ import type {
   EditOp,
   ExportVerification,
   PartEndReason,
+  ProjectDoc,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
@@ -86,6 +87,7 @@ export type {
   PartEndReason,
   PermissionKind,
   PermissionReport,
+  ProjectDoc,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
@@ -127,8 +129,42 @@ export function isConflict(result: ApplyOpsResult): result is { conflict: EditDo
   return 'conflict' in result;
 }
 
+export interface EditorApi {
+  /**
+   * Show the editor for one recording, opening a window if there is not one.
+   *
+   * Send-only, like `recorder.open` and `setup.open`: the library asks for a
+   * window and main owns the window. There is no return trip because there is
+   * nothing to return — the editor reports its own failure to open a project, on
+   * its own surface, where the person who asked for it is looking.
+   *
+   * `id` is the window key as well as the subject, so "one editor per recording"
+   * is what the registry already means by a multi-instance role rather than
+   * bookkeeping laid on top of it (§1.2). Main puts the id in the page's URL; the
+   * page does not get to choose which recording it is showing.
+   */
+  open(id: RecordingId): void;
+}
+
+/**
+ * What `project.open` answers with.
+ *
+ * §1.4's sketch names two of the three. `project` is the third, added by phase 14
+ * because the editor needs two facts that live only in `project.json` and nowhere
+ * else it can reach: the recording's **name**, which is what its window is called,
+ * and its **state**, because §2.2's `exported` means the sources were deleted after
+ * a verified export (captain decision 5) and an editor must refuse that rather than
+ * open a window onto files that are gone. The alternative was `library.list()`,
+ * which walks every bundle on disk to answer a question about one of them.
+ */
+export interface OpenedProject {
+  project: ProjectDoc | null;
+  recording: RecordingDoc | null;
+  edit: EditDocument;
+}
+
 export interface ProjectApi {
-  open(id: RecordingId): Promise<{ recording: RecordingDoc | null; edit: EditDocument }>;
+  open(id: RecordingId): Promise<OpenedProject>;
   applyOps(id: RecordingId, ops: EditOp[], baseRevision: number): Promise<ApplyOpsResult>;
   /**
    * A `loom://` URL for one media part, served by `protocol.handle()` in main with
@@ -1235,6 +1271,7 @@ export interface AppApi {
  */
 export interface LoomApi {
   app: AppApi;
+  editor: EditorApi;
   library: LibraryApi;
   permissions: PermissionsApi;
   project: ProjectApi;
@@ -1283,6 +1320,9 @@ export const CHANNEL = {
   permissionsRelaunch: 'loom.permissions.relaunch',
   /** event: main -> renderer, on focus after a status changed */
   permissionsChanged: 'loom.permissions.changed',
+
+  /** send-only */
+  editorOpen: 'loom.editor.open',
 
   /** send-only */
   setupOpen: 'loom.setup.open',
@@ -1376,6 +1416,7 @@ export const INVOKE_CHANNELS: readonly ChannelName[] = [
 
 export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.appRevealRoot,
+  CHANNEL.editorOpen,
   CHANNEL.libraryReveal,
   CHANNEL.permissionsOpenSettings,
   CHANNEL.permissionsRelaunch,
@@ -1499,7 +1540,25 @@ export function recordingUrl(id: RecordingId, relativePath: string): string {
   return `${LOOM_SCHEME}://${LOOM_HOST.recording}/${encodeURIComponent(id)}/${encoded}`;
 }
 
-/** `loom://app/library.html` */
-export function appUrl(file: string): string {
-  return `${LOOM_SCHEME}://${LOOM_HOST.app}/${file}`;
+/**
+ * The query parameter naming the recording a window is showing.
+ *
+ * Declared here because two processes read it: main writes it into the URL it
+ * loads a window with, and the page parses it out of `location.search`. A page
+ * cannot change it — nothing in this app navigates (`windows.ts` cancels
+ * `will-navigate`), so the only value a window ever sees is the one main opened it
+ * with.
+ */
+export const SUBJECT_PARAM = 'id';
+
+/**
+ * `loom://app/library.html`, or `loom://app/editor.html?id=…`.
+ *
+ * The query is built here rather than concatenated by callers so that an id
+ * containing a `?`, a `&` or a `/` is escaped once, in one place, on its way into
+ * a URL that a protocol handler then splits on those very characters.
+ */
+export function appUrl(file: string, search: Readonly<Record<string, string>> = {}): string {
+  const query = new URLSearchParams(search).toString();
+  return `${LOOM_SCHEME}://${LOOM_HOST.app}/${file}${query === '' ? '' : `?${query}`}`;
 }

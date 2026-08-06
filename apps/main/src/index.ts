@@ -22,6 +22,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHANNEL, type PermissionReport } from '@loom/ipc';
 import { probeInput } from '@loom/sampler';
+import { EditorWindows } from './editor.ts';
 import { DEFAULT_RECORDINGS_SUBPATH, LOOM_BUNDLE_ID, LOOM_PRODUCT_NAME } from './identity.ts';
 import { helperPathFor } from './input-sampler.ts';
 import { PermissionManager } from './permissions.ts';
@@ -151,6 +152,20 @@ const exportSession = new ExportSession({
 });
 
 /**
+ * The editor windows, and the bundle lock each one holds while it is open.
+ *
+ * `activeRecordingId` comes off the live recorder rather than being cached: an
+ * editor may be closed at any instant, including while a recording is running, and
+ * the question this answers — "would closing this project pull a file descriptor
+ * out from under capture" — has no true answer that is older than now.
+ */
+const editors = new EditorWindows({
+  store,
+  windows,
+  activeRecordingId: () => recorder.status().recordingId,
+});
+
+/**
  * The permission manager — built inside {@link main}, after `settings.json` has been
  * read, and never at module scope.
  *
@@ -244,6 +259,7 @@ async function main(): Promise<void> {
   permissions.install();
   recorder.install();
   overlay.install();
+  editors.install();
 
   // macOS never tells an app that a grant was given: the user leaves for System
   // Settings, flips a switch and comes back. Regaining focus is the closest thing to

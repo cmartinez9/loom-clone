@@ -30,7 +30,6 @@ import {
   type CaptureOptions,
   type ChunkMsg,
   type ClearMsg,
-  type EditDocument,
   type EditOp,
   type EraseMsg,
   type ExportChunkMsg,
@@ -45,13 +44,13 @@ import {
   type ExportSettingsOverride,
   type LoomApi,
   type MetaMsg,
+  type OpenedProject,
   type OverlayStatus,
   type PartEndMsg,
   type PermissionKind,
   type PermissionReport,
   type PreflightReport,
   type RecorderStatus,
-  type RecordingDoc,
   type RecordingId,
   type RecordingSummary,
   type SetupState,
@@ -88,6 +87,17 @@ const api: LoomApi = {
     info: (): Promise<AppInfo> => ipcRenderer.invoke(CHANNEL.appInfo) as Promise<AppInfo>,
     revealRecordingsRoot: (): void => {
       ipcRenderer.send(CHANNEL.appRevealRoot);
+    },
+  },
+
+  /**
+   * Ask main for an editor. Send-only, like `recorder.open` — the library asks for
+   * a window and main owns the window, which is also why the id it is given is
+   * checked there rather than here.
+   */
+  editor: {
+    open: (id: RecordingId): void => {
+      ipcRenderer.send(CHANNEL.editorOpen, id);
     },
   },
 
@@ -133,11 +143,8 @@ const api: LoomApi = {
   },
 
   project: {
-    open: (id: RecordingId): Promise<{ recording: RecordingDoc | null; edit: EditDocument }> =>
-      ipcRenderer.invoke(CHANNEL.projectOpen, id) as Promise<{
-        recording: RecordingDoc | null;
-        edit: EditDocument;
-      }>,
+    open: (id: RecordingId): Promise<OpenedProject> =>
+      ipcRenderer.invoke(CHANNEL.projectOpen, id) as Promise<OpenedProject>,
     applyOps: (id: RecordingId, ops: EditOp[], baseRevision: number): Promise<ApplyOpsResult> =>
       ipcRenderer.invoke(CHANNEL.projectApplyOps, id, ops, baseRevision) as Promise<ApplyOpsResult>,
     mediaUrl: (id: RecordingId, track: TrackKey, part: number): Promise<string> =>

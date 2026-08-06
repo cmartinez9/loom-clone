@@ -1,0 +1,519 @@
+/* ============================================================================
+   The editor window.
+
+   `data/loom-design/a-editor.html` is the approved mockup and this is that layout
+   on the semantic tokens in `@loom/design`: a 46px top bar, a body of
+   rail | mat | inspector, and the timeline across the bottom.
+
+   Three of the language's rules bite hardest here, so they are restated where they
+   are easiest to erode:
+
+     1. NOTHING ON THE INPUT PATH ANIMATES. The playhead, the trim handles and the
+        ruler are `--t-instant`. A playhead that eases is a playhead that is not on
+        the frame the pointer is on.
+     2. A SHADOW MEANS "FLOATS ABOVE YOUR DESKTOP". The transport pill over the
+        picture is the only thing in this window with one; every panel is a keyline.
+     3. THE STAGE IS ALWAYS DARK. `--stage*` does not flip with the theme, because
+        footage has to be judged against a constant ground.
+
+   The mockup's mat is a checkerboard drawn with `repeating-linear-gradient`.
+   It is a flat `--bg-deep` here instead: `packages/design/test/no-generic-look.test.ts`
+   refuses every gradient function in this tree, the pattern is decoration rather
+   than information, and a mat that is one flat colour is a better neighbour to a
+   picture than one that is not.
+   ============================================================================ */
+
+/* An author `display` outranks the UA's `[hidden] { display: none }` — the same
+   trap `library.css` and `recorder.css` already call out, and every panel in this
+   window that toggles is a grid or a flex box. Without this the refusal card and
+   the empty trouble line are both on screen the whole time, over the editor. */
+[hidden] {
+  display: none !important;
+}
+
+.editor-body {
+  height: 100vh;
+  display: grid;
+  /* The timeline is `auto`: it is as tall as the lanes `recording.json` produced,
+     and a screen-only recording gets two of them rather than 302 px of empty paper
+     under them. The picture takes what is left, which is what the stage is for. */
+  grid-template-rows: 46px 1fr auto auto;
+  overflow: hidden;
+}
+
+/* ---------- top bar ---------- */
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  background: var(--bg-sunken);
+  border-bottom: var(--line) solid var(--keyline);
+  height: 46px;
+}
+.top-name {
+  font-weight: var(--w-bold);
+  font-size: var(--ui);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+.top-meta {
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+.top-sp {
+  margin-left: auto;
+}
+.vr {
+  width: var(--line-thin);
+  height: 22px;
+  flex: none;
+  background: var(--divider);
+}
+
+/* Icon-only control, borrowed from the mockup's `.ib`. */
+.ib {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background var(--t-hover) var(--e-soft);
+}
+.ib:hover:not(:disabled) {
+  background: var(--bg-deep);
+}
+.ib:disabled {
+  color: var(--fg-faint);
+  cursor: default;
+}
+.ib[aria-pressed='true'] {
+  background: var(--select-bg);
+  color: var(--select-fg);
+}
+
+/* ---------- refusal ---------- */
+.refusal {
+  grid-row: 2 / 5;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+}
+.refusal-card {
+  max-width: 56ch;
+  padding: var(--sp-5);
+  display: grid;
+  gap: var(--sp-2);
+  justify-items: start;
+  color: var(--fg);
+}
+.refusal-card h1 {
+  margin: 0;
+}
+.refusal-card p {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--ui);
+  line-height: var(--ui-lh);
+}
+.refusal-card .ic-slot {
+  color: var(--accent);
+}
+
+/* ---------- body ---------- */
+.body {
+  display: grid;
+  grid-template-columns: 50px 1fr 296px;
+  min-height: 0;
+}
+
+.rail {
+  background: var(--bg-sunken);
+  border-right: var(--line) solid var(--keyline);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: var(--sp-2) 0;
+}
+.tb {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--fg);
+  border: var(--line) solid transparent;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--t-hover) var(--e-soft);
+}
+.tb:hover {
+  background: var(--bg-deep);
+  border-color: var(--divider);
+}
+.tb[aria-pressed='true'] {
+  background: var(--select-bg);
+  color: var(--select-fg);
+  border-color: var(--keyline);
+}
+
+/* ---------- the mat, and the picture on it ----------
+   `.mat`, not `.stage`: `@loom/design`'s components.css already owns a `.stage`
+   primitive — the one dark, theme-invariant surface — and a second rule of the same
+   name in this file quietly took its background depending on which stylesheet the
+   bundler emitted last. The dark surface here is the picture's own frame (`.film`,
+   below), which is what `--stage` is for; the mat around it is paper. */
+.mat {
+  background: var(--bg-deep);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  min-width: 0;
+  min-height: 0;
+}
+/* The picture. Its pixel size is `edit.output.size`; its size on screen is set in
+   JS from the measured mat, because a canvas has an intrinsic size and CSS has no
+   way to say "fit this ratio inside that box" that does not go circular through it.
+   `main.ts`'s `fitStage` is the one place that arithmetic lives. */
+.film {
+  position: relative;
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--stage);
+}
+.film canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.mat-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: var(--sp-2);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+/* The one floating object in this window, so the one thing with a shadow. */
+.cf {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: 32px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  pointer-events: auto;
+}
+.cf .tcode {
+  padding: 0 var(--sp-2);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* ---------- inspector ---------- */
+.insp {
+  border-left: var(--line) solid var(--keyline);
+  background: var(--bg-raised);
+  overflow: auto;
+  min-height: 0;
+}
+.insp-h {
+  position: sticky;
+  top: 0;
+  background: var(--bg-sunken);
+  border-bottom: var(--line) solid var(--keyline);
+  padding: var(--sp-2) var(--sp-4);
+}
+.insp-h .t-d4 {
+  margin: 0;
+}
+.insp-facts {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  display: grid;
+  gap: 6px;
+}
+.insp-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.insp-facts dt {
+  flex: none;
+  width: 92px;
+  font-size: var(--ui-sm);
+  color: var(--fg-subtle);
+}
+.insp-facts dd {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: var(--num-sm);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.insp-note {
+  margin: 0;
+  padding: 0 var(--sp-4) var(--sp-4);
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+  color: var(--fg-subtle);
+}
+
+/* ---------- the trouble line ----------
+   Between the picture and the timeline, where someone looking at either will see
+   it. §10.2: a clear error beats a spinner. */
+.trouble {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--accent-wash);
+  border-top: var(--line) solid var(--accent);
+  color: var(--accent-press);
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+}
+.trouble .ic-slot {
+  color: var(--accent);
+}
+
+/* ---------- timeline ---------- */
+.tl {
+  border-top: var(--line) solid var(--keyline);
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: 34px auto;
+  min-height: 0;
+  /* A recording with every track and a long effect stack still cannot push the
+     picture off the window: past this the lane area scrolls. */
+  max-height: 45vh;
+}
+.tl-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  border-bottom: var(--line-thin) solid var(--divider);
+  background: var(--bg-sunken);
+}
+.tl-bar .tc {
+  font-weight: 500;
+}
+.tl-bar .tc .tot {
+  color: var(--fg-subtle);
+}
+.tl-hint {
+  font-size: var(--ui-sm);
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-zoom {
+  width: 46px;
+  text-align: center;
+  color: var(--fg-subtle);
+}
+
+.tl-body {
+  display: grid;
+  grid-template-columns: 112px 1fr;
+  min-height: 0;
+  overflow-y: auto;
+}
+.heads {
+  border-right: var(--line) solid var(--keyline);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+.hd-ruler {
+  height: 22px;
+  border-bottom: var(--line-thin) solid var(--divider);
+}
+.hd {
+  height: var(--row);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-bottom: var(--line-thin) solid var(--divider);
+  font-size: var(--ui-xs);
+  font-weight: var(--w-med);
+  color: var(--fg-muted);
+}
+.hd-missing {
+  color: var(--fg-faint);
+}
+
+.lanes {
+  position: relative;
+  overflow: hidden;
+  cursor: text;
+}
+.lanes:focus-visible {
+  outline-offset: -2px;
+}
+.ruler {
+  height: 22px;
+  position: relative;
+  border-bottom: var(--line-thin) solid var(--divider);
+  background: var(--bg-sunken);
+}
+.tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--fg-faint);
+}
+.tick-major {
+  border-left-color: var(--fg-subtle);
+}
+.tick > span {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  font-family: var(--font-num);
+  font-size: var(--num-xs);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+
+.lane-stack {
+  position: relative;
+}
+.lane {
+  height: var(--row);
+  position: relative;
+  border-bottom: var(--line-thin) solid var(--divider);
+}
+.part {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border: var(--line-thin) solid var(--keyline);
+  border-radius: var(--r-xs);
+  overflow: hidden;
+}
+.part-screen {
+  background: var(--stage-2);
+}
+.part-webcam {
+  background: var(--stage-3);
+}
+.part-audio {
+  background: var(--audio-wash);
+  border-color: var(--audio);
+}
+/* A stretch of a recording in which a device produced nothing. §5.4 mechanism 5:
+   it is drawn, because it is never closed. */
+.gap {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: var(--bg-deep);
+  border-left: 1px dashed var(--fg-subtle);
+  border-right: 1px dashed var(--fg-subtle);
+}
+.lane-empty {
+  position: absolute;
+  left: var(--sp-2);
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--ui-xs);
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+
+/* Keyframes on an effect lane. Read-only in this phase — `loom-p15` makes them
+   draggable — but drawn, because a zoom you cannot see is a zoom you cannot find. */
+.kf {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  top: 50%;
+  margin-top: -5.5px;
+  background: var(--ok);
+  border: 1.5px solid var(--keyline);
+  transform: rotate(45deg);
+}
+
+/* ---------- trim ----------
+   The head and tail a trim removed stay on screen, dimmed, with the handle that
+   put them there still on the boundary. */
+.trim-shade {
+  position: absolute;
+  top: 22px;
+  bottom: 0;
+  background: var(--bg-deep);
+  opacity: 0.72;
+  pointer-events: none;
+}
+.handle {
+  position: absolute;
+  top: 22px;
+  bottom: 0;
+  width: 11px;
+  margin-left: -5.5px;
+  cursor: ew-resize;
+  z-index: 5;
+  background: transparent;
+}
+/* The grip is the middle 3px; the rest of the width is target area, which is why
+   the two are separate elements rather than a wide border. */
+.handle::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  width: 3px;
+  top: 0;
+  bottom: 0;
+  background: var(--ok);
+  border-left: 1px solid var(--keyline);
+  border-right: 1px solid var(--keyline);
+}
+.handle:hover::before,
+.handle:focus-visible::before,
+.handle[data-dragging='true']::before {
+  background: var(--fg);
+}
+
+/* ---------- playhead ----------
+   No transition, ever. It has to land on the frame the pointer is on. */
+.ph {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1.5px solid var(--accent);
+  z-index: 6;
+  pointer-events: none;
+}
+.ph::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -6px;
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border: 1.5px solid var(--keyline);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
