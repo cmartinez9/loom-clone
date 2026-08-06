@@ -1458,6 +1458,18 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   agree → pass; lost once then disagree → **fail**; lost on both launches → skipped with
   the banner. The recipe is in the PR; the point of recording it is that a branch on
   which an acceptance gate does not go red is worth watching go red first.
+  **And `npm run verify:mutation` has the same third outcome, because it had to.** A gate
+  that withholds exits 0, exactly as one that ran and noticed nothing does, so the first
+  run of the mutation proof after this branch read a skipped phase-8 gate as `SURVIVED`
+  and reported a hole in a gate that had never been given an instrument (CI run
+  31099311259 — the same run's `verify` job skipped that gate for the same lost contexts).
+  `runTests` now reads vitest's own per-test statuses: a file where **every** test
+  withheld is `NO VERDICT`, which is neither proof nor hole and does not fail the run,
+  and a mutation is only `no verdict` where no file judged it — one gate that judged and
+  did not notice is still a hole and still exits non-zero. Do not widen that to "a skip
+  happened": `av-sync.test.ts` and `recorder-events.test.ts` skip single tests routinely
+  on a host without `afconvert` or the Accessibility grant, and counting those would
+  quietly stop proving the mutations they carry.
 - **Phase 8's `delta 0` covers two of §4.5's four "must be identical" rows, and says
   so.** Frame selection and the zoom state are each perturbed by a control that must go
   non-zero; **the webcam bubble and the cursor are not exercised at all**, because
