@@ -358,17 +358,33 @@ re-derive them here.
   §3.5's crossfade is only the no-op it is meant to be where the two sides _agree_ at
   the edge, and at a segment `end` they do not: the last keys say identity but the
   spring is still on its way there, so the window drags the difference to identity over
-  `blendMs` and turns a 1.2 s post-roll zoom-out into a 250 ms one. Measured before the
-  tail: the worst pan acceleration in **nine of ten** real recordings fell within
-  0.25 s of a segment `end`, at 47–177 UV/s²; with it, 9–66.
+  `blendMs` and turns a 1.2 s post-roll zoom-out into a 250 ms one. Measured on the ten
+  real recordings with the tail removed: the worst pan acceleration falls within 0.25 s
+  of a segment `end` in **seven of ten**, at 124–205 UV/s²; with it, 39–73. Pan speed is
+  1.21–2.17 UV/s either way — the crossfade was corrupting the acceleration.
 - **Auto-zoom's own §6.6 figure is over budget, and it is geometry rather than a
-  defect.** The legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval
-  that _opens as the zoom tightens_, so a centre edge-snapped for the segment's full
-  `amount` slides outward while the pre-roll zooms in — a real picture, correctly
-  measured. Slowing it means changing `preRollSec`, `amountRange` or the edge snap, all
-  §6.5's specified numbers — covered by `data/loom-scope/decision-comfort-ladder.md`.
-  The budget is reported on `AutoZoomResult.budget` and not gated, because §6.6's remedy
-  is a rest box and this generator has none.
+  defect.** 39–73 UV/s² against 1.2 and 1.22–2.17 UV/s against 0.35, on the ten. The
+  legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval that _opens as
+  the zoom tightens_, so a centre edge-snapped for the segment's full `amount` slides
+  `0.5 − 0.5/A` outward while the pre-roll zooms in — 0.30 UV at `A = 2.5` against
+  0.08 UV at `A = 1.2`, in the same 0.6 s. That is why `clusterGapSec` raised the figure
+  from 9–66 and 0.42–2.17: bounded clusters have tighter boxes, so the corpus goes 16 to
+  37 segments with the mean `amount` 1.92 → 2.35 and 31 of 37 pinned at
+  `amountRange[1]`, and nearly every segment now takes the longest version of that
+  slide. A real picture, correctly measured, and the measurement moving with the
+  geometry is the explanation holding rather than failing. Slowing it means changing
+  `preRollSec`, `amountRange` or the edge snap, all §6.5's specified numbers — covered by
+  `data/loom-scope/decision-comfort-ladder.md`. The budget is reported on
+  `AutoZoomResult.budget` and not gated, because §6.6's remedy is a rest box and this
+  generator has none.
+- **`arrayClickStream`/`arrayCursorStream` sort with `(a, b) => a.t - b.t`, which is an
+  inconsistent comparator once a `t` is `NaN`** — the order is then
+  implementation-defined, so a test that pins exact survivor counts on a log containing
+  one is pinning V8's current sort. The generators are unaffected: both sanity passes
+  re-filter and refuse anything non-finite or not strictly later. Left as it is on
+  purpose — these are phase 7's shared stream contracts and phase 8 and phase 11 consume
+  them too, so tightening the comparator is a later phase's call, not phase 10's.
+  `packages/edl/test/auto-zoom.test.ts` states the order-independent invariant instead.
 - **§6.7 is not here.** The cursor _sprite_'s own stiffer spring belongs to whatever
   composites the sprite; `Track` already carries `smoothing` and `clickSpring` for it.
 - **The corpus driver warps, it does not post.** Measured on this machine with

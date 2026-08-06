@@ -91,10 +91,13 @@
  * range closes. The window then drags the difference to identity over `blendMs`,
  * turning a 1.2 s post-roll zoom-out into a 250 ms one.
  *
- * Measured on the ten real recordings before the tail was added: the worst pan
- * acceleration in **nine of ten** fell within 0.25 s of a segment `end` — 47 to 177
- * UV/s² against §6.6's 1.2, and speeds of 0.47 to 2.17 UV/s against 0.35. With the
- * tail the same measurement is inside the budget. So the range ends
+ * Measured on the ten real recordings, under the segmentation this generator ships
+ * with: take the tail away and the worst pan acceleration lands within 0.25 s of a
+ * segment `end` in **seven of ten**, at 124 to 205 UV/s² against §6.6's 1.2. Put it
+ * back and the same figure is 39 to 73 — a third of it, and the part that is left is
+ * the pre-roll geometry the next section measures rather than an edge artefact. Pan
+ * speed is 1.21–2.17 UV/s either way: what the crossfade was corrupting is the
+ * acceleration. So the range ends
  * `4 / (ζω₀)` after the last keyframe — §6.3's own settling rule, the interval it calls
  * *"a deliberate, camera-like move"* — by which point the track's value really is the
  * identity and the crossfade really is the no-op §3.5 assumes. The cost is that the
@@ -107,17 +110,32 @@
  * §6.6's remedy is *"widen the rest box"*, which is cursor-follow's knob; this
  * generator has no rest box, so the budget is measured on its output and reported
  * rather than gated (`AutoZoomResult.budget`). On the ten real recordings it is **over
- * budget** — after the settle tail above, 9–66 UV/s² against 1.2 and 0.42–2.17 UV/s
- * against 0.35 — and the reason is geometric rather than a defect to fix here.
+ * budget** — after the settle tail above, **39–73 UV/s² against 1.2 and 1.22–2.17 UV/s
+ * against 0.35** — and the reason is geometric rather than a defect to fix here.
  *
  * `sourceSampleRect` clamps the sampled rect into the frame, so the legal centre at
  * magnification `a` is `[0.5/a, 1 − 0.5/a]` — an interval that **opens as the zoom
  * tightens**. A centre edge-snapped for the segment's full `amount` is therefore not
  * legal at the intermediate amounts the spring passes through, and what the viewer sees
  * during the pre-roll is the framing sliding outward as the zoom makes the corner
- * reachable. That is a real picture, correctly measured; making it slower means a
- * longer `preRollSec`, a lower `amountRange[1]`, or a centre that is not snapped to the
- * edge — all of them §6.5's specified numbers.
+ * reachable. The slide is `0.5 − 0.5/A` of the frame in one `preRollSec`, so it is
+ * **longer the deeper the segment zooms**: 0.30 UV at `A = 2.5` against 0.08 UV at
+ * `A = 1.2`, in the same 0.6 s.
+ *
+ * That is what makes these figures higher than the ones this paragraph carried before
+ * `clusterGapSec`. Time-bounding step 1 is what the §6.5 parameters ask for and what
+ * the numbers show — 16 segments across the corpus become **37**, discrete zooms around
+ * click bursts in place of one zoom-and-hold — and clusters that no longer swallow a
+ * whole recording have tighter bounding boxes, so the mean segment `amount` goes
+ * 1.92 → 2.35 and the segments pinned at `amountRange[1]` go 7/16 → 31/37. Nearly every
+ * segment now takes the *longest* version of that pre-roll slide, in a corpus with over
+ * twice as many pre-rolls in it. The measurement moved with the geometry, which is the
+ * explanation holding rather than failing: the previous 9–66 UV/s² and 0.42–2.17 UV/s
+ * were the same picture, taken where most segments zoomed less far.
+ *
+ * It is a real picture, correctly measured; making it slower means a longer
+ * `preRollSec`, a lower `amountRange[1]`, or a centre that is not snapped to the edge —
+ * all of them §6.5's specified numbers.
  *
  * Those three were raised rather than changed here, and are **covered by the same
  * captain decision as the comfort ladder**:
@@ -245,7 +263,11 @@ export interface AutoZoomInput {
   limits?: SeasicknessLimits;
   /** Which mouse buttons count. Defaults to the primary button only. */
   buttons?: readonly number[];
-  /** The §6.1 ceiling, for a caller conditioning its cursor log with a different one. */
+  /**
+   * The §6.1 ceiling, applied to the clicks *and* to the cursor log §6.6's denominator
+   * is taken from — they have to be the same number or the travel ratio is a ratio of
+   * two differently-filtered recordings.
+   */
   maxSourceTimeSec?: Seconds;
 }
 
@@ -294,11 +316,8 @@ export function generateAutoZoom(input: AutoZoomInput): AutoZoomResult {
   const params: AutoZoomParams = { ...DEFAULT_AUTO_ZOOM_PARAMS, ...input.params };
   const trackId = input.trackId ?? 't-zoom-auto';
   const buttons = input.buttons ?? [0];
-  const { clicks, rejected } = readClicks(
-    input.clicks.stream,
-    buttons,
-    input.maxSourceTimeSec ?? MAX_SOURCE_TIME_SEC,
-  );
+  const maxSourceTimeSec = input.maxSourceTimeSec ?? MAX_SOURCE_TIME_SEC;
+  const { clicks, rejected } = readClicks(input.clicks.stream, buttons, maxSourceTimeSec);
 
   const clusters = clusterClicks(clicks, params);
   const segments = mergeSegments(
@@ -320,8 +339,10 @@ export function generateAutoZoom(input: AutoZoomInput): AutoZoomResult {
 
   // The cursor is conditioned only for §6.6's denominator; nothing about the
   // clustering reads it. A caller that passes none gets a ratio of zero, which the
-  // report states rather than hides.
-  const cursor: ConditionedCursor = conditionCursor(input.cursor ?? null);
+  // report states rather than hides. It is conditioned against the *same* ceiling the
+  // clicks were: §6.6's travel ratio is the one assertion whose two sides are filtered
+  // independently, and filtering them at different times would deflate it silently.
+  const cursor: ConditionedCursor = conditionCursor(input.cursor ?? null, { maxSourceTimeSec });
   const framing = params.amountRange[1];
   const budget = measureTrack(track, spanEnd, cursor, framing, input.limits);
 

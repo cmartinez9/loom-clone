@@ -333,18 +333,33 @@ describe('the click sanity pass', () => {
   });
 
   it('counts what it refused, so an unusable log is not an empty one', () => {
-    const result = generateAutoZoom({
-      clicks: capturedClicks(
-        arrayClickStream([
-          { t: 1, e: 'down', b: 0, x: 0.5, y: 0.5 },
-          { t: Number.NaN, e: 'down', b: 0, x: 0.5, y: 0.5 },
-          { t: 0.5, e: 'down', b: 0, x: 0.5, y: 0.5 },
-        ]),
-      ),
-    });
-    expect(result.ok && result.clicks).toBe(1);
-    expect(result.ok && result.rejected).toBe(2);
-    expect(result.ok && result.empty).toBe(false);
+    // The counts are deliberately not pinned to particular numbers. `arrayClickStream`
+    // sorts with `(a, b) => a.t - b.t`, which is an inconsistent comparator once any `t`
+    // is NaN, and ECMA-262 leaves the resulting order implementation-defined — so which
+    // of these three survives is V8's business, not the sanity pass's. What the pass
+    // promises regardless of the order it is handed: every survivor is finite and
+    // strictly later than the last, and every `down` is either kept or counted.
+    const downs: ClickEventInput[] = [
+      { t: 1, e: 'down', b: 0, x: 0.5, y: 0.5 },
+      { t: Number.NaN, e: 'down', b: 0, x: 0.5, y: 0.5 },
+      { t: 0.5, e: 'down', b: 0, x: 0.5, y: 0.5 },
+    ];
+    const result = generateAutoZoom({ clicks: capturedClicks(arrayClickStream(downs)) });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.clicks + result.rejected).toBe(downs.length);
+    expect(result.rejected).toBeGreaterThanOrEqual(1);
+    expect(result.clicks).toBeGreaterThanOrEqual(1);
+    expect(result.empty).toBe(false);
+
+    let previous = Number.NEGATIVE_INFINITY;
+    for (const key of result.track.channels['center']?.keys ?? []) {
+      expect(Number.isFinite(key.t)).toBe(true);
+      expect(key.t).toBeGreaterThan(previous);
+      previous = key.t;
+      const components = Array.isArray(key.v) ? key.v : [key.v];
+      for (const component of components) expect(Number.isFinite(component)).toBe(true);
+    }
   });
 });
 
