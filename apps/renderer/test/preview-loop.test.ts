@@ -15,6 +15,7 @@ import { identityTimeline, type ResolvedState } from '@loom/edl';
 import {
   PreviewLoop,
   type FrameScheduler,
+  type PreviewCompositor,
   type PreviewSource,
 } from '../src/preview/preview-loop.ts';
 
@@ -109,6 +110,59 @@ function stubSource(
 /** A stand-in for a decoded frame. The loop only ever passes it through. */
 function fakeVideoFrame(timestampUs: number): VideoFrame {
   return { timestamp: timestampUs, close: () => undefined } as unknown as VideoFrame;
+}
+
+/**
+ * A compositor that models the real one's **render target**, so "nothing unredacted
+ * is left presentable" can be asserted rather than assumed.
+ *
+ * `render` puts the screen picture in the target and then the annotations over it;
+ * a redaction it cannot place clears the target to the background *before* the throw
+ * leaves, which is `Compositor.render`'s contract. `present` publishes whatever the
+ * target holds at that moment. The test can therefore look at both what a caller
+ * could publish and what one actually did.
+ *
+ * It models §4.3's **hold** too — a `null` screen frame returns without drawing and
+ * leaves the target alone — because a held frame ran no pass and must not be read as
+ * evidence that a document-level failure has gone away.
+ */
+class TargetCompositor implements PreviewCompositor {
+  /** What a `present()` would publish right now. */
+  target: 'background' | 'unredacted-screen' | 'redacted-composite' = 'background';
+  /** What the last `present()` did publish. */
+  published: 'nothing' | 'background' | 'unredacted-screen' | 'redacted-composite' = 'nothing';
+  /** The frames object the loop handed over, kept so the test can look at it after. */
+  handed: CompositorFrames | null = null;
+  /** Stands in for a `blur` span whose region cannot be read. */
+  refuse = false;
+  /** Stands in for a `text` span drawn with no atlas: skipped, counted, not fatal. */
+  skipText = false;
+  renders = 0;
+  presents = 0;
+  /** Renders that held instead of drawing, because `frameAt` missed. */
+  holds = 0;
+  readonly annotations = { textSpansWithoutAtlas: 0 };
+
+  render(frames: CompositorFrames): void {
+    this.renders += 1;
+    this.handed = frames;
+    if (frames.screen === null) {
+      this.holds += 1;
+      return;
+    }
+    this.target = 'unredacted-screen';
+    if (this.skipText) this.annotations.textSpansWithoutAtlas += 1;
+    if (this.refuse) {
+      this.target = 'background';
+      throw new Error('annotation "a-blur": blur has no usable `center` channel');
+    }
+    this.target = 'redacted-composite';
+  }
+
+  present(): void {
+    this.presents += 1;
+    this.published = this.target;
+  }
 }
 
 function loopWith(
@@ -267,6 +321,58 @@ describe('PreviewLoop', () => {
     expect((handed as unknown as CompositorFrames).screen).toBeNull();
   });
 
+  it('hands the compositor the text atlas it was constructed with, every frame', () => {
+    // The atlas is an object identity, not a value: `@loom/compositor/raster` is
+    // explicit that preview and export must share *one* raster, and the loop's job
+    // is to pass along whatever it was given rather than to fetch one of its own.
+    const atlas = { capHeight: 0.7 } as unknown as NonNullable<CompositorFrames['textAtlas']>;
+    const scheduler = new ManualScheduler();
+    const seen: unknown[] = [];
+    const loop = new PreviewLoop({
+      compositor: {
+        render: (frames) => {
+          seen.push(frames.textAtlas);
+        },
+        present: () => undefined,
+      },
+      screen: stubSource(),
+      durationSec: 10,
+      textAtlas: atlas,
+      scheduler,
+      now: () => scheduler.nowMs,
+    });
+
+    loop.start();
+    scheduler.tick();
+    scheduler.tick();
+    loop.stop();
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(atlas);
+    expect(seen[1]).toBe(atlas);
+  });
+
+  it('defaults the atlas to null rather than leaving it undefined', () => {
+    const scheduler = new ManualScheduler();
+    let handed: CompositorFrames | null = null;
+    const loop = new PreviewLoop({
+      compositor: {
+        render: (frames) => {
+          handed = frames;
+        },
+        present: () => undefined,
+      },
+      screen: stubSource(),
+      durationSec: 10,
+      scheduler,
+      now: () => scheduler.nowMs,
+    });
+    loop.start();
+    scheduler.tick();
+    loop.stop();
+    expect((handed as unknown as CompositorFrames).textAtlas).toBeNull();
+  });
+
   it('reuses one frames object and one state object across frames — §4.3', () => {
     const source = stubSource({ frameAt: () => fakeVideoFrame(0) });
     const scheduler = new ManualScheduler();
@@ -341,6 +447,147 @@ describe('PreviewLoop', () => {
     expect(loop.metrics.count).toBe(2);
     expect(loop.metrics.maxMs).toBeCloseTo(4, 6);
     expect(loop.metrics.overBudget).toBe(0);
+  });
+});
+
+describe('PreviewLoop and the annotation surface’s two failure modes', () => {
+  function refusingLoop(
+    compositor: TargetCompositor,
+    source: StubSource = stubSource({ frameAt: () => fakeVideoFrame(0) }),
+  ): {
+    loop: PreviewLoop;
+    scheduler: ManualScheduler;
+    onError: ReturnType<typeof vi.fn>;
+  } {
+    const scheduler = new ManualScheduler();
+    const onError = vi.fn();
+    const loop = new PreviewLoop({
+      compositor,
+      screen: source,
+      durationSec: 10,
+      scheduler,
+      now: () => scheduler.nowMs,
+      onError,
+    });
+    return { loop, scheduler, onError };
+  }
+
+  it('degrades a text span with no atlas, and reports it once per run rather than per frame', () => {
+    // Refusing a frame is `blur` and `mask`'s alone: text failing to render is
+    // cosmetic and visible, where a redaction failing is invisible and publishes a
+    // secret. `textAtlas` defaults to null, so the wider rule made *any* text span
+    // refuse *every* frame with no editor open at all.
+    const compositor = new TargetCompositor();
+    compositor.skipText = true;
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    for (let i = 0; i < 30; i++) scheduler.tick();
+
+    expect(compositor.renders).toBe(30);
+    expect(compositor.presents).toBe(30);
+    expect(compositor.published).toBe('redacted-composite');
+    expect(loop.running).toBe(true);
+    expect(scheduler.pending).toBe(1);
+    // Once for the run, not sixty times a second.
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]?.[0] as Error).message).toMatch(/atlas/);
+
+    // And the latch clears with the condition, so a later run is reported again.
+    compositor.skipText = false;
+    for (let i = 0; i < 5; i++) scheduler.tick();
+    expect(onError).toHaveBeenCalledOnce();
+    compositor.skipText = true;
+    scheduler.tick();
+    expect(onError).toHaveBeenCalledTimes(2);
+    loop.stop();
+  });
+
+  it('refuses an unplaceable redaction loudly, without publishing it, leaking it or wedging', () => {
+    const compositor = new TargetCompositor();
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    scheduler.tick();
+    expect(compositor.published).toBe('redacted-composite');
+
+    compositor.refuse = true;
+    for (let i = 0; i < 30; i++) scheduler.tick();
+
+    // Loud: a refused redaction was the whole point of failing closed.
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]?.[0] as Error).message).toMatch(/center/);
+    // Non-publishing: neither what a caller could present nor what one did present is
+    // the screen picture with the redaction missing.
+    expect(compositor.target).toBe('background');
+    expect(compositor.published).not.toBe('unredacted-screen');
+    expect(compositor.presents).toBe(1);
+    // Leak-free: §10.2's `VideoFrame` lifetime holds on the throw path too.
+    expect(compositor.handed).not.toBeNull();
+    expect(compositor.handed?.screen).toBeNull();
+    // Not wedged: the loop is still running and the next frame is still armed.
+    expect(loop.running).toBe(true);
+    expect(scheduler.pending).toBe(1);
+    expect(compositor.renders).toBe(31);
+
+    // Revivable in both senses: the next placeable frame composites and presents,
+    // and a `stop()`/`start()` pair still re-arms the scheduler.
+    compositor.refuse = false;
+    scheduler.tick();
+    expect(compositor.published).toBe('redacted-composite');
+    compositor.refuse = true;
+    scheduler.tick();
+    expect(onError).toHaveBeenCalledTimes(2);
+
+    loop.stop();
+    expect(scheduler.pending).toBe(0);
+    loop.start();
+    expect(scheduler.pending).toBe(1);
+    loop.stop();
+  });
+
+  it('does not re-report a persistent failure because decode missed in between', () => {
+    // §4.3's hold returns without drawing, so a held frame ran no pass and says
+    // nothing about whether the document can still be redacted or lettered. Reading
+    // one as a clean frame clears both latches, and a seek's alternating misses —
+    // the common case, since `prime` is fire-and-forget — then turn a single broken
+    // document into a report every other frame, which is the spam the latch exists
+    // to prevent.
+    const compositor = new TargetCompositor();
+    compositor.refuse = true;
+    compositor.skipText = true;
+    let missing = true;
+    let flip = false;
+    const source = stubSource({
+      frameAt: () => {
+        if (!missing) return fakeVideoFrame(0);
+        flip = !flip;
+        return flip ? fakeVideoFrame(0) : null;
+      },
+    });
+    const { loop, scheduler, onError } = refusingLoop(compositor, source);
+
+    loop.start();
+    for (let i = 0; i < 40; i++) scheduler.tick();
+
+    expect(compositor.holds, 'the source never missed, so nothing was held').toBeGreaterThan(15);
+    const messages = () => onError.mock.calls.map((call) => (call[0] as Error).message);
+    expect(messages().filter((m) => m.includes('center'))).toHaveLength(1);
+    expect(messages().filter((m) => m.includes('atlas'))).toHaveLength(1);
+
+    // And a miss does not forget in the other direction either: once both conditions
+    // genuinely clear on a frame that drew, a later run is still reported.
+    missing = false;
+    compositor.refuse = false;
+    compositor.skipText = false;
+    for (let i = 0; i < 3; i++) scheduler.tick();
+    expect(messages()).toHaveLength(2);
+    compositor.refuse = true;
+    compositor.skipText = true;
+    scheduler.tick();
+    expect(messages().filter((m) => m.includes('center'))).toHaveLength(2);
+    expect(messages().filter((m) => m.includes('atlas'))).toHaveLength(2);
+    loop.stop();
   });
 });
 

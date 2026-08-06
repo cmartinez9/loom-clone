@@ -279,6 +279,13 @@ export default tseslint.config(
   // each — `fetch` and the GL context they are handed. `edl` uses neither: it is
   // arithmetic over an `EditDocument` and reaches a recording only through the two
   // stream interfaces it declares.
+  //
+  // `@loom/compositor/raster` (`packages/compositor/src/raster/`) is the one
+  // exception, and it is the `@loom/format/fs` bargain rather than a hole: glyph
+  // rasterisation needs an `OffscreenCanvas`, so it lives behind its own subpath
+  // export with its own module docblock saying who may call it and why there must be
+  // exactly one caller. It imports nothing this rule forbids, so the restriction
+  // below still applies to it unchanged.
   {
     files: [
       'packages/decode/src/**/*.ts',
@@ -316,6 +323,17 @@ export default tseslint.config(
   // The phase 6 gate harness: a renderer half and an Electron-main half.
   {
     files: ['test/gate/harness.ts', 'test/gate/fixture.ts'],
+    languageOptions: {
+      globals: { ...globals.browser },
+    },
+  },
+
+  // The phase 11 golden gate harness, same split. `fixture.ts` is browser-side
+  // because it paints the source picture into an `OffscreenCanvas`; `main.ts` reads
+  // its two constants and is bundled for node, which is why the module has no other
+  // DOM value in it.
+  {
+    files: ['test/golden/harness.ts', 'test/golden/fixture.ts'],
     languageOptions: {
       globals: { ...globals.browser },
     },

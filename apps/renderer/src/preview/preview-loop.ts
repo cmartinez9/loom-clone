@@ -39,13 +39,16 @@
  *    closes it.
  *  - **`prime()` is cancelable.** Scrubbing just calls `seek`, which primes at the
  *    new time; `SourceReader` aborts the old read and abandons the old seek.
- *  - **Expensive optional passes are skipped while scrubbing.** There are none yet
- *    (blur and motion blur are phases 11 and 13), but {@link PreviewLoop.scrubbing}
- *    is the flag they will read, and §4.3 is explicit that it must stay a
- *    *scheduling* difference and never a *state* difference.
+ *  - **Expensive optional passes are skipped while scrubbing.** None are, and the
+ *    blur is a deliberate refusal rather than an oversight: §4.5 permits *"preview
+ *    may skip blur passes while scrubbing"*, but a redaction is the one pass whose
+ *    absence teaches the user their blur is somewhere it is not, and it costs two
+ *    full-target draws per region against a 16.67 ms frame. {@link PreviewLoop.scrubbing}
+ *    remains the flag a future pass would read — motion blur is phase 13 — and §4.3
+ *    is explicit that it must stay a *scheduling* difference and never a *state* one.
  */
 
-import type { CompositorFrames } from '@loom/compositor';
+import type { CompositorFrames, TextAtlas } from '@loom/compositor';
 import { identityTimeline, resolve, type CompiledTimeline, type ResolvedState } from '@loom/edl';
 import type { Seconds } from '@loom/format';
 import { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
@@ -62,6 +65,16 @@ import { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
 export interface PreviewCompositor {
   render(frames: CompositorFrames, state: ResolvedState): void;
   present(): void;
+  /**
+   * Phase 11's diagnostics, read after `render`.
+   *
+   * `@loom/compositor` is pure and has no way to report anything itself, so a
+   * condition it can only degrade through — a `text` span with no atlas — is left on
+   * the pass as a monotonic count and the loop turns it into an `onError`. Optional
+   * because it is a diagnostic: a loop wired to something that does not keep one
+   * still renders.
+   */
+  readonly annotations?: { readonly textSpansWithoutAtlas: number };
 }
 
 /** What the loop needs from a decoded source. `SourceReader` satisfies it as-is. */
@@ -109,6 +122,15 @@ export interface PreviewLoopOptions {
   lookaheadSec?: number;
   /** How far behind the playhead frames are kept before being closed. */
   retainBehindSec?: number;
+  /**
+   * The glyph atlas `text` annotations are drawn from (phase 11).
+   *
+   * Held on the frames object rather than fetched per frame, and it must be the
+   * **same object** the exporter is given: `@loom/compositor/raster` explains why
+   * one raster shared between the two paths is what makes glyphs a §4.5
+   * non-difference rather than two canvases that probably agree.
+   */
+  textAtlas?: TextAtlas | null;
   scheduler?: FrameScheduler;
   now?: () => number;
   /** Reported when priming fails for a real reason (not a supersession). */
@@ -136,7 +158,7 @@ export class PreviewLoop {
   readonly #onError: (error: Error) => void;
   readonly #onStall: (info: { atSec: Seconds; forMs: number }) => void;
 
-  readonly #frames: CompositorFrames = { screen: null };
+  readonly #frames: CompositorFrames = { screen: null, textAtlas: null };
 
   /**
    * Owned by the `CompiledTimeline`, not by the loop: `resolve` returns the same
@@ -157,6 +179,18 @@ export class PreviewLoop {
   #missingSinceMs: number | null = null;
   #stallReported = false;
   #peakLiveFrames = 0;
+  /**
+   * Latches, in the shape {@link PreviewLoop.#stallReported} already uses: set on the
+   * first report of a run of the condition, cleared when the condition goes away.
+   *
+   * Both of these are properties of the *document*, so an unlatched report would fire
+   * on every frame for as long as the document says so — sixty errors a second, which
+   * is a worse defect than the one being reported.
+   */
+  #refusalReported = false;
+  #atlasReported = false;
+  /** `annotations.textSpansWithoutAtlas` as of the previous frame. */
+  #textSpansWithoutAtlas = 0;
 
   constructor(options: PreviewLoopOptions) {
     this.#compositor = options.compositor;
@@ -167,6 +201,7 @@ export class PreviewLoop {
     this.#retainBehindSec = options.retainBehindSec ?? 0.1;
     this.#ownsTimeline = options.timeline === undefined;
     this.#timeline = options.timeline ?? identityTimeline(Math.max(0, options.durationSec));
+    this.#frames.textAtlas = options.textAtlas ?? null;
     this.#onError = options.onError ?? (() => undefined);
     this.#onStall = options.onStall ?? (() => undefined);
     this.metrics = new FrameMetrics(4096, FRAME_BUDGET_MS);
@@ -328,12 +363,36 @@ export class PreviewLoop {
     const state = resolve(this.#timeline, t);
 
     const frame = this.#screen.frameAt(state.sourceTime);
-    this.#frames.screen = frame;
-    this.#compositor.render(this.#frames, state);
-    this.#compositor.present();
-    // Held only for the length of the draw. The ring still owns it; dropping the
-    // reference here means no path out of this function keeps a frame alive.
-    this.#frames.screen = null;
+    let composited = false;
+    try {
+      this.#frames.screen = frame;
+      this.#compositor.render(this.#frames, state);
+      this.#compositor.present();
+      composited = true;
+    } catch (thrown) {
+      // A refused frame — a `blur` or `mask` whose region could not be read — is
+      // loud and is not fatal. `Compositor.render` has already cleared the target on
+      // its way out, so there is nothing unredacted to publish; `present` is skipped
+      // rather than flashing the background over a composite that was correct.
+      //
+      // The loop keeps running either way. A throw that escaped this callback would
+      // leave `#handle` null while `#running` stayed true, which makes `start()` an
+      // early return and the loop unrevivable without a `stop()`/`start()` pair — a
+      // wedge, not a safety property, and one that reports nothing at all.
+      this.#report(thrown);
+    } finally {
+      // Held only for the length of the draw, on every path out. The ring still owns
+      // it; dropping the reference here means nothing out of this function keeps a
+      // frame alive (§10.2).
+      this.#frames.screen = null;
+    }
+    // A held frame is not a clean frame. §4.3's hold makes `render` return without
+    // drawing when `frameAt` missed, so it composited nothing and is evidence of
+    // neither the condition nor its absence — clearing a latch on one would let a
+    // seek's alternating misses re-report a persistent document error at frame rate,
+    // which is the spam the latch exists to prevent.
+    const drew = composited && frame !== null;
+    if (drew) this.#refusalReported = false;
 
     const elapsed = this.#now() - started;
     this.metrics.record(elapsed);
@@ -341,7 +400,11 @@ export class PreviewLoop {
     const live = this.#screen.liveFrames;
     if (live > this.#peakLiveFrames) this.#peakLiveFrames = live;
 
+    // Every callback that can reach the caller sits below the measurement, for the
+    // reason `#prime` states: a handler of theirs must not be charged to a frame the
+    // phase-6 gate judges on the single worst one, with no allowance.
     this.#watchStall(frame !== null, t, started);
+    this.#watchTextAtlas(drew);
 
     // Off the critical path, after the budget has been measured (§4.3).
     this.#prime();
@@ -353,6 +416,52 @@ export class PreviewLoop {
     void this.#screen.prime(this.#time, this.#lookaheadSec).catch((error: unknown) => {
       this.#onError(error instanceof Error ? error : new Error(String(error)));
     });
+  }
+
+  /**
+   * The first refused frame of a run.
+   *
+   * Cleared by the next frame that actually draws. A §4.3 hold is not one: it leaves
+   * the previous composite in the target without running a pass over it, so it says
+   * nothing about whether the document can still be redacted.
+   */
+  #report(thrown: unknown): void {
+    if (this.#refusalReported) return;
+    this.#refusalReported = true;
+    this.#onError(thrown instanceof Error ? thrown : new Error(String(thrown)));
+  }
+
+  /**
+   * A `text` span the compositor could not draw, because no atlas was supplied.
+   *
+   * Not a refusal — text failing to render is cosmetic and visible, where a redaction
+   * failing is invisible and publishes a secret — but not silent either: a caption
+   * the user believes is in their video and is not is exactly the bug report this
+   * count exists to pre-empt.
+   *
+   * A rising count is evidence wherever it comes from — a frame that refused still
+   * skipped its text on the way to refusing — so `drew` gates only the *clear*. A
+   * §4.3 hold ran no pass, so it cannot raise the count and must not be read as the
+   * condition having gone away.
+   */
+  #watchTextAtlas(drew: boolean): void {
+    const count = this.#compositor.annotations?.textSpansWithoutAtlas ?? 0;
+    const skipped = count > this.#textSpansWithoutAtlas;
+    this.#textSpansWithoutAtlas = count;
+    if (!skipped) {
+      if (drew) this.#atlasReported = false;
+      return;
+    }
+    if (this.#atlasReported) return;
+    this.#atlasReported = true;
+    this.#onError(
+      new Error(
+        'a text annotation was resolved but the preview has no glyph atlas, so it was not ' +
+          'drawn. Build one with `rasterizeGlyphs` + `uploadTextAtlas` from ' +
+          '`@loom/compositor/raster` and pass it as `textAtlas`; the export path has to be ' +
+          'handed the same object',
+      ),
+    );
   }
 
   #watchStall(hit: boolean, t: Seconds, nowMs: number): void {

@@ -19,11 +19,18 @@
  * *full* 4K when paused, which is what makes pixel equality with the exporter
  * checkable at all.
  *
- * Phase 6 draws the screen track and nothing else. The passes that follow — bubble
- * (phase 7), cursor (5), annotations and blur/mask (11) — attach to the same FBO in
- * the same `render()` call. Handing this class a `webcam` or `cursor` today throws
- * rather than being quietly ignored, because "the webcam did not appear" is a bug
- * report nobody enjoys receiving.
+ * Phase 6 drew the screen track and nothing else. The passes that follow attach to
+ * the same FBO in the same `render()` call: phase 11's annotations are here
+ * (`AnnotationPass`), and the bubble (7) and cursor (5) are not yet. Handing this
+ * class a `webcam` or `cursor` today throws rather than being quietly ignored,
+ * because "the webcam did not appear" is a bug report nobody enjoys receiving.
+ *
+ * The other throw out of `render` is a redaction that could not be placed, and it is
+ * a *refusal* rather than a missing pass: the render target is cleared to the
+ * background on the way out, so a caller that catches it and still calls
+ * {@link Compositor.present} or reads the framebuffer gets the letterbox colour and
+ * never the unredacted picture. Only `blur` and `mask` reach it; `annotations.ts`
+ * draws the line and says why a missing glyph atlas is on the other side of it.
  *
  * ## The two rules this class exists to keep
  *
@@ -45,7 +52,8 @@
  * actually goes.
  */
 
-import { contentRect, rectToNdc, sourceSampleRect } from './geometry.ts';
+import { AnnotationPass, type AnnotationContext } from './annotations.ts';
+import { contentRect, rectToNdc, sourceSampleRect, type Rect } from './geometry.ts';
 import {
   createRenderTarget,
   createSampledTexture,
@@ -58,6 +66,7 @@ import {
 import { GpuTimer } from './gpu-timer.ts';
 import type { ResolvedState } from '@loom/edl';
 import { SCREEN_FRAGMENT_SHADER, SCREEN_VERTEX_SHADER, UNIT_QUAD } from './shaders.ts';
+import type { TextAtlas } from './text-atlas.ts';
 
 /**
  * The frames a composite draws from, per §4.1.
@@ -71,6 +80,15 @@ export interface CompositorFrames {
   webcam?: VideoFrame | null;
   /** Phase 5. */
   cursor?: { texture: WebGLTexture; hotspot: [number, number]; sizePx: [number, number] } | null;
+  /**
+   * Phase 11, and required by `text` annotations only.
+   *
+   * Not part of `ResolvedState` for the reason the background is not: it is a
+   * property of the *renderer*, not of the timeline. Preview and export must pass
+   * the **same object** — `text-atlas.ts` explains why that is what makes glyphs a
+   * §4.5 non-difference rather than a hope about two canvases.
+   */
+  textAtlas?: TextAtlas | null;
 }
 
 export interface CompositorOptions {
@@ -86,9 +104,21 @@ export interface CompositorOptions {
 
 const DEFAULT_BACKGROUND: readonly [number, number, number] = [0, 0, 0];
 
+/** The compositor's own, writable view of the context it hands the annotation pass. */
+interface MutableAnnotationContext extends AnnotationContext {
+  source: Rect;
+  content: Rect;
+  sourcePixels: [number, number];
+  outputSize: [number, number];
+  target: RenderTarget;
+  textAtlas: TextAtlas | null;
+}
+
 export class Compositor {
   readonly gl: WebGL2RenderingContext;
   readonly gpuTimer: GpuTimer;
+  /** Phase 11's passes. Built with the compositor; its programs link once. */
+  readonly annotations: AnnotationPass;
 
   #outputSize: [number, number];
   #background: [number, number, number];
@@ -117,6 +147,12 @@ export class Compositor {
   #uploaded: VideoFrame | null = null;
   #frames = 0;
   #disposed = false;
+
+  /**
+   * The one {@link AnnotationContext}, rewritten in place — same bargain as the
+   * uniform scratch buffers above and as `resolve`'s single `ResolvedState`.
+   */
+  readonly #annotationContext: MutableAnnotationContext;
 
   constructor(
     gl: WebGL2RenderingContext,
@@ -167,6 +203,15 @@ export class Compositor {
     this.#screenTexture = createSampledTexture(gl);
     this.#target = createRenderTarget(gl, this.#outputSize[0], this.#outputSize[1]);
     this.gpuTimer = new GpuTimer(gl);
+    this.annotations = new AnnotationPass(gl);
+    this.#annotationContext = {
+      source: { x: 0, y: 0, width: 1, height: 1 },
+      content: { x: 0, y: 0, width: 0, height: 0 },
+      sourcePixels: [0, 0],
+      outputSize: [0, 0],
+      target: this.#target,
+      textAtlas: null,
+    };
 
     gl.useProgram(this.#program);
     gl.uniform1i(requireUniform(gl, this.#program, 'u_screen'), 0);
@@ -218,6 +263,7 @@ export class Compositor {
     const next = createRenderTarget(this.gl, width, height);
     deleteRenderTarget(this.gl, this.#target);
     this.#target = next;
+    this.#annotationContext.target = next;
     this.#outputSize = [width, height];
     this.clearToBackground();
   }
@@ -267,11 +313,23 @@ export class Compositor {
     const screen = frames.screen;
     if (screen === null) return;
 
-    const gl = this.gl;
-    const [width, height] = this.#outputSize;
-
     this.gpuTimer.poll();
     this.gpuTimer.begin();
+    // Balanced across the refusal below. An unended query leaves `GpuTimer` open and
+    // in flight for good: every later `begin()` returns early and `poll()` never sees
+    // a result, so `lastMs` freezes at whatever it last read and reports it forever.
+    try {
+      this.#draw(frames, screen, state);
+      this.#frames += 1;
+    } finally {
+      this.gpuTimer.end();
+    }
+  }
+
+  /** The composite itself. Split out only so the timer above can bracket it. */
+  #draw(frames: CompositorFrames, screen: VideoFrame, state: ResolvedState): void {
+    const gl = this.gl;
+    const [width, height] = this.#outputSize;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.#target.framebuffer);
     gl.viewport(0, 0, width, height);
@@ -306,10 +364,8 @@ export class Compositor {
     }
 
     const source = sourceSampleRect(state.zoom);
-    const content = rectToNdc(
-      contentRect([sourceWidth, sourceHeight], this.#outputSize),
-      this.#outputSize,
-    );
+    const contentPx = contentRect([sourceWidth, sourceHeight], this.#outputSize);
+    const content = rectToNdc(contentPx, this.#outputSize);
 
     this.#contentScratch[0] = content.x;
     this.#contentScratch[1] = content.y;
@@ -327,8 +383,41 @@ export class Compositor {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
 
-    this.gpuTimer.end();
-    this.#frames += 1;
+    // Phase 11, into the same target in the same call. The two rects are handed on
+    // rather than recomputed: an annotation is anchored in normalized *source*
+    // coordinates (`@loom/edl`'s `annotations.ts` explains why a privacy region has
+    // to be), so it lands on the pixels this pass just drew that part of the source
+    // onto — under zoom as well as without it — only while both derive from one
+    // `sourceSampleRect`.
+    //
+    // §4.5 permits *"preview may skip blur passes while scrubbing"*. This build does
+    // not take that allowance and there is no flag for it: the pass costs two
+    // full-target draws per redacted region against a 16.67 ms frame, and a preview
+    // that shows the unredacted picture whenever the playhead moves teaches the user
+    // their blur is somewhere it is not. If it is ever taken, it must be a
+    // *scheduling* difference confined to the preview loop, never a state one, and
+    // the golden-frame test must keep judging the unskipped path.
+    const context = this.#annotationContext;
+    context.source = source;
+    context.content = contentPx;
+    context.sourcePixels[0] = sourceWidth;
+    context.sourcePixels[1] = sourceHeight;
+    context.outputSize[0] = width;
+    context.outputSize[1] = height;
+    context.target = this.#target;
+    context.textAtlas = frames.textAtlas ?? null;
+    try {
+      this.annotations.render(state.annotations, context);
+    } catch (thrown) {
+      // A redaction that could not be placed refuses the frame — and the target is
+      // holding the screen picture *without* it at this instant, which is the one
+      // thing a privacy failure must never leave publishable. Clearing is not §4.3's
+      // "hold the previous frame": holding is for a `null` frame, and a refusal is
+      // not a miss. The throw still leaves, because an export that cannot place a
+      // redaction must fail the export rather than encode an unredacted frame.
+      this.clearToBackground();
+      throw thrown;
+    }
   }
 
   /**
@@ -415,6 +504,7 @@ export class Compositor {
     this.#uploaded = null;
     const gl = this.gl;
     this.gpuTimer.dispose();
+    this.annotations.dispose();
     deleteRenderTarget(gl, this.#target);
     gl.deleteTexture(this.#screenTexture);
     gl.deleteBuffer(this.#quad);

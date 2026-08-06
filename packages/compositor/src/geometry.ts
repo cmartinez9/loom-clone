@@ -88,6 +88,41 @@ export function contentRect(
 }
 
 /**
+ * The affine map from normalized source coordinates to output pixels.
+ *
+ * `px = originX + scaleX * sx`, `py = originY + scaleY * sy`, both origins top-left.
+ *
+ * It is the composition of the two rects the screen pass already uses and nothing
+ * else, which is the point: an annotation anchored in source coordinates
+ * (`@loom/edl/annotations` explains why it must be) lands on exactly the pixels the
+ * screen pass drew that part of the source onto. Any second derivation would be a
+ * blur that drifts off the thing it redacts under zoom.
+ *
+ * **The scales differ per axis.** Normalized source coordinates are anisotropic — x
+ * over the width, y over the height — so `scaleX` and `scaleY` are equal only on a
+ * square frame. Sizes are per-axis fractions and use both; isotropic scalars
+ * (stroke width, corner radius, an arrow head) use `scaleX`, the frame-width
+ * fraction §2.6's `"strokeWidth": 0.004` is written as.
+ */
+export interface SourceToOutput {
+  originX: number;
+  originY: number;
+  scaleX: number;
+  scaleY: number;
+}
+
+export function sourceToOutput(source: Rect, content: Rect): SourceToOutput {
+  const scaleX = source.width > 0 ? content.width / source.width : 0;
+  const scaleY = source.height > 0 ? content.height / source.height : 0;
+  return {
+    originX: content.x - source.x * scaleX,
+    originY: content.y - source.y * scaleY,
+    scaleX,
+    scaleY,
+  };
+}
+
+/**
  * A rect in output pixels as an NDC rect, ready for `gl_Position`.
  *
  * Output y grows downward; NDC y grows upward. The flip happens here so the shader

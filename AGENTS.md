@@ -31,7 +31,8 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture and the timeline model 21 ways; each must fail a gate
+npm run verify:mutation   # break capture, the timeline model and annotations 27 ways;
+                          #   each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -69,12 +70,17 @@ packages/permissions/  the four macOS grants: what each is for, what breaks with
                    call `systemPreferences` and what enforces it.
 packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
-packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls.
+packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls, plus
+                   `AnnotationPass` (blur, mask, arrow, rect, ellipse, highlight,
+                   text). `@loom/compositor/raster` is its one impure subpath — the
+                   glyph rasteriser, the `@loom/format/fs` bargain applied to a
+                   canvas.
 packages/edl/      the timeline model (report §3): tracks, channels, keyframes, the
-                   two evaluators, `compile`/`resolve`, inverse ops and undo/redo.
-                   Owns the SEMANTICS; `@loom/format` owns the `EditDocument` types
-                   and their schema. `ResolvedState` lives here and the compositor
-                   imports it.
+                   two evaluators, `compile`/`resolve`, inverse ops and undo/redo,
+                   and what an annotation span's channels and style MEAN
+                   (`annotations.ts`). Owns the SEMANTICS; `@loom/format` owns the
+                   `EditDocument` types and their schema. `ResolvedState` lives here
+                   and the compositor imports it.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
@@ -235,6 +241,71 @@ the `CompiledTimeline`'s **own** state object, overwritten in place; keep one wi
 `cloneResolvedState`. Undo/redo is the inverse-op stack in the editor
 (`EditHistory`), over the same §2.7 op vocabulary that main journals — so an undo is
 journalled, revisioned and crash-safe on exactly the path the edit it reverses took.
+
+## Annotations, in one paragraph
+
+Phase 11 added **no primitive**: §3.3 already makes an annotation a `kind: 'object'`
+track of spans with their own channels, and `compile`/`resolve` already produced
+`ResolvedAnnotation`. What it added is the _reading_ — `packages/edl/src/annotations.ts`
+says which channels each `type` uses (`from`/`to` for an arrow, `center`/`size` for
+everything else, `opacity` for all), what each `style` key means, and what the numbers
+are in; and `packages/compositor/src/annotations.ts` draws them. **Geometry is in
+normalized _source_ coordinates**, the space `zoom.center` is in — §3.2's argument
+about time, applied to space: an annotation is placed on content, so it must travel
+with it. The privacy case settles it. Output-normalized geometry would let a zoom
+slide the content out from under a blur and publish the thing the user hid, so the
+compositor maps annotations through the _same_ `sourceSampleRect` the screen pass
+samples with (`sourceToOutput`). Scalars — `strokeWidth`, `cornerRadius`, the arrow
+head — are isotropic fractions of the frame **width**, because normalized source
+coordinates are anisotropic; `blurPx` keeps §2.6's name and unit, **source pixels**.
+Colours are read in the target's own encoding (hex ÷ 255, no linearisation): the whole
+pipeline is display-encoded end to end. Spans draw in **document order with no
+exceptions** — a blur after a rectangle blurs the rectangle. Text is the one part a
+renderer decides rather than we do, so it comes in as a `TextAtlas` on
+`CompositorFrames`, built once by `@loom/compositor/raster` and shared by preview and
+export; `layoutText` (pure) owns everything downstream of the raster.
+
+**Blur and mask fail closed, in three graded ways, and the line between them is who
+decided.** An authored `opacity` of 0 draws nothing — that is intent, not failure. A
+region that cannot be _read_ (missing/non-finite `center`, zero-area `size`, a
+`blurPx` that would render as identity, a fully transparent `mask` fill) **throws out
+of `render()`**: a frame whose redaction could not be placed must not be composited.
+A region that is known but cannot be _blurred_ (σ past `MAX_BLUR_PASSES`, no scratch
+target) is filled **opaque** and counted in `AnnotationPass.privacyFallbacks` — always
+stronger than what was asked for, never weaker, which is why a huge blur does not
+quietly become a small one.
+
+**Refusing a frame is those two kinds' alone, and a refusal is survivable.** A `text`
+span with no atlas does _not_ throw: text failing to render is cosmetic and visible,
+where a redaction failing is invisible and publishes a secret, and treating them alike
+made an unbuilt atlas refuse every frame of a preview with no editor open. The span is
+skipped, the frame composites, and `AnnotationPass.textSpansWithoutAtlas` counts it —
+`packages/compositor` is pure and cannot report anything itself, so `PreviewLoop` reads
+the count after `render` and reports the first frame of a run through `onError`,
+latched like `#stallReported` because sixty errors a second is its own defect. On a
+genuine refusal `Compositor.render` **clears the target to the background before the
+throw leaves**, so a caller that catches and still calls `present()` gets the letterbox
+colour and never the unredacted picture; the throw itself still leaves, because an
+export that cannot place a redaction must fail rather than encode. `PreviewLoop` is the
+one caller that catches it: it reports (latched), drops its `VideoFrame` reference in a
+`finally`, and keeps scheduling — a throw escaping the rAF callback left `#handle` null
+while `#running` stayed true, which makes `start()` an early return and the loop
+unrevivable, and that is a wedge rather than a safety property.
+
+**The gate is `test/phase11-golden.test.ts`**, §4.5's golden-frame test extended:
+24 fixed timestamps, the shipping `PreviewLoop` against a fixed-timestamp export loop,
+max per-pixel delta **0**. Equality alone is not the gate — a preview and an export
+that both draw nothing agree perfectly — so every timestamp also renders a third frame
+with the annotation tracks disabled and requires that the annotations changed the
+picture, that every changed pixel is inside a box `test/golden/fixture.ts` computes
+with **its own four lines of arithmetic** (sharing `sourceToOutput` would make the
+expectation follow the defect), that each kind drew in its own box, that the mask's
+centre is exactly the mask's colour, that the blur destroyed the region's variance,
+and that a parked track drew nothing while a crossfading one drew _linearly in its
+window weight_ — the `blendMs` half, which a "did it draw" check cannot see. Six
+`annotation-*` entries in `npm run verify:mutation` break the production source on
+disk and require the gate to notice. The export _pipeline_ is phase 8's; the gate's
+export loop is two lines written out rather than imported, on purpose.
 
 ## Sharp edges
 
@@ -399,6 +470,17 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   push, and it measures the merge result); `push` is kept for `main`. Before adding a
   second macOS job that runs concurrently with `verify`, note that these three gates
   cannot tell a busy host apart from the defect they exist to catch.
+- **An annotation pass must not blend the destination alpha, and `half` is a reserved
+  word.** The first is load-bearing: the annotation passes run over a target the screen
+  pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
+  blends _alpha_, leaving `1 − a + a²` wherever a span is semi-transparent. That is
+  invisible on screen and a per-pixel difference the moment one path reads the
+  framebuffer and the other reads a canvas that forces alpha to 1 — a §4.5 divergence
+  living entirely in a channel nobody looks at. `blendFuncSeparate(SRC_ALPHA,
+ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it. The
+  second is a two-minute trap worth not paying twice: `half` (with `float`, `int`,
+  `sampler` and friends) is reserved in GLSL ES 3.00, so `vec2 half = u_box.zw;` fails
+  to compile with _"Illegal use of reserved word"_ on ANGLE and nowhere in the JS.
 - **A lost WebGL context is silent, and reads as data.** Every GL call becomes a
   no-op, `getParameter` answers `null`, and `readPixels` leaves the caller's buffer
   untouched — so a reused scratch array keeps the last picture it really read and

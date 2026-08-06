@@ -135,10 +135,31 @@ export {
 // ---- track factories ---------------------------------------------------------
 export {
   ALWAYS,
+  annotationSpan,
+  annotationTrack,
   bubbleTrack,
   DEFAULT_MANUAL_BLEND_MS,
   DEFAULT_SPRING,
   manualZoomTrack,
+  type AnnotationSpanInput,
+  type AnnotationTrackInput,
   type BubbleInput,
   type ManualZoomInput,
 } from './tracks.ts';
+
+// ---- what an annotation span means (phase 11) --------------------------------
+export {
+  AnnotationError,
+  ANNOTATION_KINDS,
+  isAnnotationKind,
+  isPrivacyKind,
+  newAnnotationGeometry,
+  parseColor,
+  readAnnotationGeometry,
+  readAnnotationStyle,
+  type AnnotationGeometry,
+  type AnnotationKind,
+  type AnnotationStyle,
+  type Rgba,
+  type TextAlign,
+} from './annotations.ts';

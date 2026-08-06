@@ -8,6 +8,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./raster": {
+      "types": "./src/raster/index.ts",
+      "default": "./src/raster/index.ts"
     }
   },
   "dependencies": {
