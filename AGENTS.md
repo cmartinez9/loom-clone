@@ -1002,14 +1002,25 @@ was not a control.
   source, and created that fourth context at exactly the moment three released ones
   were still resident. It now opens **two** and reuses them — the controls run on the
   export path, and so does the export pass. **The resolutions are that same knob, turned
-  twice:** 1920x1080 into 1280x720, and then — when the crash came back on five of six
+  three times:** 1920x1080 into 1280x720; then — when the crash came back on five of six
   runs, once at output frame 112 of 168 and once on both of the two launches a lost
-  context earns — 1024x576 into a 768x432 output. Both axes stay a whole number of
-  macroblocks (16:9 on a macroblock is `256k x 144k`, so the sizes are rungs of one
-  ladder) because `readBackFrames` reads the frame code out of an _encoded_ picture. Not
-  one assertion moved. The knob on a virtualised runner is the GPU bytes a frame of the
-  export pass moves — **source area, output area, and the number of live contexts** —
-  not the cache budget.
+  context earns — 1024x576 into a 768x432 output; and then the **output alone** into
+  512x288. Both axes stay a whole number of macroblocks (16:9 on a macroblock is
+  `256k x 144k`, so the sizes are rungs of one ladder) because `readBackFrames` reads the
+  frame code out of an _encoded_ picture. Not one assertion moved at any of the three.
+  **The third turn is the one that narrowed the knob, and it was counted rather than
+  described.** Over the 27 CI runs after the second, the gate lost its GPU process on six
+  and on a third of all _launches_ — two got a reading on the relaunch and passed, four
+  lost it twice and failed — always inside the export pass. The comparison ahead of it
+  has never crashed once, and it is the heavier half by everything this harness controls:
+  two contexts against one, two readers against one, ~150 composites against 168. So
+  neither the composite nor the context count is the marginal term. What the export pass
+  adds is the `new VideoFrame(canvas)` snapshot and the RGB→YUV conversion feeding a
+  software encoder — the allocation the crash names — and that scales with the **output**
+  area alone, which is why the fixture was left where it was. `OUTPUT_SIZE`'s docblock in
+  `test/export-golden/harness.ts` owns the figures and names the one term still untouched
+  if it returns: §5.3's backpressure lets nine of those conversions be in flight at once,
+  where `generate4kPart` drains fully between frames and has never crashed here.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
