@@ -114,6 +114,23 @@ export interface SliderGesture {
   amount: number;
 }
 
+/**
+ * A gesture that ends on the value it started from.
+ *
+ * The one shape that reaches the "this changes nothing" branch of every two-phase
+ * callback, and the only way to see whether a provisional document was left behind:
+ * nothing commits, so the editor must be *showing* what it committed rather than the
+ * last value the drag passed through on its way back.
+ */
+export interface SettledGesture {
+  /** `project.document`'s magnification — provisional while a drag is live. */
+  shownAmount: number;
+  /** What the previous gesture actually committed, measured rather than assumed. */
+  committedAmount: number;
+  /** Revisions the whole return trip cost. It changed nothing, so it is not an edit. */
+  revisions: number;
+}
+
 /** Mean absolute difference between two decoded export frames, per channel averaged. */
 export interface FrameDelta {
   label: string;
@@ -137,5 +154,6 @@ export interface ControlsReport {
   deltas: FrameDelta[];
   /** `null` until the gesture has been driven, so a run that died before it says so. */
   slider: SliderGesture | null;
+  settled: SettledGesture | null;
   notes: string[];
 }

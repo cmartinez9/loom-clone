@@ -431,21 +431,14 @@ async function start(): Promise<void> {
         // between the key's neighbours, so a drag past one stops rather than
         // replacing it — `setKey` upserts by `t`, and a landing on a neighbour would
         // delete it and report success.
-        const ops = moveKeyOps(project.committed, key, toSec);
-        if (ops === null) return;
-        if (phase === 'move') provisional(ops);
-        else project.commit(ops, 'Move keyframe');
+        edit(moveKeyOps(project.committed, key, toSec), phase, 'Move keyframe');
       },
       onMoveSpan: (spanId, times, phase) => {
-        const ops = retimeAnnotationOps(
-          project.committed,
-          spanId,
-          times,
-          project.sourceDurationSec,
+        edit(
+          retimeAnnotationOps(project.committed, spanId, times, project.sourceDurationSec),
+          phase,
+          'Move note',
         );
-        if (ops === null) return;
-        if (phase === 'move') provisional(ops);
-        else project.commit(ops, 'Move note');
       },
     },
   );
@@ -508,10 +501,7 @@ async function start(): Promise<void> {
       if (spanId !== null) select({ kind: 'annotation', spanId });
     },
     onEditAnnotation: (spanId, geometry, phase) => {
-      const ops = moveAnnotationOps(project.committed, spanId, geometry);
-      if (ops === null) return;
-      if (phase === 'move') provisional(ops);
-      else project.commit(ops, 'Move note');
+      edit(moveAnnotationOps(project.committed, spanId, geometry), phase, 'Move note');
     },
     onPick: (at) => {
       if (at === null) {
@@ -548,15 +538,11 @@ async function start(): Promise<void> {
         selectZoomAt(at0);
         return;
       }
-      const ops = updateZoomOps(
-        project.committed,
-        region.index,
-        { center: at },
-        project.sourceDurationSec,
+      edit(
+        updateZoomOps(project.committed, region.index, { center: at }, project.sourceDurationSec),
+        phase,
+        'Move zoom',
       );
-      if (ops === null) return;
-      if (phase === 'move') provisional(ops);
-      else project.commit(ops, 'Move zoom');
     },
   });
 
@@ -615,10 +601,11 @@ async function start(): Promise<void> {
         // while the thumb is down, one commit on release. `inspector.ts`'s `range`
         // argues why a slider that committed per `input` is a control that does not
         // work rather than one that costs too many undo steps.
-        const ops = updateZoomOps(project.committed, index, patch, project.sourceDurationSec);
-        if (ops === null) return;
-        if (phase === 'move') provisional(ops);
-        else project.commit(ops, 'Adjust zoom');
+        edit(
+          updateZoomOps(project.committed, index, patch, project.sourceDurationSec),
+          phase,
+          'Adjust zoom',
+        );
       },
       onRemoveZoom: (index) => {
         const ops = removeZoomOps(project.committed, index);
@@ -652,10 +639,7 @@ async function start(): Promise<void> {
         select(null);
       },
       onStyleAnnotation: (spanId, patch, phase) => {
-        const ops = styleAnnotationOps(project.committed, spanId, patch);
-        if (ops === null) return;
-        if (phase === 'move') provisional(ops);
-        else project.commit(ops, 'Restyle note');
+        edit(styleAnnotationOps(project.committed, spanId, patch), phase, 'Restyle note');
       },
       onRetimeAnnotation: (spanId, times) => {
         const ops = retimeAnnotationOps(
@@ -715,6 +699,31 @@ async function start(): Promise<void> {
       // the drag's next event recomputes it from the committed document, so there is
       // nothing to report and nothing to undo.
     }
+  }
+
+  /**
+   * One step of a two-phase gesture — the shared boundary every drag ends at.
+   *
+   * Each op builder answers `null` for "this would change nothing", and every gesture
+   * can reach that: a slider dragged away and back, a keyframe returned to where it
+   * was, an annotation dropped where it was picked up. Returning early there is the
+   * bug, because the *previous* move already left a provisional document on
+   * `EditorProject` and nothing else clears it — the preview then shows a value that
+   * is not in `edit.json` and `renderControls`, which reads `project.document`, shows
+   * it too, until the next commit or undo happens by. `onTrimCommit` has always
+   * cancelled the preview in that case; this is the same answer for the other five,
+   * in one place so a sixth cannot be written without it.
+   *
+   * `cancelPreview` is a no-op when nothing is provisional, so a `move` that changes
+   * nothing costs nothing and repeated ones cost nothing after the first.
+   */
+  function edit(ops: readonly EditOp[] | null, phase: 'move' | 'end', label: string): void {
+    if (ops === null) {
+      project.cancelPreview();
+      return;
+    }
+    if (phase === 'move') provisional(ops);
+    else project.commit(ops, label);
   }
 
   /** The generated zoom track whose window covers `atSec`, or `null`. */

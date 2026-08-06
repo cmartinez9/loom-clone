@@ -1597,6 +1597,43 @@ export const MUTATIONS = [
     mustFail: [EDITOR_GENERATORS],
   },
   {
+    name: 'a-region-centre-is-read-by-position',
+    breaks:
+      'the structural identity of a region’s centre. `buildManualZoomTrack` writes ' +
+      'three `center` keys — identity at `startSec`, the user’s framing at the hold, ' +
+      'identity at `endSec` — and picking one by position rather than by the hold ' +
+      'returns the identity ramp-out key the moment the set’s shape changes. The ' +
+      'region then reads back `[0.5, 0.5]` and the next region-level edit rebuilds ' +
+      'the track from `asInput(current)` and writes the frame centre over the user’s ' +
+      'framing, silently.\n' +
+      '   Two ordinary drags reach it and only one is a window question, which is why ' +
+      '`keyBounds` cannot be the guard: the last `amount` key dragged later pushes ' +
+      '`endSec` past the ramp-out centre key, and the last `center` key dragged ' +
+      'earlier does the same while never leaving its own window.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    const distance = Math.abs(key.t - holdStart);',
+    replace: '    const distance = -key.t;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-gesture-that-changes-nothing-strands-its-preview',
+    breaks:
+      'the shared end of a two-phase gesture. Every op builder answers `null` for ' +
+      '"this changes nothing" and every drag can reach that — a slider taken away and ' +
+      'back, a keyframe returned to where it was — so returning early there leaves ' +
+      'the previous move’s provisional document on `EditorProject` with nothing to ' +
+      'clear it. The preview then shows a magnification that is not in `edit.json` ' +
+      'and the inspector, which reads `project.document`, shows it too until the next ' +
+      'commit or undo happens by.\n' +
+      '   Only a gesture that *ends where it started* reaches the branch, which is why ' +
+      'the phase-15 gate drives one: a slider taken away and brought back, with the ' +
+      'editor then asked what it is showing against what it committed.',
+    file: 'apps/renderer/src/editor/main.ts',
+    find: '    if (ops === null) {\n      project.cancelPreview();\n      return;\n    }',
+    replace: '    if (ops === null) {\n      return;\n    }',
+    mustFail: [P15_GATE],
+  },
+  {
     name: 'a-keyframe-drag-leaves-its-own-window',
     breaks:
       "the bound that keeps a dragged key inside its region's own `activeRanges` " +
@@ -1616,8 +1653,9 @@ export const MUTATIONS = [
       'the two phases of a slider gesture. `input` is provisional and `change` ' +
       'commits, so one drag of the thumb is one op, one revision and one undo step; ' +
       'committing on every step means undoing a drag takes as many undos as the ' +
-      'pointer moved, which makes undo useless for the one control the captain named ' +
-      'by hand. It also recompiles on each one — it is `EditorProject.preview` that ' +
+      'pointer moved, which makes undo useless for the control on the one capability ' +
+      'the captain named himself ("Manual option too.", decision-editor-scope.md). ' +
+      'It also recompiles on each one — it is `EditorProject.preview` that ' +
       "debounces on §3.6's 100 ms and `commit` that clears that debounce.",
     file: 'apps/renderer/src/editor/inspector.ts',
     find: "    spec.onChange(parsed, 'move');",
