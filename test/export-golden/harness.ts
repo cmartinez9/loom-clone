@@ -119,10 +119,27 @@ declare global {
   }
 }
 
-/** The fixture's size. Smaller than phase 6's 4K: this gate measures pixels, not time. */
-const FIXTURE_SIZE: [number, number] = [1920, 1080];
-/** Same aspect, so `contentRect` fills and the frame-code band lands where it is looked for. */
-const OUTPUT_SIZE: [number, number] = [1280, 720];
+/**
+ * The fixture's size. Smaller than phase 6's 4K: this gate measures pixels, not time.
+ *
+ * And smaller than the 1920x1080 it was: on a host with no hardware decoder every
+ * composite is a CPU-backed `texImage2D` of a whole source frame, so the *area* of
+ * this constant is the unit of GPU work the run spends — see {@link disposePath} for
+ * what that cost bought on CI. 1280x720 is 44% of the pixels and is a multiple of 16
+ * on both axes, which matters below.
+ */
+const FIXTURE_SIZE: [number, number] = [1280, 720];
+/**
+ * Same aspect, so `contentRect` fills and the frame-code band lands where it is
+ * looked for — and, like the fixture, a whole number of macroblocks on both axes.
+ *
+ * The alignment is load-bearing rather than tidy: {@link readBackFrames} reads the
+ * frame code out of a picture the *encoder* produced, and an output size H.264 has to
+ * pad would come back with a coded height above the display height, letterbox by a
+ * couple of pixels against `contentRect`'s expectation, and move the band off the row
+ * the reader samples.
+ */
+const OUTPUT_SIZE: [number, number] = [1024, 576];
 const FIXTURE_FRAMES = 90;
 const GOP = 30;
 const FPS = 30;
@@ -330,12 +347,29 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
  * The last one is the one that matters here. `Compositor.dispose` deletes the program,
  * the textures and the render target, but the context itself lives until the canvas is
  * collected — and a live context is one the driver is still holding, whatever this
- * harness has stopped asking of it. The export pass below opens a context of its own
- * and runs a `VideoEncoder` over it, and on CI's virtualised GPU that moment is where
- * the GPU process exited: `abnormal-exit`, then four `CONTEXT_LOST_WEBGL` — one per
- * context, which is how it was clear all four were still there. The shipping export
- * window has exactly one context (`createExportCanvas`), so this run has one too by
- * the time it encodes, rather than one plus three nobody has any use for.
+ * harness has stopped asking of it.
+ *
+ * ## What this cost on CI, and what the two paths above are for
+ *
+ * On a GitHub macOS runner — "Apple Paravirtual device", software decode, so every
+ * composite is a whole CPU-backed source frame converted and uploaded — this run used
+ * to open **four** paths: preview, export, a third for the divergence controls, and a
+ * fourth for the end-to-end export pass. It died on four runs out of five, always at
+ * the same instant: `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane`, then
+ * `Restarting GPU process due to unrecoverable error`, within a second of
+ * `export writer open` — the moment the *fourth* context was created and started
+ * uploading, with the three released ones still resident in a GPU process that had not
+ * yet caught up with their teardown. Unsetting `--force-gpu-mem-available-mb` (see
+ * `main.ts`) was necessary and not sufficient; releasing the contexts here was
+ * necessary and not sufficient either, because a release is a message to another
+ * process and the allocation that failed was the very next one.
+ *
+ * So the run now opens **two** paths and no more, and neither the controls nor the
+ * export pass creates a third: the peak is two contexts rather than four, and the
+ * export pass — the heaviest phase, and the one that adds a `VideoEncoder` and a
+ * `new VideoFrame(canvas)` per frame — runs on a context that has been alive since the
+ * start rather than on one allocated at exactly the worst moment. That is also the
+ * shipping shape: the export window has exactly one context (`createExportCanvas`).
  *
  * `WEBGL_lose_context` is the only way a page can hand a context back; it is not
  * available to a caller that has anything left to read, which is why this is the
@@ -531,9 +565,12 @@ async function run(): Promise<GoldenReport> {
   const indexUrl = written.indexUrl;
   const durationSec = written.durationSec;
 
+  // Two paths, and every phase below reuses one of them — see `disposePath` for what
+  // a third and a fourth cost on CI. Two is also exactly the claim: preview and export
+  // are two processes in the shipping app, so the comparison needs two of everything —
+  // and nothing after it needs a third.
   const preview = await openPath(mediaUrl, indexUrl, durationSec);
   const exporter = await openPath(mediaUrl, indexUrl, durationSec);
-  const control = await openPath(mediaUrl, indexUrl, durationSec);
   // Read now rather than at the end: a context that is lost mid-run answers `null` to
   // every query, and this path is closed before the export pass in any case.
   const glRenderer = describeContext(preview.gl);
@@ -623,15 +660,21 @@ async function run(): Promise<GoldenReport> {
   }
 
   // ---- the divergence controls ------------------------------------------------
+  // Run on the **export** path, not on a third one of their own. A control is the real
+  // `ExportRenderLoop` with exactly one thing perturbed, and running it on the same
+  // context and the same reader the unperturbed loop just used is what makes the
+  // non-zero answer attributable to the perturbation rather than to the context. The
+  // main comparison is finished with this path by here; nothing below reads it until
+  // the export pass.
   const controls: ControlOutcome[] = [];
 
   controls.push(
     await runControl({
       name: 'clock-skew',
       what: 'the export timeline’s zoom keys moved one output frame later (§4.5: zoom amount and centre must be identical)',
-      path: control,
+      path: exporter,
       timeline: compile(skewedDocument(durationSec), EMPTY_COMPILE_CONTEXT),
-      source: control.reader,
+      source: exporter.reader,
       indices,
       timelineForPreview: timeline,
       previewLoop,
@@ -646,9 +689,9 @@ async function run(): Promise<GoldenReport> {
     await runControl({
       name: 'frame-selection',
       what: `the export reader selecting the frame ${sourceFrameSec.toFixed(3)}s later (§4.5: which source frame is selected must be identical)`,
-      path: control,
+      path: exporter,
       timeline,
-      source: offByOneReader(control.reader, sourceFrameSec),
+      source: offByOneReader(exporter.reader, sourceFrameSec),
       indices,
       timelineForPreview: timeline,
       previewLoop,
@@ -663,26 +706,22 @@ async function run(): Promise<GoldenReport> {
     );
   }
 
-  // ---- everything the comparison needed is read; let it go ---------------------
-  // Before the export pass, not after it, and the contexts with it — see
-  // `disposePath`. These three readers hold a ring of twenty 1920x1080 frames each,
-  // and on a host with no hardware decoder those are CPU-backed copies uploaded into
-  // three live contexts. The export pass then opens one of its own and runs a
-  // `VideoEncoder` over it, which is the peak this run reaches and exactly where CI's
-  // GPU process exited. Nothing below reads these paths.
-  const liveBefore =
-    preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
+  // ---- everything the comparison needed is read; let the preview path go --------
+  // Before the export pass, not after it, and the context with it — see `disposePath`.
+  // Each reader holds a ring of twenty source frames, and on a host with no hardware
+  // decoder those are CPU-backed copies uploaded into a live context. The export pass
+  // below is the peak this run reaches: it adds a `VideoEncoder` and a
+  // `new VideoFrame(canvas)` per frame on top of the same composite. It runs on the
+  // export path, which is already open — nothing here opens another.
+  const liveBefore = preview.reader.liveFrames + exporter.reader.liveFrames;
   log(`live frames before the export pass: ${liveBefore}`);
   disposePath(preview);
-  disposePath(exporter);
-  disposePath(control);
   // §10.2 is asserted over every path this run opened, so each contributes what it
   // still holds *after* being closed and the total must be zero.
-  let liveFramesAtEnd =
-    preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
+  let liveFramesAtEnd = preview.reader.liveFrames;
 
   // ---- the end-to-end export --------------------------------------------------
-  const end = await runEndToEnd(mediaUrl, indexUrl, durationSec, fixture.frameCount);
+  const end = await runEndToEnd(exporter, durationSec, fixture.frameCount);
   liveFramesAtEnd += end.liveFramesAtEnd;
 
   // ---- and a cancelled export leaves nothing ---------------------------------
@@ -776,14 +815,19 @@ async function runControl(run: ControlRun): Promise<ControlOutcome> {
  * comes off the *canvas*, through `VideoEncoder` and `ExportMp4Writer`. This is the
  * half that checks the second path carries the first path's pictures: an identity
  * timeline, so the fixture's own frame-number band is where the reader looks for it.
+ *
+ * It is handed the **export path the comparison already used** rather than opening one
+ * of its own: this is the heaviest phase of the run, and a fresh context created right
+ * here is what took CI's GPU process away four times out of five (`disposePath`).
+ * Nothing about the pass depends on the context being new — `renderAt` re-resolves and
+ * re-composites every frame from the timeline — and the shipping export window has one
+ * context doing exactly this.
  */
 async function runEndToEnd(
-  mediaUrl: string,
-  indexUrl: string,
+  path: Path,
   durationSec: number,
   fixtureFrames: number,
 ): Promise<{ exported: GoldenReport['exported']; liveFramesAtEnd: number }> {
-  const path = await openPath(mediaUrl, indexUrl, durationSec);
   const doc = newEditDocument();
   doc.output = { size: OUTPUT_SIZE, fps: FPS, background: { kind: 'none' } };
   doc.clips = [{ id: 'whole', sourceStart: 0, sourceEnd: durationSec, speed: 1 }];

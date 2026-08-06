@@ -841,33 +841,35 @@ was not a control.
   control beside each, because a watchdog with no control is just a shorter export.
   The gate then relaunches **once**, for a lost context and nothing else
   (`test/export-golden/relaunch.ts`, fenced by `test/relaunch-policy.test.ts` exactly
-  as phase 6's is), and its harness closes the preview, export and control paths
-  _before_ the end-to-end pass rather than after it: three readers holding twenty
-  1080p frames each, live under a fourth context and a `VideoEncoder`, is the peak the
-  run reaches and is where CI's GPU process went. **Closing them is not releasing
-  them** — `Compositor.dispose()` deletes the program, the textures and the render
-  target, and the _context_ lives on until the canvas is collected, which is why the
-  GPU still had four to lose (one `CONTEXT_LOST_WEBGL` each) when it exited at that
-  moment on two consecutive runs. `disposePath` hands each one back with
-  `WEBGL_lose_context`, so the run encodes with the single context the shipping export
-  window has; a release the harness asked for is kept out of `contextLost` by name
-  rather than by inference.
-- **Do not copy `--force-gpu-mem-available-mb` from the phase-6 gate into anything that
-  also encodes.** It overrides Skia's GPU resource-cache budget in the GPU process, so
-  phase 6's `2048` tells the driver it may hold two gigabytes of textures before
-  purging one. Phase 6 can afford the claim — it uploads a frame and draws it. The
-  phase-8 golden harness cannot: every composite there is a YUV→RGB conversion of a
-  software-decoded 1920x1080 source _plus_ a `new VideoFrame(canvas)` for the encoder,
-  so on a GitHub runner's "Apple Paravirtual device" the budget is never reached,
-  nothing is ever purged, and the first allocation the device genuinely cannot serve is
-  fatal rather than a cache miss. Three consecutive CI runs died the same way, always
-  within a second of `export writer open`: `Failed to allocate texture` inside
+  as phase 6's is). **Closing a path is not releasing it** — `Compositor.dispose()`
+  deletes the program, the textures and the render target, and the _context_ lives on
+  until the canvas is collected, which is why the GPU still had four to lose (one
+  `CONTEXT_LOST_WEBGL` each) when it exited on two consecutive runs. `disposePath`
+  hands each one back with `WEBGL_lose_context`, and a release the harness asked for is
+  kept out of `contextLost` by name rather than by inference.
+- **The phase-8 golden harness died on CI four times in five, and what closed it was
+  asking the GPU for less — not tuning a switch.** Always the same instant, within a
+  second of `export writer open`: `Failed to allocate texture` inside
   `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error`.
-  Two earlier readings of that crash — the four live contexts, then the three readers'
-  sixty 1080p frames — were both real and neither closed it; the switch was the cause.
-  `test/export-golden/main.ts` therefore leaves it unset and says so, and a gate that
-  measures pixels rather than time loses nothing by letting Chromium size the cache
-  from the machine it is on.
+  Two things were tried first and neither closed it, both worth knowing because both
+  _sound_ decisive. **One:** `--force-gpu-mem-available-mb` overrides Skia's GPU
+  resource-cache budget, so phase 6's `2048` tells the driver it may hold two gigabytes
+  before purging one — a claim phase 6 can make (it uploads a frame and draws it) and
+  this gate cannot, since every composite here is a YUV→RGB conversion of a
+  software-decoded source _plus_ a `new VideoFrame(canvas)` for the encoder.
+  `test/export-golden/main.ts` leaves it unset and says so, which is still right; the
+  crash came back anyway. **Two:** releasing each finished path's context before the
+  end-to-end pass — also still right, also not sufficient, because a release is a
+  message to another process and the allocation that failed was the very next one.
+  What closed it was the peak itself: the run opened **four** paths (preview, export, a
+  third for the divergence controls, a fourth for the export pass) over a 1920x1080
+  source, and created that fourth context at exactly the moment three released ones
+  were still resident. It now opens **two** and reuses them — the controls run on the
+  export path, and so does the export pass — over a 1280x720 source into a 1024x576
+  output, both a whole number of macroblocks because `readBackFrames` reads the frame
+  code out of an _encoded_ picture. Not one assertion moved. The knob on a virtualised
+  runner is the source frame's **area × the number of live contexts**, not the cache
+  budget.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the

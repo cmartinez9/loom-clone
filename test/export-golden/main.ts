@@ -140,6 +140,14 @@ registerLoomScheme();
 // from the machine it is actually on and purges under pressure, which costs this gate
 // nothing: it measures pixels, not time.
 //
+// **Necessary, and on its own not sufficient.** The same crash came back on four of the
+// next five runs, at the same instant and with the same message. What the flag never
+// addressed is how much this harness was asking the device for: four contexts, four
+// readers and a 1920x1080 source, with a fresh context created for the export pass at
+// the exact moment three released ones were still resident. `harness.ts`'s
+// `disposePath` carries that reading and what closed it. Do not read this block as the
+// fix.
+//
 // Same reasons as the phase-6 gate: this run composites 4K-class frames and must not
 // have the GPU process taken away from it, or be descheduled mid-encode, on a shared
 // host. Nothing here is timed — but a lost context makes every pixel comparison a
