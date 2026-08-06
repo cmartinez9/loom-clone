@@ -123,6 +123,8 @@ const OVERLAY = 'apps/main/test/overlay.test.ts';
 const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
 /** The event logs a recording writes, driven through `RecorderSession` itself. */
 const EVENTS = 'apps/main/test/recorder-events.test.ts';
+/** The phase 6 gate: §8's 16.67 ms frame budget, judged on the single worst frame. */
+const PHASE6 = 'test/phase6-gate.test.ts';
 /**
  * The phase-6 gate's own judgement policy: which host earns which bound, and when a
  * phase is not judged at all.
@@ -149,6 +151,9 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * reports *skipped* when every launch lost its WebGL context, because §4.5's per-pixel
  * zero was then neither met nor missed (`test/export-golden/verdict.ts`). That is the
  * honest outcome for the gate and it leaves this script with nothing to conclude.
+ * `test/phase6-gate.test.ts` is the other one, for its own reason: it reports *skipped*
+ * when its environment control missed the budget it was measuring against, so §8's frame
+ * budget was not judged either (`test/gate/budget-control.ts`).
  *
  * Declared rather than detected, and the list is the point. A mutation whose `mustFail`
  * lies **entirely** inside this set has no guard that is certain to answer on any given
@@ -160,10 +165,16 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * would be counting withheld runs over time, which would make the warning itself depend
  * on the hosts that caused it.
  *
+ * Being declared is also why {@link PHASE6} is named here while nothing in the registry
+ * points at it: no mutation lists the phase-6 gate in its `mustFail` today, so what this
+ * run prints is unchanged by its presence. A set that is declared rather than detected
+ * only closes the gap it exists for if it is complete **before** the mutation arrives —
+ * a list completed in the same change that first needs it never warned anyone.
+ *
  * The fix for anything listed is a **second guard that cannot withhold**, not a change
  * to the gate and not a retry.
  */
-const WITHHOLDABLE_GUARDS = new Set([PHASE8]);
+const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -1472,8 +1483,17 @@ const reportPath = join(reportDir, 'vitest.json');
  * whose only test skipped still reports `passed` — and never off the summary text, which
  * is a reporter's prose. If the report is unreadable the run falls back to the exit code,
  * which is the behaviour this had before.
+ *
+ * The report is **deleted before every run**, so an unreadable one means this run wrote
+ * nothing rather than that the previous run's answer is still lying there. One path is
+ * shared by all ~96 mutations and `--outputFile.json` is written at exit, so a vitest that
+ * exits 0 without reaching it would otherwise be graded off its predecessor's statuses:
+ * an all-skipped predecessor would turn a genuine `survived` — a real hole, and the one
+ * thing this script exists to report — into a `no-verdict` that does not fail the build.
+ * The `catch` below cannot see that, because a stale file parses.
  */
 function runTests(files) {
+  rmSync(reportPath, { force: true });
   const result = spawnSync(
     'npx',
     [
@@ -1497,6 +1517,15 @@ function runTests(files) {
   }
   const withheld = tests.length > 0 && tests.every((test) => test.status === 'skipped');
   return { verdict: withheld ? 'no-verdict' : 'survived', output };
+}
+
+/** A child's own words, set under the label line that introduced them. */
+function indented(text) {
+  return text
+    .trimEnd()
+    .split('\n')
+    .map((line) => (line.trim() === '' ? '' : `      ${line}`))
+    .join('\n');
 }
 
 const results = [];
@@ -1523,7 +1552,7 @@ try {
     const survived = [];
     const noVerdict = [];
     for (const file of mutation.mustFail) {
-      const { verdict } = runTests([file]);
+      const { verdict, output } = runTests([file]);
       if (verdict === 'caught') caughtBy.push(file);
       else if (verdict === 'no-verdict') noVerdict.push(file);
       else survived.push(file);
@@ -1534,6 +1563,13 @@ try {
             ? 'NO VERDICT'
             : 'SURVIVED  ';
       console.log(`   ${label} ${file}`);
+      // A withheld verdict is the one outcome whose whole content is in the gate's own
+      // words. `caught` and `survived` are answers and the label carries them; this one
+      // is the absence of an answer, and only the gate's NOT JUDGED banner says what took
+      // the instrument away — which is the difference between a host to re-run on and a
+      // gate to fix. `spawnSync` pipes rather than inherits, so it is printed here or
+      // nowhere, and CI run 31099311259 is what "nowhere" reads like afterwards.
+      if (verdict === 'no-verdict' && output.trim() !== '') console.log(indented(output));
     }
 
     writeFileSync(path, original);
