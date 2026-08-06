@@ -1,10 +1,10 @@
 /**
  * What the library says about a finished export, and what became of the sources.
  *
- * §7.5 obligation 2 is *"the user is told"*, and the captain's standard for after the
- * fact is the one he set for a damaged recording that still opens: say what happened,
- * name what survived and what did not, and never imply an outcome the disk does not
- * support.
+ * §7.5 obligation 2 is *"the user is told"*, and the standard for after the fact is the
+ * one `decision-journal-damage-recovery` already set for a damaged recording that still
+ * opens: say what happened, name what survived and what did not, and never imply an
+ * outcome the disk does not support.
  *
  * There are **three** outcomes, not two. `ExportResult.sourcesDeleted` is deliberately
  * not the negation of `sourcesKept` — the escape hatch is one of several reasons a

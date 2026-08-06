@@ -408,6 +408,37 @@ inspector that has its own control. Nine retention mutations in
 `npm run verify:mutation` break the production source on disk — including making the
 deletion unconditional, which is the mutation the gate exists for.
 
+**Obligation 2's surface has never been observed rendering, and that is a hole in a
+data-destruction safeguard rather than a documentation nicety.** The export sheet in
+`apps/renderer/src/library/main.ts` _is_ §7.5 obligation 2 — the settled decision that
+the user is **told** before their sources go, and that there is no silent destruction —
+and `RETENTION_COPY.warning` is that promise in words. Nobody has watched it appear on
+a screen. **The failure mode is not cosmetic**: if the sheet does not open at all, or
+opens with the warning clipped, off-screen or below the fold, the user is not told and
+the sources are deleted anyway — and the safeguard fails **silently, with every test
+still green**. `packages/format/test/retention.test.ts` pins the sentences,
+`apps/renderer/test/export-notice.test.ts` pins which one is chosen, and `main.ts`
+builds the nodes; none of that is the claim that a person can read the warning where it
+is put. Copy asserted in a DOM and copy read by a human are different claims.
+**What _is_ established**, so this is honest in both directions: the library window
+loads and renders with this code without throwing (observed),
+`packages/design/test/no-generic-look.test.ts` passes over `library.css`, and the sheet
+reuses only existing tokens and component classes. What is missing is specifically the
+human observation, and the reason is environmental — `scripts/screenshot.cjs` boots the
+real main process, whose recordings root is `homedir()` with no override but
+`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
+scratch library, and seeding the captain's real recordings root from a task worktree
+was not acceptable. **Where it is discharged**: the project's single signed-bundle
+end-to-end pass, the one run once and deliberately at the end because packaging and
+re-signing void the captain's grants. It belongs to that pass beside
+`microphone-revocation` and `overlay-content-protection`, which report `skipped` in
+§ Phase 2 gate status for the same reason — one item on a known list, not an orphan.
+**And it may not be upgraded to verified on the strength of a test.** No number of
+passing assertions about the copy discharges it; only a human seeing that sheet
+rendered in a running app does. It is recorded here rather than in § Carried forward on
+purpose, and should stay: that list is obligations on phase 2's signed-bundle gate, and
+this is not one of them — moving it there would dilute what that list means.
+
 ## Sharp edges — retention
 
 - **`RETENTION_SOURCE_DIRECTORIES` is exactly §7.5's `media/` and `events/`.**

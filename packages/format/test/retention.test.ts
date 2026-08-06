@@ -144,9 +144,10 @@ describe('§7.5 obligation 2 — the words the user is shown', () => {
   });
 
   it('says plainly what a half-finished deletion left behind, and what happens next', () => {
-    // The captain's standard for damage: name what did not survive rather than
-    // reassure. Each clause is asserted because dropping any one of them turns this
-    // back into a sentence that implies a clean outcome the disk does not support.
+    // `decision-journal-damage-recovery`'s standard for damage: name what did not
+    // survive rather than reassure. Each clause is asserted because dropping any one of
+    // them turns this back into a sentence that implies a clean outcome the disk does
+    // not support.
     const copy = RETENTION_COPY.deletionFailed;
     // ...that it was authorised, and did not finish.
     expect(copy).toMatch(/authorised/);

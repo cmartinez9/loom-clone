@@ -76,9 +76,10 @@ export const RETENTION_COPY = {
    * It exists because `sourcesDeleted` has three outcomes and {@link RETENTION_COPY}
    * had two sentences, so a half-deleted recording was being reported with
    * {@link RETENTION_COPY.kept} — a false assurance about data that is partly gone,
-   * discovered only when the user tries to edit it. The captain's standard is the one
-   * he set for a damaged recording that still opens: say what happened, name what
-   * survived and what did not, and do not imply an outcome the disk does not support.
+   * discovered only when the user tries to edit it. The standard is the one
+   * `decision-journal-damage-recovery` set for a damaged recording that still opens:
+   * say what happened, name what survived and what did not, and do not imply an
+   * outcome the disk does not support.
    *
    * The last sentence is a statement of fact rather than a hope: step 1 wrote the
    * `retention` record before anything was unlinked, so `listInterruptedRetention`
