@@ -8,9 +8,10 @@ a recording is a folder on your disk that you can open in Finder.
 **Phase 2 of 14: permissions and first run**, on top of phase 1's capture spine,
 phase 3's audio and A/V sync machinery and phase 4's webcam track and multi-part
 recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
-WebGL2 compositor, phase 7's timeline model, phase 8's exporter, phase 10's
-cursor-follow and auto-zoom generators, phase 11's annotations and phase 12's live
-drawing overlay, built early and out of order because they are self-contained.
+WebGL2 compositor, phase 7's timeline model, phase 8's exporter, phase 9's
+delete-after-export retention, phase 10's cursor-follow and auto-zoom generators,
+phase 11's annotations and phase 12's live drawing overlay, built early and out of
+order because they are self-contained.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -91,18 +92,34 @@ running the shipping preview loop and the shipping export loop over one recordin
 two WebGL2 contexts, and comparing 24 timestamps at a per-pixel difference of **zero**
 — with two controls that each perturb the real export path and must each drive that
 difference off zero. The finished MP4 is then decoded back and held to the checks
-phase 9 will have to trust before it offers to delete anything: the file exists, is
-not empty, demuxes, is the right length, and its last frame decodes. An export that
-fails those checks is not left behind, and a cancelled one leaves no file at all.
+phase 9 trusts before it deletes anything: the file exists, is not empty, demuxes, is
+the right length, and its last frame decodes. An export that fails those checks is not
+left behind, and a cancelled one leaves no file at all.
 
 Export writes to `~/Movies/Loom Clone/Exports` unless the folder is changed — it is
 picked once and remembered, never asked for on every export — and then puts the file
 itself on the clipboard, as a file reference rather than as a path string, and reveals
 it in Finder. There is no network code anywhere in that path: no share sheet, no
-upload, no account. There is also no button on it yet, because the editor window an
-export starts from is a later phase, so what runs today is the machinery underneath
-it. `AGENTS.md` records what has and has not been watched by hand — the pasteboard
-mechanism has, a paste landing in another app as a video has not.
+upload, no account. An export starts from the library today: an editable recording's
+row carries an Export button that expands into an export sheet in the row itself. The
+editor window that will also start one is a later phase. `AGENTS.md` records what has
+and has not been watched by hand — the pasteboard mechanism has, a paste landing in
+another app as a video has not.
+
+The property phase 9 establishes: **nothing is deleted until the export is proved
+good, and you are told before it happens.** Exporting is what makes a recording final:
+once the file exists, is not empty, demuxes, is the right length and its last frame
+decodes, the original screen, camera, audio and cursor data are removed and the
+recording stops being editable. The export sheet says that in the row you press the
+button in, not in a dialog afterwards, and carries a switch that keeps the sources this
+time. A failed, cancelled or interrupted export deletes nothing, and a crash part-way
+through a deletion is finished on the next launch rather than left looking like a
+recording that still opens. Nothing is ever deleted by age, by disk pressure or by
+launching the app — only by an export that passed. `npm test` proves it by failing a
+real export at each of the ten ways verification can fail, one at a time, and requiring
+every source file to survive byte for byte, with an undamaged control that must
+actually delete; a real `SIGKILL` aimed at each of the three deletion steps is the
+other half.
 
 The property phase 10 establishes: **framing that moves itself is measured, not
 judged.** Cursor-follow keeps a rest box around the pointer and pulls a spring toward
@@ -149,11 +166,11 @@ carries the readings an unpackaged dev run of the test it replaced produced, and
 plainly that they are not evidence the shipped check has reproduced them.
 
 `npm run verify:mutation` proves those gates are real by breaking capture, the
-timeline model, the export, the generators, the annotation path, the drawing overlay
-and the event logs one way at a time — editing the production source on disk — and
-requiring a test to fail each time. The one property it deliberately leaves uncovered,
-because no test in `npm test` can catch it, is named in `AGENTS.md` rather than papered
-over.
+timeline model, the export, retention, the generators, the annotation path, the
+drawing overlay and the event logs one way at a time — editing the production source
+on disk — and requiring a test to fail each time. The one property it deliberately
+leaves uncovered, because no test in `npm test` can catch it, is named in `AGENTS.md`
+rather than papered over.
 
 ## Requirements
 
