@@ -186,6 +186,30 @@ async function run() {
   if (audio && (report.audio ?? []).length === 0) {
     console.error('no audio track was recorded; see the child process output above for why.');
   }
+
+  // §2.5's logs. Cursor position needs no permission, so an absent cursor log is a
+  // defect on any machine; clicks need Accessibility, and `available: false` is a
+  // fact about the grant rather than a fault.
+  const events = report.events ?? {};
+  if (events.cursor === undefined) {
+    console.error(
+      'no cursor log was written. Position needs no permission, so this is the recorder ' +
+        'failing to sample rather than macOS refusing — see the child process output above.',
+    );
+  } else {
+    console.log(
+      `cursor: ${events.cursor.sampleCount} samples at ${events.cursor.hz} Hz — ` +
+        `${events.cursor.file}`,
+    );
+  }
+  if (events.clicks !== undefined) {
+    console.log(
+      events.clicks.available
+        ? `clicks: captured via ${events.clicks.source} — ${events.clicks.file}`
+        : 'clicks: not captured. Accessibility is not granted to this process, so ' +
+            'clicks.ndjson does not exist — which is the honest answer, not an empty file.',
+    );
+  }
   if (report.source === 'synthetic') {
     console.log(
       'Source: SYNTHETIC. The renderer path above is real; the display source was a\n' +

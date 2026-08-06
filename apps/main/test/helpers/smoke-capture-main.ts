@@ -38,6 +38,7 @@
 
 import { app, shell, systemPreferences, type BrowserWindow } from 'electron';
 import { join } from 'node:path';
+import { helperPathFor } from '../../src/input-sampler.ts';
 import { ProjectStore } from '../../src/project-store.ts';
 import { RecorderSession } from '../../src/recorder/session.ts';
 import { installLoomProtocol, registerLoomScheme } from '../../src/protocol.ts';
@@ -76,6 +77,11 @@ const recorder = new RecorderSession({
   windows,
   appVersion: app.getVersion(),
   osVersion: process.getSystemVersion(),
+  // The same path `apps/main/src/index.ts` hands it. This script is bundled to its
+  // own scratch directory rather than to `dist/main`, so `@loom/sampler`'s default —
+  // which is `dist/native` relative to the bundle — would miss, and the run would
+  // report a recording with no cursor log while the app writes one.
+  inputHelperPath: helperPathFor(distRoot),
 });
 
 const sleep = (ms: number): Promise<void> =>
@@ -270,6 +276,11 @@ app
         codec: part?.codec ?? null,
         droppedFrames: opened.recording?.capture.droppedFrames.screen ?? 0,
         audio: audioTracks,
+        // §2.5's logs. Reported here for the same reason the audio numbers are:
+        // this is the only tool that runs the whole recorder against real clocks,
+        // and "how many samples, and were clicks live" is exactly the pair that
+        // cannot be read off a unit test.
+        events: opened.recording?.events ?? null,
         path: summary?.path ?? null,
       })}\n`,
     );

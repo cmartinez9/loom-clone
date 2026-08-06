@@ -44,6 +44,7 @@ import type {
   DisplayInfo,
   PartEndReason,
   RecordingDoc,
+  RecordingEvents,
   VideoPart,
   VideoTrackDoc,
   VideoTrackKey,
@@ -282,6 +283,16 @@ export interface FinalizedFacts {
   video: { screen: FinalizedVideoTrackFacts; webcam?: FinalizedVideoTrackFacts };
   /** One entry per audio track that produced samples. */
   audio?: Partial<Record<AudioTrackKey, FinalizedAudioFacts>>;
+  /**
+   * What the input sampler wrote (§2.5), from `InputSampler.recordingEvents()`.
+   *
+   * Absent when no sampler ran, which leaves whatever the provisional document said
+   * — `{}` for a recording that never sampled, and the fragment the sampler declared
+   * at its start for one whose stop could not read it back. Never synthesised here:
+   * `clicks.available` is a claim about a whole session and only the sampler that
+   * ran it can make it.
+   */
+  events?: RecordingEvents;
 }
 
 /** The document a clean stop writes: the provisional one, with the real numbers. */
@@ -305,6 +316,7 @@ export function finalizedRecordingDoc(
       ...(webcam === null ? {} : { webcam }),
       ...finalizedAudioTracks(provisional, facts.audio ?? {}),
     },
+    ...(facts.events === undefined ? {} : { events: facts.events }),
     capture: {
       ...provisional.capture,
       droppedFrames: {

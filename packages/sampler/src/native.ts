@@ -73,6 +73,26 @@ export interface InputProbe {
   os: string;
   clicks: ClickTapState;
   display: HelperDisplayInfo | null;
+  /**
+   * The helper's own `CLOCK_UPTIME_RAW` microsecond, as it answered — the clock
+   * every `tUs` on the wire is measured on, and therefore the clock an
+   * `InputSampler`'s `t0Us` has to be expressed in.
+   *
+   * `null` when the helper did not answer at all. A helper that *did* answer but
+   * carried no timestamp reads back as `0` instead: `parseHelperLine` coerces a
+   * missing or non-finite `tUs` to `0`, and that coercion is shared by every line
+   * kind on the wire, so narrowing it here would be a protocol change rather than a
+   * tightening. **A caller must therefore refuse `0` as well as `null`** — a
+   * recording that placed its cursor log at absolute uptime zero would carry
+   * timestamps a month into the future, and `MAX_SOURCE_TIME_SEC` in `@loom/edl`
+   * would silently drop every sample. With no usable reading, decline to sample
+   * rather than guess one.
+   *
+   * A reading is only meaningful with the instant it was taken at on the caller's
+   * own clock; `readHelperClock` in `apps/main/src/input-sampler.ts` is the pairing
+   * this exists for, and it is where both refusals live.
+   */
+  tUs: number | null;
   /** Populated when the helper failed; empty otherwise. */
   problem: string;
 }
@@ -101,6 +121,7 @@ function unavailable(
       tapEnabled: false,
     },
     display: null,
+    tUs: null,
     problem,
   };
 }
@@ -153,6 +174,7 @@ export async function probeInput(options: ProbeOptions = {}): Promise<InputProbe
     os: parsed.os,
     clicks: parsed.clicks,
     display: parsed.display,
+    tUs: parsed.tUs,
     problem: '',
   };
 }

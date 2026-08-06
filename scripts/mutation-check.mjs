@@ -79,6 +79,8 @@ const COMPOSITOR_GEOMETRY = 'packages/compositor/test/annotation-geometry.test.t
 const EDL_DRAWING = 'packages/edl/test/drawing.test.ts';
 const OVERLAY = 'apps/main/test/overlay.test.ts';
 const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
+/** The event logs a recording writes, driven through `RecorderSession` itself. */
+const EVENTS = 'apps/main/test/recorder-events.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -731,6 +733,59 @@ const MUTATIONS = [
     find: '    const sy = Math.max(0, Math.floor(height - (pxRect.y + pxRect.height)));',
     replace: '    const sy = Math.max(0, Math.floor(pxRect.y));',
     mustFail: [PHASE11],
+  },
+
+  // ---- the event logs: a recording that samples the pointer ---------------
+  {
+    name: 'no-recording-samples-the-pointer',
+    breaks:
+      'the whole of it. The sampler existed, was tested, and had no caller in the ' +
+      'product for ten phases: every recording wrote `events: {}` while first-run ' +
+      'setup asked for the Accessibility grant on the promise of that log. Removing ' +
+      'the one call puts it straight back.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '        this.beginSampling(active, active.originAtUs ?? monotonicUs());',
+    replace: '        void active.originAtUs;',
+    mustFail: [EVENTS],
+  },
+  {
+    name: 'sampler-stopped-after-the-bundle-is-closed',
+    breaks:
+      "the ordering rule. `ProjectStore`'s event-log writes require the project to " +
+      'be open and refuse it otherwise, on purpose — so closing first turns the ' +
+      "sampler's final flush and `fsync` into typed refusals nobody reads, and " +
+      'costs the tail of the cursor log.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '    await this.stopSampling(active);',
+    replace:
+      '    await this.options.store.close(active.id).catch(() => undefined);\n' +
+      '    await this.stopSampling(active);',
+    mustFail: [EVENTS],
+  },
+  {
+    name: 'clicks-not-asked-for-when-accessibility-is-missing',
+    breaks:
+      'the distinction the sampler exists to keep. The app asks for clicks on every ' +
+      "recording; whether it gets them is macOS's answer. Conditioning the request " +
+      'on `AXIsProcessTrusted()` writes `not-requested` — "this caller opted out" — ' +
+      'over a grant the user actually declined, and loses the reason a surface ' +
+      'would have to show them.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '      clicks: true,',
+    replace: '      clicks: readAxTrusted(),',
+    mustFail: [EVENTS],
+  },
+  {
+    name: 'cursor-log-stamped-with-the-helpers-raw-clock',
+    breaks:
+      "§2.5's *`t` shares its origin with `VideoFrame.timestamp`*. With the origin " +
+      "unsubtracted, every `t` carries the machine's uptime — 2,678,930 s was " +
+      "measured here — and `@loom/edl`'s sanity pass drops the lot. The symptom is " +
+      'not a wrong log; it is generators that silently produce nothing.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '      t0Us: Math.round(clock.tUs + (originAtUs - clock.atUs)),',
+    replace: '      t0Us: 0,',
+    mustFail: [EVENTS],
   },
 ];
 
