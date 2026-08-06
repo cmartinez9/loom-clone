@@ -1129,13 +1129,33 @@ was not a control.
   the withheld branch end to end, widen the control's own target for one run
   (`new EnvironmentControl(FRAME_BUDGET_MS * 1.5, CONTROL_PERIOD_MS)` in `harness.ts`) and
   revert it — the same shape as overriding `gpuCost` for the deferred branch below.
+  **That recipe silently disarms one assertion, so a widened run is not a run of
+  everything.** The gate constructs **one** `EnvironmentControl` and re-arms it for scrub,
+  play _and_ the slow-compositor phase, so widening its target widens that phase's control
+  too. `environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)` is then deterministically
+  false, `test/phase6-gate.test.ts` takes the else branch, and the slowed path's
+  control-of-the-control — `expect(() => expectTracksControl(slowEvidence)).toThrow(…)` —
+  is **reported as a shortfall rather than required**. §8's own absolute pair against the
+  slowed path (`slow.frames.overBudget > 0`, `slow.frames.maxMs > FRAME_BUDGET_MS`) runs
+  unconditionally either way, so nothing goes unmeasured — but on an **ordinary,
+  unwidened** run on this machine that control reads 8.40 ms,
+  `environmentSustainsBudget` is true and the required throw does fire. A widened run and
+  an ordinary run **together** cover both branches, and neither alone does. The shape that
+  would cover both in one run is giving the slow-compositor phase an `EnvironmentControl`
+  of its own; it is **not attempted** — that is a code change to a sensitive harness, what
+  was found was this record overclaiming rather than the harness being wrong, and this is a
+  documentation commit — and is written down so the coupling is inherited rather than
+  rediscovered.
   **That has been run, on `e7f06a3`**, and the head is named because it is what makes this
   falsifiable later: a reader on a diverged head can see the observation may no longer
   apply, where an undated "it works" cannot go stale visibly. Observed — the banner
   printed; both phases reported `NOT JUDGED`, scrub over 20 spins and play over 125, each
   naming the control's own overrun; and vitest reported `1 skipped` with the reason
   `§8's frame budget was NOT JUDGED and this is not a pass…`, not a pass. Every non-timing
-  assertion ran and held first, which is what the `skip()` being last is for.
+  assertion ran and held first, which is what the `skip()` being last is for — with the one
+  exception the coupling above forces: in that run the slowed path's own
+  control-of-the-control was reported as a shortfall rather than required, while §8's
+  absolute pair against the slowed path held.
   **What it establishes and what it does not**, because the difference is the whole value
   of the record: it exercises the _reporting_ path — `withheldJudgement`, the banner and
   the `skip()` — against a control that genuinely exceeded the budget, so
