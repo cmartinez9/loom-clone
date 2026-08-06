@@ -37,10 +37,10 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
-                          # generators, annotations, the drawing overlay, the event logs
-                          # and both gates' judgement policies; one way per entry in
-                          # scripts/mutation-check.mjs's MUTATIONS registry, which is
-                          # where the count lives — each must fail a gate
+                          # generators, annotations, the drawing overlay, the event logs,
+                          # the editor and both gates' judgement policies; one way per
+                          # entry in scripts/mutation-check.mjs's MUTATIONS registry, which
+                          # is where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -676,8 +676,8 @@ the only protection.
 **The framework question `library/main.ts` deferred to "phase 6 or 7" is answered
 here: vanilla TypeScript against the Pressroom design system, like the other four
 windows.** The argument is in `editor/main.ts`'s header and is not only consistency —
-the two things this window does sixty times a second are a WebGL draw and two style
-writes, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
+the two things this window does sixty times a second are a WebGL draw and one style
+write, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
 inherits the choice; re-taking it is a decision to write down, not one to drift into.
 
 **The timeline is drawn in _source_ time**, and that is the load-bearing layout
@@ -708,19 +708,22 @@ control beside it that source 0 and source 2.0 differ, or the equality would pas
 any recording of a still screen and on a preview that decoded nothing after its first
 frame. `testsrc2` is what makes a pixel hash a fingerprint of a source instant. Five
 `preview-*`/`a-trim-*`/`the-part-*`/`the-timeline-*` entries in `npm run
-verify:mutation` break the production source and require it to notice. It
-deliberately does **not** time the frame budget: §8's 16.67 ms is
-`test/phase6-gate.test.ts`'s, and a second opinion about one number is a weaker one.
+verify:mutation` break the production source on disk, and each names what has to
+notice it — this gate for the two that move the picture, `editor-trim.test.ts` and
+`track-reader.test.ts` for the three that do not. It deliberately does **not** time
+the frame budget: §8's 16.67 ms is `test/phase6-gate.test.ts`'s, and a second opinion
+about one number is a weaker one.
 
 ## Sharp edges — the editor
 
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —
-  and it is shared with the exporter on purpose (§4.5, above). Four separate methods
-  carry the same `t - part.startTimeSec`, so each has its own assertion in
-  `apps/renderer/test/track-reader.test.ts`: three of the four were droppable with
-  every other test in that file still green, which is what "ported a shim, not
+  and it is shared with the exporter on purpose (§4.5, above). Every method that
+  crosses it — `frameAt`, `hasSourceFrameAt`, `selectionMicros`, `prime`, `release` —
+  carries its own copy of `t - part.startTimeSec`, so each has its own assertion in
+  `apps/renderer/test/track-reader.test.ts`: three of them were droppable with every
+  other test in that file still green, which is what "ported a shim, not
   coverage" looks like from the inside. The way that was established is worth reusing
   — break the source ten ways and require each break to fail — because a test that has
   never been seen to fail is a claim, not a measurement.
@@ -1095,6 +1098,17 @@ was not a control.
   from a tree while a mutation run owns it, and if a commit's diff touches a production
   file the change had no business in, check it against the registry before anything else.
   A `find` string missing from a source file is the signature.
+  **What catches a restore that did not happen is `test/mutation-registry.test.ts`, on
+  every `npm test`.** `MUTATIONS` is exported from `mutation-check.mjs` behind a
+  main-module guard, with its shape pinned in `scripts/mutation-check.d.mts` so a new
+  field is a compile error rather than an unchecked property, and every entry's `find`
+  — the _original_ text — must occur in its file exactly **once**. Zero occurrences is
+  the loud case: the mutation is committed into the production source, which no other
+  mechanical check can see (nothing was deleted, the tree typechecks, and the suite is
+  green because a mutation is by construction the kind of change only its own gate
+  notices). More than one means the entry cannot say which line it breaks. It also
+  refuses a replacement equal to its target, a `mustFail` file that is not there, and a
+  duplicate name, which is how an entry stops proving anything quietly.
 - **The mutation proof has three outcomes, and its old two over-claimed.** A gate that
   withholds its verdict exits 0 exactly as one that ran and noticed nothing does, so
   `runTests` reads vitest's per-test statuses rather than the exit code alone: a guard
@@ -1663,9 +1677,9 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   `CompositorFrames`, `ExportRenderLoop` builds its frames without one, and a `text`
   span with no atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`)
   rather than refused — `PreviewLoop` reports that count through `onError` and the
-  export loop does not read it. Nothing authors an annotation today, because the
-  editor is a later phase; hand the export window the same atlas object before
-  anything can.
+  export loop does not read it. Nothing authors an annotation today — the editor shell
+  has no annotation tools, and they are `loom-p15`'s — so hand the export window the
+  same atlas object before anything can.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 

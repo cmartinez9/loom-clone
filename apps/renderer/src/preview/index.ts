@@ -3,9 +3,9 @@
  * `@loom/compositor`.
  *
  * Architecture report §8, phase 6. Phase 7 landed the timeline model the loop now
- * resolves through, but the editor window that hosts it is still ahead: until then
- * its only caller is the phase-6 gate harness, which is the point — the gate
- * exercises the shipping loop, not a copy of it.
+ * resolves through, and phase 14 built the window that hosts it:
+ * `apps/renderer/src/editor/preview-host.ts` is the shipping caller. The phase-6 gate
+ * harness is the other one, and drives this same loop rather than a copy of it.
  */
 
 export { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';

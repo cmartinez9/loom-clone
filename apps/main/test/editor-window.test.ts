@@ -64,7 +64,9 @@ function countingStore() {
     closed,
     released,
     open,
-    hold(id: string) {
+    // An arrow rather than a method, like the two below it: nothing here reads
+    // `this`, and a method handed out unbound is `@typescript-eslint/unbound-method`.
+    hold: (id: string) => {
       holds.set(id, (holds.get(id) ?? 0) + 1);
       open.add(id);
     },

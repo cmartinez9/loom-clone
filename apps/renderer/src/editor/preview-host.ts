@@ -2,12 +2,12 @@
  * The preview, hosted in a window at last.
  *
  * `apps/renderer/src/preview/` has had the loop since phase 6 and no window to live
- * in — its own `index.ts` said so: *"the editor window that hosts it is still ahead:
- * until then its only caller is the phase-6 gate harness."* This is that host, and
- * it is deliberately thin. It owns a canvas, a GL context, a `Compositor` and a
- * `PreviewLoop`, and it adds no rendering of its own, because §4.5 puts preview and
- * export on the must-be-identical list and a preview-only draw call is the one thing
- * that cannot be true of both.
+ * in — its own `index.ts` said so until this phase: *"the editor window that hosts it
+ * is still ahead: until then its only caller is the phase-6 gate harness."* This is
+ * that host, and it is deliberately thin. It owns a canvas, a GL context, a
+ * `Compositor` and a `PreviewLoop`, and it adds no rendering of its own, because §4.5
+ * puts preview and export on the must-be-identical list and a preview-only draw call
+ * is the one thing that cannot be true of both.
  *
  * ## The composite is rendered at the output size, not the window size
  *

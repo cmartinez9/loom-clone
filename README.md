@@ -114,7 +114,7 @@ itself on the clipboard, as a file reference rather than as a path string, and r
 it in Finder. There is no network code anywhere in that path: no share sheet, no
 upload, no account. An export starts from the library today: an editable recording's
 row carries an Export button that expands into an export sheet in the row itself. The
-editor window that will also start one is a later phase. `AGENTS.md` records what has
+editor window has no Export button of its own yet. `AGENTS.md` records what has
 and has not been watched by hand — the pasteboard mechanism has, a paste landing in
 another app as a video has not.
 
