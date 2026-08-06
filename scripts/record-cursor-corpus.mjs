@@ -492,8 +492,12 @@ async function main() {
 /**
  * Fold the per-recording readings into one.
  *
- * Latency percentiles are taken over the pooled samples rather than over the
- * per-recording medians: ten medians of five clicks each is not a distribution.
+ * The per-click latencies are not kept — they would be 40 KB of manifest — so what is
+ * folded here is each recording's summary. `min` and `max` are therefore exact (the min
+ * of mins, the max of maxes), and the two middle figures are **sample-weighted means of
+ * the per-recording medians and p95s**, not pooled percentiles. The field names say so:
+ * `meanOfMedians` and `meanOfP95`. Read the p95 as "the typical recording's p95",
+ * which is not the same statistic as the p95 over all 158 clicks, and quote it that way.
  */
 function aggregateClicks(entries) {
   const usable = entries.filter((e) => e.clickCapture.measured);

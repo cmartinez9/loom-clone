@@ -59,6 +59,56 @@ describe('§6.5 step 1 — cluster greedily', () => {
     // The reading `auto-zoom.ts` documents: clusterBox[0] = targetFill / amountRange[0].
     expect(P.clusterBox[0]).toBeCloseTo(P.targetFill / P.amountRange[0], 12);
   });
+
+  it('clusterGapSec is the gap at which step 1 and step 4 agree', () => {
+    // Derived, not chosen: below it a step-1 split is undone by step 4's merge, at or
+    // above it step 4 would keep the two apart. Anything else makes the two disagree.
+    expect(P.clusterGapSec).toBeCloseTo(P.preRollSec + P.postRollSec + P.mergeGapSec, 12);
+  });
+
+  it('splits two bursts at the same spot when they are more than clusterGapSec apart', () => {
+    // Spatially identical, so nothing but the time criterion can separate them — this
+    // is the case a purely spatial step 1 turns into one zoom held across the gap.
+    const gap = P.clusterGapSec + 0.5;
+    const clustered = clusterClicks(
+      [at(1, 0.5, 0.5), at(1.4, 0.51, 0.5), at(1 + gap, 0.5, 0.5), at(1.4 + gap, 0.51, 0.5)],
+      P,
+    );
+    expect(clustered).toHaveLength(2);
+    expect(clustered[0]?.clicks).toHaveLength(2);
+    expect(clustered[1]?.clicks).toHaveLength(2);
+
+    const segments = mergeSegments(
+      clustered.map((cluster) => segmentOf(cluster, P)),
+      P,
+    );
+    expect(segments).toHaveLength(2);
+  });
+
+  it('keeps two clicks closer than clusterGapSec in one cluster', () => {
+    const clustered = clusterClicks([at(1, 0.5, 0.5), at(1 + P.clusterGapSec - 0.1, 0.5, 0.5)], P);
+    expect(clustered).toHaveLength(1);
+  });
+
+  it('measures the gap against the previous click, so a long steady burst stays one', () => {
+    // Every gap is under clusterGapSec but the burst runs far longer than it. Measured
+    // from the cluster's *first* click this would be cut at an arbitrary point.
+    const step = P.clusterGapSec - 0.4;
+    const clicks30 = Array.from({ length: 30 }, (_, i) => at(i * step, 0.5, 0.5));
+    const clustered = clusterClicks(clicks30, P);
+    expect(clustered).toHaveLength(1);
+    expect(clustered[0]?.clicks).toHaveLength(30);
+  });
+
+  it('minDurationSec cannot fire under §6.5’s own numbers, and is left alone', () => {
+    // The shortest segment a single click can make is preRoll + postRoll, or postRoll
+    // where the pre-roll is clamped at zero. Both exceed minDurationSec, so step 4's
+    // drop is dead — a finding recorded in the module header rather than a number tuned.
+    expect(P.postRollSec).toBeGreaterThan(P.minDurationSec);
+    const atZero = segmentOf(clusterClicks([at(0, 0.5, 0.5)], P)[0]!, P);
+    expect(atZero.end - atZero.start).toBeGreaterThan(P.minDurationSec);
+    expect(mergeSegments([atZero], P)).toHaveLength(1);
+  });
 });
 
 describe('§6.5 step 2 — the zoom shape', () => {
@@ -252,6 +302,49 @@ describe('clicks may be absent, and that is not zero clicks', () => {
     );
     expect(said.size).toBe(3);
     for (const sentence of said) expect(sentence.length).toBeGreaterThan(40);
+  });
+});
+
+describe('the click sanity pass', () => {
+  it('drops a log whose origin was never subtracted, and answers instead of throwing', () => {
+    // `clicks.ndjson` is written by the same sampler as `cursor.ndjson`, from the same
+    // `t0Us`, so a log written with `t0Us = 0` carries machine uptime in both — 2,678,930
+    // seconds of it, measured. Kept, those keys compile a spring table past
+    // MAX_SPRING_TABLE_SEC and `measureTrack` throws out of the generator.
+    const uptime = 2_678_930;
+    const result = generateAutoZoom({
+      clicks: capturedClicks(
+        clicks(
+          Array.from({ length: 12 }, (_, i): [number, number, number] => [
+            uptime + i * 0.5,
+            0.5,
+            0.5,
+          ]),
+        ),
+      ),
+      generatedAt: '2026-08-05T00:00:00.000Z',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.clicks).toBe(0);
+    expect(result.rejected).toBe(12);
+    expect(result.segments).toHaveLength(0);
+    expect(result.track.channels['amount']?.keys ?? []).toHaveLength(0);
+  });
+
+  it('counts what it refused, so an unusable log is not an empty one', () => {
+    const result = generateAutoZoom({
+      clicks: capturedClicks(
+        arrayClickStream([
+          { t: 1, e: 'down', b: 0, x: 0.5, y: 0.5 },
+          { t: Number.NaN, e: 'down', b: 0, x: 0.5, y: 0.5 },
+          { t: 0.5, e: 'down', b: 0, x: 0.5, y: 0.5 },
+        ]),
+      ),
+    });
+    expect(result.ok && result.clicks).toBe(1);
+    expect(result.ok && result.rejected).toBe(2);
+    expect(result.ok && result.empty).toBe(false);
   });
 });
 

@@ -49,7 +49,23 @@ function centreOnlyTrack(keys: [number, number, number][], amount: number): Trac
 describe('visibleCentre agrees with the compositor’s sourceSampleRect', () => {
   it('is the centre of the rect the compositor would sample, at every amount', () => {
     for (const amount of [1, 1.0001, 1.2, 1.5, 2, 2.5, 4, 8]) {
-      for (const centre of [-1, 0, 0.05, 0.2, 0.5, 0.8, 0.95, 1, 2]) {
+      // Including the non-finite centres: `sourceSampleRect` answers `low` for one, and
+      // a `visibleCentre` that let a NaN through would make every §6.6 inequality false
+      // and report `pass` on a camera it could not measure.
+      for (const centre of [
+        -1,
+        0,
+        0.05,
+        0.2,
+        0.5,
+        0.8,
+        0.95,
+        1,
+        2,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+      ]) {
         const rect = sourceSampleRect({ amount, center: [centre, centre] });
         const expectedX = rect.x + rect.width / 2;
         const expectedY = rect.y + rect.height / 2;
@@ -58,6 +74,14 @@ describe('visibleCentre agrees with the compositor’s sourceSampleRect', () => 
           12,
         );
         expect(visibleCentre(centre, amount)).toBeCloseTo(expectedY, 12);
+      }
+    }
+  });
+
+  it('never hands back a value that is not a number', () => {
+    for (const amount of [1, 2, 2.5, Number.NaN]) {
+      for (const centre of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(Number.isFinite(visibleCentre(centre, amount)), `${centre} at ${amount}`).toBe(true);
       }
     }
   });

@@ -37,7 +37,7 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, the generators and
-                          # annotations 40 ways; each must fail a gate
+                          # annotations 43 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -334,6 +334,24 @@ re-derive them here.
   (`targetFill ≤ clusterBox[0]`, i.e. `0.6 ≤ 0.5`). The constants settle it:
   `clusterBox[0] = targetFill / amountRange[0]` exactly. `auto-zoom.ts` has the
   arithmetic.
+- **§6.5 step 1 is spatial as written, and needs a time criterion; `clusterGapSec` is
+  derived, not chosen.** Clustering on the bounding box alone let one cluster span a
+  whole recording — measured on the ten real logs as eight single segments of 20.6–24.9 s
+  in 25 s, with `mergeGapSec`, `minDurationSec` and the `activeRanges` handover to
+  cursor-follow all inert. A click joins the current cluster only if it is under
+  `clusterGapSec` after the **previous** click, and that is
+  `preRollSec + postRollSec + mergeGapSec` = 2.6 s exactly: the gap at which step 1 and
+  step 4 already agree, so a step-1 split below it is undone by step 4 and a join at or
+  above it contradicts it. It has to be that sum rather than `postRollSec` alone, because
+  a step-1 join is irreversible and re-derives `amount` from the joint bbox where step 4's
+  merge only takes `max(amount)`. `auto-zoom.ts`'s header has the derivation, the
+  argument that §6.5's own three parameters presuppose it, and the corpus numbers;
+  `packages/edl/test/phase10-gate.test.ts` asserts the segment count the constant
+  implies, on all ten.
+- **`minDurationSec: 1.0` cannot fire, and is left at §6.5's value anyway.** The shortest
+  segment §6.5 can produce is one click's `preRollSec + postRollSec` = 1.8 s, or 1.2 s
+  where the pre-roll clamps at `t = 0`. Step 4's drop is dominated by `postRollSec` and is
+  dead under §6.5's own numbers — a finding to record, not a number to tune.
 - **§6.5's "four keyframes per segment" is three when the hold has no length.** A
   cluster of one click has `holdStart === holdEnd`, and §2.6 forbids a repeated `t`.
 - **An auto-zoom segment's `activeRanges` runs `4/(ζω₀)` past its last keyframe.**
@@ -804,24 +822,21 @@ cause), `test/hud-notice.test.ts` (the notice measured in pixels, with the same
 no-fit control §7.4's banner has) and two mutations in `npm run verify:mutation`.
 What none of them can establish is on hardware — see carried-forward item 8.
 
-**And one phase 10 tried to close and could not:**
+**And one phase 10 opened and closed:**
 
-9. **Post-grant click rate and latency are still unmeasured.** The captain's
-   accessibility decision records them as unverified and says _"Validate during the
+9. ~~**Post-grant click rate and latency are unmeasured.**~~ Closed. The captain's
+   accessibility decision recorded them as unverified and said _"Validate during the
    build"_; phase 2 confirmed the tap was live from a signed bundle but nobody clicked
-   during its window. Phase 10 built the instrument —
-   `scripts/record-cursor-corpus.mjs` posts clicks with `CGEventPost` stamped from
-   `CLOCK_UPTIME_RAW` and `loom-input-sampler.m` stamps every line it emits from the
-   same clock, so the difference is a latency rather than two numbers from two clocks,
-   and the result lands in `corpus/manifest.json` under `clickCapture` — but **this
-   machine has no Accessibility grant** (`./dist/native/loom-input-sampler probe`
-   reports `accessibility-denied`, and TCC cannot be granted without GUI interaction).
-   Both halves need it: an ungranted process cannot _post_ a synthetic click either
-   (measured — see the corpus-driver note above). The manifest therefore records
-   `measured: false` with the reason, `observedDowns: null` and `latencyMs: null` —
-   never a zero, which is the whole point. **To close it: grant Accessibility to
-   whatever runs the recorder and run `npm run record:cursor-corpus`; the reading is
-   taken automatically and no code changes.**
+   during its window. Phase 10 built the instrument — `scripts/record-cursor-corpus.mjs`
+   posts clicks with `CGEventPost` stamped from `CLOCK_UPTIME_RAW` and
+   `loom-input-sampler.m` stamps every line it emits from the same clock — and
+   **measured 2026-08-05 with the grant in place**, across the ten corpus recordings:
+   158/158 clicks delivered, latency min 0.177 ms, 0.389 ms as the mean of the
+   per-recording medians, 7.711 ms as the mean of their p95s, max 20.520 ms.
+   `packages/edl/test/corpus/manifest.json` carries the figures under `clickCapture`
+   with `measured: true`, and the phase-10 gate reads that field and fails loudly if a
+   future corpus is recorded without the grant. The reading, what the instrument refuses
+   to report and why, are in § Post-grant click rate and latency — measured, below.
 
 ## Post-grant click rate and latency — measured, and the last open item closed
 

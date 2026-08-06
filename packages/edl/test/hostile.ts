@@ -193,6 +193,19 @@ export function hostileFixtures(): HostileFixture[] {
     })),
   );
   add(
+    'clicks-enormous-timestamps',
+    'a click log whose clock never had its origin subtracted — the cursor half of this ' +
+      'is `enormous-timestamps`, and both logs come from one sampler and one `t0Us`',
+    ordinaryCursor,
+    Array.from({ length: 30 }, (_, i) => ({
+      t: 2_678_930 + i * 0.4,
+      e: 'down' as const,
+      b: 0,
+      x: 0.3 + (i % 5) * 0.05,
+      y: 0.4 + (i % 3) * 0.05,
+    })),
+  );
+  add(
     'clicks-before-zero',
     'clicks timestamped before the recording started, so the pre-roll goes negative',
     ordinaryCursor,

@@ -436,6 +436,44 @@ const MUTATIONS = [
     mustFail: [EDL_AUTO_ZOOM],
   },
   {
+    name: 'auto-zoom-clusters-across-any-pause',
+    breaks:
+      '§6.5 step 1’s time criterion. Clustering on the bounding box alone lets one ' +
+      'cluster span a whole recording — measured on the ten real logs as eight ' +
+      'single segments of 20.6–24.9 s in 25 s — so `mergeGapSec` and the handover ' +
+      'to the cursor-follow track underneath become inert and auto-zoom-on-click is ' +
+      'one zoom-in-and-hold for the video.',
+    file: 'packages/edl/src/generators/auto-zoom.ts',
+    find: '      click.t - previousT < params.clusterGapSec &&',
+    replace: '      true &&',
+    mustFail: [EDL_AUTO_ZOOM, PHASE10],
+  },
+  {
+    name: 'auto-zoom-accepts-clicks-stamped-with-machine-uptime',
+    breaks:
+      'the click log’s sanity ceiling. `clicks.ndjson` shares the sampler’s `t0Us` ' +
+      'with `cursor.ndjson`, so a log whose origin was never subtracted carries ' +
+      'machine uptime; kept, those keyframes compile a spring table past ' +
+      'MAX_SPRING_TABLE_SEC and the generator throws out of its own budget check ' +
+      'instead of answering.',
+    file: 'packages/edl/src/generators/auto-zoom.ts',
+    find: '    if (t > maxSourceTimeSec) {',
+    replace: '    if (false) {',
+    mustFail: [EDL_AUTO_ZOOM, PHASE10],
+  },
+  {
+    name: 'seasickness-budget-passes-a-camera-it-cannot-measure',
+    breaks:
+      'the §6.6 check failing closed. A non-finite centre falls through both ' +
+      'comparisons, every inequality against the NaN is false, `failures` stays ' +
+      'empty and the budget reports `pass` on a camera it never measured — and it ' +
+      'stops agreeing with `sourceSampleRect`, which answers the low bound.',
+    file: 'packages/edl/src/generators/budget.ts',
+    find: '  if (!Number.isFinite(centre)) return lo;',
+    replace: '  if (false) return lo;',
+    mustFail: [EDL_BUDGET],
+  },
+  {
     name: 'auto-zoom-edge-snap-removed',
     breaks:
       '§6.5 step 3. A click near a corner then frames background, which is exactly ' +

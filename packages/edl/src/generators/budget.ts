@@ -17,8 +17,9 @@
  *
  * The three numbers are {@link SEASICKNESS_BUDGET} and nothing may move them. They
  * are what the phase-10 gate asserts on ten real recordings, and
- * `packages/edl/test/seasickness-control.test.ts` is the control that proves they can
- * fail — a comfort check that cannot fail is decoration, which is the argument
+ * `packages/edl/test/jittery-control.ts` — driven by the CONTROL cases in
+ * `packages/edl/test/phase10-gate.test.ts` — is the control that proves they can fail;
+ * a comfort check that cannot fail is decoration, which is the argument
  * `packages/format/test/kill-mid-write.test.ts` makes with its naive writer.
  *
  * ## What is measured: the resolved state, not the keyframes
@@ -190,12 +191,23 @@ export function framingTrack(amount: number, id = 't-measure-framing'): Track {
   };
 }
 
-/** The visible centre: `sourceSampleRect`'s clamp, restated. See the module header. */
+/**
+ * The visible centre: `sourceSampleRect`'s clamp, restated. See the module header.
+ *
+ * The non-finite branch is the compositor's, deliberately: `sourceSampleRect`'s clamp
+ * answers `low` for a coordinate that is not a number, so the visible centre of a `NaN`
+ * centre is `0.5 / amount`. Falling through the two comparisons instead — both false
+ * for `NaN` — would return the `NaN`, and every inequality downstream (`speed >
+ * maxSpeed`, `accel > maxAccel`) is false against it, so `failures` would stay empty
+ * and a camera that could not be measured would come back `pass: true`. An acceptance
+ * check may not fail open.
+ */
 export function visibleCentre(centre: number, amount: number): number {
   const half = 0.5 / (Number.isFinite(amount) && amount > 1 ? amount : 1);
   const lo = half;
   const hi = 1 - half;
   if (lo >= hi) return 0.5;
+  if (!Number.isFinite(centre)) return lo;
   return centre < lo ? lo : centre > hi ? hi : centre;
 }
 

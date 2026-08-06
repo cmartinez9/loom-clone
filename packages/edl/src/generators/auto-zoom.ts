@@ -37,6 +37,49 @@
  * loose phrase against exact numbers, and it is written down here rather than left in
  * the code.
  *
+ * ## Step 1 needs a time criterion, and step 4 is what says how long
+ *
+ * §6.5 step 1 states no bound on the elapsed time, so read literally a click joins the
+ * current cluster whenever the bounding box still fits — and on the ten real recordings
+ * that made eight of ten a **single** segment spanning 20.6–24.9 s of a 25 s recording.
+ * A user clicking around one window for a whole video got one zoom-in-and-hold, and
+ * `mergeGapSec`, `minDurationSec` and the `activeRanges` handover to the cursor-follow
+ * track underneath were all inert. That is a reading §6.5's own parameter list cannot
+ * mean: `postRollSec` holds *"after the last click of a cluster"* and a cluster only has
+ * a last click if it ends, `minDurationSec` discards blink-length zooms that cannot
+ * exist when one cluster spans the recording, and `mergeGapSec` merges segments that
+ * were never separated. So `clusterGapSec` is the criterion that was missing, and its
+ * value is not a taste: it is the gap at which **step 1 and step 4 already agree**.
+ *
+ * Two spatially-compatible clicks `g` apart, clustered *separately*, become segments
+ * `[t₁ − preRoll, t₁ + postRoll]` and `[t₂ − preRoll, t₂ + postRoll]`, whose gap is
+ * `g − preRoll − postRoll`. Step 4 merges them iff that is under `mergeGapSec`, i.e.
+ * iff `g < preRollSec + postRollSec + mergeGapSec` — 2.6 s. Below it, splitting is
+ * undone by step 4 anyway; at or above it step 4 says keep them apart, so step 1 must
+ * not have joined them in the first place.
+ *
+ * It has to be that sum and not `postRollSec` alone, because **a step-1 join is
+ * irreversible where a step-4 merge is not**: step 1 must be at least as conservative
+ * as step 4 or it destroys a distinction step 4 would have kept. And the two do not
+ * produce the same zoom. Step 1 re-derives `amount` from the cluster's *joint* bbox
+ * (step 2), so letting it decide — where the bbox is — gives one zoom framing the whole
+ * burst, while step 4's merge only takes `max(amount)` of two separately derived zooms.
+ * `postRollSec` alone (1.2 s) reaches the same segment *boundaries* by a redundant
+ * split-then-merge, and the wrong `amount`.
+ *
+ * The comparison is against the **previous click**, not the cluster's first: a steady
+ * stream of clicks a second apart is one burst, and measuring from the first click
+ * would cut it at an arbitrary point that has nothing to do with what the user did.
+ *
+ * ## `minDurationSec` is unreachable, and that is a finding rather than a number to tune
+ *
+ * The shortest segment §6.5 can produce is a single click's `preRollSec + postRollSec`
+ * = 1.8 s, or 1.2 s where the pre-roll is clamped at `t = 0`. Both exceed
+ * `minDurationSec: 1.0`, so step 4's drop never fires under §6.5's own numbers — it is
+ * dominated by `postRollSec`. It is kept at the value §6.5 specifies rather than raised
+ * to make it fire: a caller that shortens the post-roll gets the drop back, and moving
+ * a specified constant to give a step something to do is how a spec stops being one.
+ *
  * ## `activeRanges` runs past the last keyframe, by the spring's settling time
  *
  * §3.5's crossfade exists so a handover does not pop, and it only achieves that where
@@ -99,7 +142,7 @@ import { DEFAULT_SPRING } from '../tracks.ts';
 import type { ClickEventStream } from '../streams.ts';
 import { type ClickSource, type ClickUnavailable, describeClickUnavailable } from './clicks.ts';
 import { measureTrack, type SeasicknessLimits, type SeasicknessReport } from './budget.ts';
-import { conditionCursor, type ConditionedCursor } from './conditioning.ts';
+import { conditionCursor, MAX_SOURCE_TIME_SEC, type ConditionedCursor } from './conditioning.ts';
 import type { CursorEventStream } from '../streams.ts';
 
 /** §2.6's generated track uses 250 ms; the manual one 300. */
@@ -111,6 +154,13 @@ export interface AutoZoomParams {
   postRollSec: Seconds;
   minDurationSec: Seconds;
   mergeGapSec: Seconds;
+  /**
+   * Longest gap between consecutive clicks that still belongs to one cluster.
+   *
+   * Not in §6.5's `AutoZoomParams`; derived from three that are, at the gap where step
+   * 1 and step 4 agree. See the module header.
+   */
+  clusterGapSec: Seconds;
   /** Max cluster bbox as a fraction of the frame — see the module header. */
   clusterBox: [number, number];
   targetFill: number;
@@ -133,11 +183,18 @@ export function segmentSettleTailSec(spring: SpringParams): Seconds {
   return decay > 0 && Number.isFinite(decay) ? 4 / decay : 0;
 }
 
+const PRE_ROLL_SEC = 0.6;
+const POST_ROLL_SEC = 1.2;
+const MERGE_GAP_SEC = 0.8;
+
 export const DEFAULT_AUTO_ZOOM_PARAMS: AutoZoomParams = {
-  preRollSec: 0.6,
-  postRollSec: 1.2,
+  preRollSec: PRE_ROLL_SEC,
+  postRollSec: POST_ROLL_SEC,
   minDurationSec: 1,
-  mergeGapSec: 0.8,
+  mergeGapSec: MERGE_GAP_SEC,
+  // Written as the sum rather than as 2.6, because it *is* the sum: a caller that
+  // changes any of the three and leaves this alone has made step 1 and step 4 disagree.
+  clusterGapSec: PRE_ROLL_SEC + POST_ROLL_SEC + MERGE_GAP_SEC,
   clusterBox: [0.5, 0.7],
   targetFill: 0.6,
   amountRange: [1.2, 2.5],
@@ -188,6 +245,8 @@ export interface AutoZoomInput {
   limits?: SeasicknessLimits;
   /** Which mouse buttons count. Defaults to the primary button only. */
   buttons?: readonly number[];
+  /** The §6.1 ceiling, for a caller conditioning its cursor log with a different one. */
+  maxSourceTimeSec?: Seconds;
 }
 
 export type AutoZoomResult =
@@ -198,7 +257,17 @@ export type AutoZoomResult =
       /** Reported, never gated: §6.6's remedy is a rest box and this generator has none. */
       budget: SeasicknessReport;
       clicks: number;
-      /** True when the tap was live and nobody clicked. A real, different answer. */
+      /**
+       * Click events the sanity pass refused: non-finite, out of order, or past
+       * {@link MAX_SOURCE_TIME_SEC}. Reported beside `clicks` so a log that was read
+       * and found unusable is distinguishable from one that held nothing.
+       */
+      rejected: number;
+      /**
+       * True when the tap was live and no *usable* click came out of it. A real,
+       * different answer from `ok: false` — and `rejected` is what says which of the
+       * two kinds of nothing this was.
+       */
       empty: boolean;
     }
   | { ok: false; reason: ClickUnavailable; message: string };
@@ -225,7 +294,11 @@ export function generateAutoZoom(input: AutoZoomInput): AutoZoomResult {
   const params: AutoZoomParams = { ...DEFAULT_AUTO_ZOOM_PARAMS, ...input.params };
   const trackId = input.trackId ?? 't-zoom-auto';
   const buttons = input.buttons ?? [0];
-  const clicks = readClicks(input.clicks.stream, buttons);
+  const { clicks, rejected } = readClicks(
+    input.clicks.stream,
+    buttons,
+    input.maxSourceTimeSec ?? MAX_SOURCE_TIME_SEC,
+  );
 
   const clusters = clusterClicks(clicks, params);
   const segments = mergeSegments(
@@ -252,12 +325,36 @@ export function generateAutoZoom(input: AutoZoomInput): AutoZoomResult {
   const framing = params.amountRange[1];
   const budget = measureTrack(track, spanEnd, cursor, framing, input.limits);
 
-  return { ok: true, track, segments, budget, clicks: clicks.length, empty: clicks.length === 0 };
+  return {
+    ok: true,
+    track,
+    segments,
+    budget,
+    clicks: clicks.length,
+    rejected,
+    empty: clicks.length === 0,
+  };
 }
 
-/** Sanity-filter the log the same way §6.1 filters the cursor one, and drop `up`s. */
-function readClicks(stream: ClickEventStream, buttons: readonly number[]): Click[] {
+/**
+ * Sanity-filter the log the same way §6.1 filters the cursor one, and drop `up`s.
+ *
+ * Including {@link MAX_SOURCE_TIME_SEC}, which is not decoration here: `clicks.ndjson`
+ * is written by the same sampler as `cursor.ndjson`, from the same `t0Us`, so a log
+ * whose origin was never subtracted carries machine uptime in both. Those keys would
+ * reach `buildTrack`, and `measureTrack` would then compile a spring channel past
+ * `MAX_SPRING_TABLE_SEC` and throw out of a function whose whole contract is to answer
+ * rather than fail. Dropped and counted, the same way and for the same reason as the
+ * cursor's — never rebased, which would silently move every generated effect relative
+ * to the media.
+ */
+function readClicks(
+  stream: ClickEventStream,
+  buttons: readonly number[],
+  maxSourceTimeSec: Seconds,
+): { clicks: Click[]; rejected: number } {
   const out: Click[] = [];
+  let rejected = 0;
   let previousT = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < stream.count; i++) {
     // Downs only. An `up` is a second event at the same place and would double every
@@ -267,42 +364,66 @@ function readClicks(stream: ClickEventStream, buttons: readonly number[]): Click
     const t = stream.tAt(i);
     const x = stream.xAt(i);
     const y = stream.yAt(i);
-    if (!Number.isFinite(t) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (t < previousT) continue;
+    if (!Number.isFinite(t) || !Number.isFinite(x) || !Number.isFinite(y)) {
+      rejected++;
+      continue;
+    }
+    if (t > maxSourceTimeSec) {
+      rejected++;
+      continue;
+    }
+    if (t < previousT) {
+      rejected++;
+      continue;
+    }
     previousT = t;
     out.push({ t, x: clamp01(x), y: clamp01(y) });
   }
-  return out;
+  return { clicks: out, rejected };
 }
 
 function clamp01(value: number): number {
   return value < 0 ? 0 : value > 1 ? 1 : value;
 }
 
-/** §6.5 step 1. Greedy, in time order; a click that would burst the box starts a new one. */
+/**
+ * §6.5 step 1. Greedy, in time order; a click that would burst the box — or that
+ * arrives more than `clusterGapSec` after the previous one — starts a new one.
+ *
+ * The gap is measured against the **previous click**, and it is the sum step 4 already
+ * implies rather than a chosen number. Both are the module header's.
+ */
 export function clusterClicks(clicks: readonly Click[], params: AutoZoomParams): ClickCluster[] {
   const clusters: ClickCluster[] = [];
   let current: ClickCluster | null = null;
+  let previousT = Number.NEGATIVE_INFINITY;
   for (const click of clicks) {
     if (current === null) {
       current = { clicks: [click], minX: click.x, maxX: click.x, minY: click.y, maxY: click.y };
       clusters.push(current);
+      previousT = click.t;
       continue;
     }
     const minX = Math.min(current.minX, click.x);
     const maxX = Math.max(current.maxX, click.x);
     const minY = Math.min(current.minY, click.y);
     const maxY = Math.max(current.maxY, click.y);
-    if (maxX - minX <= params.clusterBox[0] && maxY - minY <= params.clusterBox[1]) {
+    if (
+      click.t - previousT < params.clusterGapSec &&
+      maxX - minX <= params.clusterBox[0] &&
+      maxY - minY <= params.clusterBox[1]
+    ) {
       current.clicks.push(click);
       current.minX = minX;
       current.maxX = maxX;
       current.minY = minY;
       current.maxY = maxY;
+      previousT = click.t;
       continue;
     }
     current = { clicks: [click], minX: click.x, maxX: click.x, minY: click.y, maxY: click.y };
     clusters.push(current);
+    previousT = click.t;
   }
   return clusters;
 }
@@ -444,6 +565,7 @@ function buildTrack(init: {
         postRollSec: params.postRollSec,
         minDurationSec: params.minDurationSec,
         mergeGapSec: params.mergeGapSec,
+        clusterGapSec: params.clusterGapSec,
         clusterBox: [params.clusterBox[0], params.clusterBox[1]],
         targetFill: params.targetFill,
         amountRange: [params.amountRange[0], params.amountRange[1]],

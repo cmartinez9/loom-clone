@@ -33,7 +33,7 @@
 import { describe, expect, it } from 'vitest';
 import { validateEditDocument } from '@loom/format';
 import type { Track } from '@loom/format';
-import { generateAutoZoom } from '../src/generators/auto-zoom.ts';
+import { DEFAULT_AUTO_ZOOM_PARAMS, generateAutoZoom } from '../src/generators/auto-zoom.ts';
 import {
   describeSeasickness,
   measurementDocument,
@@ -304,6 +304,67 @@ describe('phase 10 gate — the seasickness budget on ten real recordings', () =
     } else {
       expect(generated, 'the manifest says clicks were not captured').toBe(0);
     }
+  });
+
+  it('a pause longer than clusterGapSec ends a segment, on every real recording', () => {
+    // §6.5 step 1 states no time criterion, and read that way the ten real logs gave
+    // eight single segments spanning 20.6–24.9 s of a 25 s recording: one zoom-in-and-
+    // hold for the whole video, with `mergeGapSec` and the handover to the track below
+    // inert. `clusterGapSec` is what bounds it, and the count below is *derived* from
+    // it rather than observed: two clicks that far apart cannot be joined by step 1,
+    // and their segments are then `gap - preRoll - postRoll >= mergeGapSec` apart so
+    // step 4 cannot merge them back either. So the segment count is exactly one more
+    // than the number of such pauses — no threshold read off this corpus.
+    const P = DEFAULT_AUTO_ZOOM_PARAMS;
+    const lines: string[] = [];
+    let corpusPauses = 0;
+    for (const recording of loadCorpus()) {
+      const result = generateAutoZoom({
+        clicks: clickSourceFrom(recording.recording, recording.clicks),
+        cursor: recording.cursor,
+        durationSec: recording.durationSec,
+        generatedAt: '2026-08-05T00:00:00.000Z',
+      });
+      expect(result.ok, recording.entry.name).toBe(true);
+      if (!result.ok) continue;
+
+      const downs: number[] = [];
+      const stream = recording.clicks;
+      if (stream !== null) {
+        for (let i = 0; i < stream.count; i++) {
+          if (stream.phaseAt(i) === 'down' && stream.buttonAt(i) === 0) downs.push(stream.tAt(i));
+        }
+      }
+      const pauses = downs.filter((t, i) => i > 0 && t - (downs[i - 1] ?? 0) >= P.clusterGapSec);
+      corpusPauses += pauses.length;
+
+      const longest = result.segments.reduce((m, s) => Math.max(m, s.end - s.start), 0);
+      lines.push(
+        `  ${recording.entry.name.padEnd(28)} ${String(downs.length).padStart(3)} clicks, ` +
+          `${pauses.length} pauses ≥ ${P.clusterGapSec.toFixed(2)}s → ` +
+          `${result.segments.length} segments, longest ${longest.toFixed(2)}s of ` +
+          `${recording.durationSec.toFixed(1)}s`,
+      );
+
+      expect(result.segments.length, `${recording.entry.name}: segments vs pauses`).toBe(
+        pauses.length + 1,
+      );
+      // …and no segment is longer than the clicking that justifies it. A segment holds
+      // from its first click to its last, and every consecutive pair inside it is under
+      // `clusterGapSec`, so this is the same statement measured on the output: a segment
+      // covers the recording only where somebody really did keep clicking through it.
+      for (const segment of result.segments) {
+        expect(
+          segment.holdEnd - segment.holdStart,
+          `${recording.entry.name}: a segment outran its own clicks`,
+        ).toBeLessThan(Math.max(1, segment.clicks - 1) * P.clusterGapSec);
+      }
+    }
+    console.log('\nauto-zoom segmentation on the corpus (clusterGapSec bounds each segment):');
+    console.log(lines.join('\n'));
+    // The assertion above is vacuous on a corpus where nobody ever paused; these ten
+    // did, and if a future corpus does not, this says so rather than passing quietly.
+    expect(corpusPauses, 'no recording in the corpus has a pause to split on').toBeGreaterThan(0);
   });
 });
 
