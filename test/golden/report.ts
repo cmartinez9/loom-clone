@@ -94,6 +94,12 @@ export interface GoldenReport {
   privacyFallbacks: number;
   /** Text spans truncated at the glyph cap. */
   textTruncations: number;
+  /**
+   * Text spans skipped because no atlas was supplied — the one condition on the
+   * annotation surface that degrades rather than refusing. Only the control that
+   * exercises it deliberately should ever raise this.
+   */
+  textSpansWithoutAtlas: number;
   /** Glyphs the atlas rasterised, so an empty atlas cannot pass as a text pass. */
   atlasGlyphs: number;
   logs: string[];

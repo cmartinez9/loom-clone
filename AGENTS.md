@@ -273,8 +273,24 @@ of `render()`**: a frame whose redaction could not be placed must not be composi
 A region that is known but cannot be _blurred_ (σ past `MAX_BLUR_PASSES`, no scratch
 target) is filled **opaque** and counted in `AnnotationPass.privacyFallbacks` — always
 stronger than what was asked for, never weaker, which is why a huge blur does not
-quietly become a small one. A `text` span with no atlas throws for the same reason the
-compositor throws when handed a webcam frame it has no pass for.
+quietly become a small one.
+
+**Refusing a frame is those two kinds' alone, and a refusal is survivable.** A `text`
+span with no atlas does _not_ throw: text failing to render is cosmetic and visible,
+where a redaction failing is invisible and publishes a secret, and treating them alike
+made an unbuilt atlas refuse every frame of a preview with no editor open. The span is
+skipped, the frame composites, and `AnnotationPass.textSpansWithoutAtlas` counts it —
+`packages/compositor` is pure and cannot report anything itself, so `PreviewLoop` reads
+the count after `render` and reports the first frame of a run through `onError`,
+latched like `#stallReported` because sixty errors a second is its own defect. On a
+genuine refusal `Compositor.render` **clears the target to the background before the
+throw leaves**, so a caller that catches and still calls `present()` gets the letterbox
+colour and never the unredacted picture; the throw itself still leaves, because an
+export that cannot place a redaction must fail rather than encode. `PreviewLoop` is the
+one caller that catches it: it reports (latched), drops its `VideoFrame` reference in a
+`finally`, and keeps scheduling — a throw escaping the rAF callback left `#handle` null
+while `#running` stayed true, which makes `start()` an early return and the loop
+unrevivable, and that is a wedge rather than a safety property.
 
 **The gate is `test/phase11-golden.test.ts`**, §4.5's golden-frame test extended:
 24 fixed timestamps, the shipping `PreviewLoop` against a fixed-timestamp export loop,

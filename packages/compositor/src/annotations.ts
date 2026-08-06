@@ -15,29 +15,38 @@
  * blurs the rectangle, because that is what "later spans are on top" means. A rule
  * with an exception in it is a rule two people will read differently.
  *
- * ## Failing closed
+ * ## Failing closed, and only where failing closed is the point
  *
- * `blur` and `mask` are privacy features: when one does not apply, the user has
- * published something they meant to hide, and it fails *silently* — the frame looks
- * finished, it is simply not redacted. So there are three behaviours here, and the
- * line between them is who made the decision:
+ * **Refusing a frame is `blur` and `mask`'s alone.** They are privacy features: when
+ * one does not apply, the user has published something they meant to hide, and it
+ * fails *silently* — the frame looks finished, it is simply not redacted. So there
+ * are three behaviours for those two, and the line between them is who made the
+ * decision:
  *
  *  - **The document says not to draw.** A resolved `opacity` of 0 draws nothing, for
  *    every kind including these two. That is authored intent — a blur fading in has
  *    a zero at its first key — and honouring it is not a failure.
  *  - **We do not know where to redact.** {@link readAnnotationGeometry} throws, and
  *    the throw comes straight out of `render()`. A frame whose redaction could not be
- *    placed must not be composited at all; there is nothing safe to draw.
+ *    placed must not be composited at all; there is nothing safe to draw. `Compositor`
+ *    clears the render target before letting that throw out, so what a caller who
+ *    catches it can still publish is the background and never the unredacted picture.
  *  - **We know where, and cannot blur it.** The region is filled **opaque** instead,
  *    and {@link AnnotationPass.privacyFallbacks} counts it. A solid redaction is
  *    stronger than the one asked for, never weaker, so this direction is always safe
  *    — and it is the reason a blur too large for {@link MAX_BLUR_PASSES} does not
  *    quietly become a small one.
  *
- * A `text` span with no atlas throws for the same reason `Compositor` throws when
- * handed a webcam frame it has no pass for: an annotation that silently does not
- * appear is a bug report nobody enjoys receiving, and this one can hide a caption
- * the user believes is in their video.
+ * A `text` span with no atlas does **not** refuse the frame. Text failing to render
+ * is cosmetic and *visible*; a redaction failing to render is invisible and publishes
+ * a secret, and treating the two identically is how a rule written for redactions
+ * came to brick every frame of a preview whose atlas had not been built yet. The span
+ * is skipped, the rest of the frame composites, and
+ * {@link AnnotationPass.textSpansWithoutAtlas} counts it so the caller can say so —
+ * `PreviewLoop` reports the first one through its `onError` and stays quiet until the
+ * condition clears. An atlas comes from `rasterizeGlyphs` + `uploadTextAtlas` in
+ * `@loom/compositor/raster`; `text-atlas.ts` says why preview and export must pass
+ * the same one.
  */
 
 import {
@@ -124,6 +133,18 @@ export class AnnotationPass {
 
   /** Text spans truncated at {@link MAX_TEXT_GLYPHS}. Diagnostic, like the above. */
   textTruncations = 0;
+
+  /**
+   * Text spans skipped because no atlas was supplied.
+   *
+   * The observable half of "a missing atlas degrades rather than refuses". This
+   * package is pure — it has no `onError` to call and no way to acquire one — so the
+   * condition is left here as state, monotonically, and the caller reads it after
+   * `render` and decides what to say. `PreviewLoop` reports the first frame of a run
+   * and then stays quiet: at 60 fps an unconditional report is sixty errors a second,
+   * which is its own defect.
+   */
+  textSpansWithoutAtlas = 0;
 
   readonly #quad: WebGLBuffer;
 
@@ -336,7 +357,7 @@ export class AnnotationPass {
             this.#drawShape(context, map, geometry, style, KIND_ARROW, style.fill, style.stroke);
             break;
           case 'text':
-            this.#drawText(context, map, geometry, style, annotation.id);
+            this.#drawText(context, map, geometry, style);
             break;
         }
       }
@@ -595,17 +616,15 @@ export class AnnotationPass {
     map: ReturnType<typeof sourceToOutput>,
     geometry: AnnotationGeometry,
     style: AnnotationStyle,
-    id: string,
   ): void {
     if (style.text === '') return;
     const atlas = context.textAtlas ?? null;
     if (atlas === null) {
-      throw new AnnotationError(
-        id,
-        'a text annotation was resolved but no text atlas was supplied. Build one with ' +
-          '`buildTextAtlas` from @loom/design and pass it as `frames.textAtlas`; a caption ' +
-          'that silently does not appear is worse than a refused frame',
-      );
+      // Skipped, counted, and the rest of the frame — including every redaction on
+      // it — still composites. See the module comment for why this one is not a
+      // refusal and `textSpansWithoutAtlas` for who says so out loud.
+      this.textSpansWithoutAtlas += 1;
+      return;
     }
     const capPx = style.fontSizeY * map.scaleY;
     const emPx = atlas.capHeight > 0 ? capPx / atlas.capHeight : 0;

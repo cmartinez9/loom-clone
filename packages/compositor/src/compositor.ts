@@ -23,8 +23,14 @@
  * the same FBO in the same `render()` call: phase 11's annotations are here
  * (`AnnotationPass`), and the bubble (7) and cursor (5) are not yet. Handing this
  * class a `webcam` or `cursor` today throws rather than being quietly ignored,
- * because "the webcam did not appear" is a bug report nobody enjoys receiving — and
- * a `text` annotation with no atlas throws for the same reason, one layer along.
+ * because "the webcam did not appear" is a bug report nobody enjoys receiving.
+ *
+ * The other throw out of `render` is a redaction that could not be placed, and it is
+ * a *refusal* rather than a missing pass: the render target is cleared to the
+ * background on the way out, so a caller that catches it and still calls
+ * {@link Compositor.present} or reads the framebuffer gets the letterbox colour and
+ * never the unredacted picture. Only `blur` and `mask` reach it; `annotations.ts`
+ * draws the line and says why a missing glyph atlas is on the other side of it.
  *
  * ## The two rules this class exists to keep
  *
@@ -307,11 +313,23 @@ export class Compositor {
     const screen = frames.screen;
     if (screen === null) return;
 
-    const gl = this.gl;
-    const [width, height] = this.#outputSize;
-
     this.gpuTimer.poll();
     this.gpuTimer.begin();
+    // Balanced across the refusal below. An unended query leaves `GpuTimer` open and
+    // in flight for good: every later `begin()` returns early and `poll()` never sees
+    // a result, so `lastMs` freezes at whatever it last read and reports it forever.
+    try {
+      this.#draw(frames, screen, state);
+      this.#frames += 1;
+    } finally {
+      this.gpuTimer.end();
+    }
+  }
+
+  /** The composite itself. Split out only so the timer above can bracket it. */
+  #draw(frames: CompositorFrames, screen: VideoFrame, state: ResolvedState): void {
+    const gl = this.gl;
+    const [width, height] = this.#outputSize;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.#target.framebuffer);
     gl.viewport(0, 0, width, height);
@@ -388,10 +406,18 @@ export class Compositor {
     context.outputSize[1] = height;
     context.target = this.#target;
     context.textAtlas = frames.textAtlas ?? null;
-    this.annotations.render(state.annotations, context);
-
-    this.gpuTimer.end();
-    this.#frames += 1;
+    try {
+      this.annotations.render(state.annotations, context);
+    } catch (thrown) {
+      // A redaction that could not be placed refuses the frame — and the target is
+      // holding the screen picture *without* it at this instant, which is the one
+      // thing a privacy failure must never leave publishable. Clearing is not §4.3's
+      // "hold the previous frame": holding is for a `null` frame, and a refusal is
+      // not a miss. The throw still leaves, because an export that cannot place a
+      // redaction must fail the export rather than encode an unredacted frame.
+      this.clearToBackground();
+      throw thrown;
+    }
   }
 
   /**

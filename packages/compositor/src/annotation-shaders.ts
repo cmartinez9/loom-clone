@@ -17,7 +17,7 @@
  *
  * The shape shaders interpolate an output-pixel coordinate rather than a normalized
  * one, so a distance is a distance in pixels and the coverage ramp is
- * `smoothstep(0.5, -0.5, d)` — exactly one pixel wide, everywhere, with no
+ * `1 - smoothstep(-0.5, 0.5, d)` — exactly one pixel wide, everywhere, with no
  * `fwidth`. Screen-space derivatives would work too and would be identical between
  * preview and export at the same output size, but they are quantised to the
  * hardware's 2×2 quads, and a fixed ramp is one fewer thing that could be quantised
@@ -137,9 +137,15 @@ float sdTriangle(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
   return -sqrt(d.x) * sign(d.y);
 }
 
-/** One pixel of coverage, centred on the edge. Negative distance is inside. */
+/**
+ * One pixel of coverage, centred on the edge. Negative distance is inside.
+ *
+ * The edges ascend and the ramp is inverted rather than the other way round:
+ * GLSL ES 3.00 §8.3 leaves \`smoothstep\` **undefined** when \`edge0 > edge1\`, and one
+ * of the two callers of this shape is the alpha a redaction composites back with.
+ */
 float coverage(float d) {
-  return smoothstep(0.5, -0.5, d);
+  return 1.0 - smoothstep(-0.5, 0.5, d);
 }
 
 /** Straight-alpha "over". */
@@ -195,6 +201,13 @@ float sdArrow(vec2 p) {
   vec2 neck = tip - dir * head;
 
   float shaft = sdSegment(p, tail, neck) - u_params.x * 0.5;
+  // A head with no width, or none along the shaft, is three collinear points, and
+  // \`sdTriangle\`'s winding sign is then \`sign(0.0)\` — zero, which makes its distance
+  // \`-0.0\` at *every* fragment and fills the arrow's whole quad at half alpha.
+  // \`headWidth\`/\`headLength\` are clamped at 0 rather than refused (a decoration
+  // fails leniently), so a document may legitimately carry either as zero: a
+  // degenerate head is no head, and the shaft is the whole arrow.
+  if (halfHead <= 0.0 || head <= 0.0) return shaft;
   float barb = sdTriangle(p, tip, neck + side * halfHead, neck - side * halfHead);
   return min(shaft, barb);
 }
@@ -297,7 +310,11 @@ void main() {
   vec2 halfSize = u_box.zw;
   float d = sdRoundRect(v_px - u_box.xy, halfSize, min(u_params.x, min(halfSize.x, halfSize.y)));
   float feather = max(u_params.y, 1.0);
-  float a = smoothstep(feather * 0.5, -feather * 0.5, d);
+  // Ascending edges, for the reason \`coverage\` gives — and it matters most here:
+  // this is the redaction's *own* alpha, so an implementation that took §8.3's
+  // undefined branch to zero would leave the blurred copy uncomposited and publish
+  // what was under it.
+  float a = 1.0 - smoothstep(-feather * 0.5, feather * 0.5, d);
   if (a <= 0.0) discard;
   // The render target's own texture: v = 0 is its bottom row, and v_px is
   // top-left origin, so the y is flipped exactly once here.

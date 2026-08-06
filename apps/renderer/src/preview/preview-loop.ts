@@ -65,6 +65,16 @@ import { FRAME_BUDGET_MS, FrameMetrics } from './frame-metrics.ts';
 export interface PreviewCompositor {
   render(frames: CompositorFrames, state: ResolvedState): void;
   present(): void;
+  /**
+   * Phase 11's diagnostics, read after `render`.
+   *
+   * `@loom/compositor` is pure and has no way to report anything itself, so a
+   * condition it can only degrade through — a `text` span with no atlas — is left on
+   * the pass as a monotonic count and the loop turns it into an `onError`. Optional
+   * because it is a diagnostic: a loop wired to something that does not keep one
+   * still renders.
+   */
+  readonly annotations?: { readonly textSpansWithoutAtlas: number };
 }
 
 /** What the loop needs from a decoded source. `SourceReader` satisfies it as-is. */
@@ -169,6 +179,18 @@ export class PreviewLoop {
   #missingSinceMs: number | null = null;
   #stallReported = false;
   #peakLiveFrames = 0;
+  /**
+   * Latches, in the shape {@link PreviewLoop.#stallReported} already uses: set on the
+   * first report of a run of the condition, cleared when the condition goes away.
+   *
+   * Both of these are properties of the *document*, so an unlatched report would fire
+   * on every frame for as long as the document says so — sixty errors a second, which
+   * is a worse defect than the one being reported.
+   */
+  #refusalReported = false;
+  #atlasReported = false;
+  /** `annotations.textSpansWithoutAtlas` as of the previous frame. */
+  #textSpansWithoutAtlas = 0;
 
   constructor(options: PreviewLoopOptions) {
     this.#compositor = options.compositor;
@@ -341,12 +363,31 @@ export class PreviewLoop {
     const state = resolve(this.#timeline, t);
 
     const frame = this.#screen.frameAt(state.sourceTime);
-    this.#frames.screen = frame;
-    this.#compositor.render(this.#frames, state);
-    this.#compositor.present();
-    // Held only for the length of the draw. The ring still owns it; dropping the
-    // reference here means no path out of this function keeps a frame alive.
-    this.#frames.screen = null;
+    let composited = false;
+    try {
+      this.#frames.screen = frame;
+      this.#compositor.render(this.#frames, state);
+      this.#compositor.present();
+      composited = true;
+    } catch (thrown) {
+      // A refused frame — a `blur` or `mask` whose region could not be read — is
+      // loud and is not fatal. `Compositor.render` has already cleared the target on
+      // its way out, so there is nothing unredacted to publish; `present` is skipped
+      // rather than flashing the background over a composite that was correct.
+      //
+      // The loop keeps running either way. A throw that escaped this callback would
+      // leave `#handle` null while `#running` stayed true, which makes `start()` an
+      // early return and the loop unrevivable without a `stop()`/`start()` pair — a
+      // wedge, not a safety property, and one that reports nothing at all.
+      this.#report(thrown);
+    } finally {
+      // Held only for the length of the draw, on every path out. The ring still owns
+      // it; dropping the reference here means nothing out of this function keeps a
+      // frame alive (§10.2).
+      this.#frames.screen = null;
+    }
+    if (composited) this.#refusalReported = false;
+    this.#watchTextAtlas();
 
     const elapsed = this.#now() - started;
     this.metrics.record(elapsed);
@@ -366,6 +407,41 @@ export class PreviewLoop {
     void this.#screen.prime(this.#time, this.#lookaheadSec).catch((error: unknown) => {
       this.#onError(error instanceof Error ? error : new Error(String(error)));
     });
+  }
+
+  /** The first refused frame of a run. Cleared by the next frame that composites. */
+  #report(thrown: unknown): void {
+    if (this.#refusalReported) return;
+    this.#refusalReported = true;
+    this.#onError(thrown instanceof Error ? thrown : new Error(String(thrown)));
+  }
+
+  /**
+   * A `text` span the compositor could not draw, because no atlas was supplied.
+   *
+   * Not a refusal — text failing to render is cosmetic and visible, where a redaction
+   * failing is invisible and publishes a secret — but not silent either: a caption
+   * the user believes is in their video and is not is exactly the bug report this
+   * count exists to pre-empt.
+   */
+  #watchTextAtlas(): void {
+    const count = this.#compositor.annotations?.textSpansWithoutAtlas ?? 0;
+    const skipped = count > this.#textSpansWithoutAtlas;
+    this.#textSpansWithoutAtlas = count;
+    if (!skipped) {
+      this.#atlasReported = false;
+      return;
+    }
+    if (this.#atlasReported) return;
+    this.#atlasReported = true;
+    this.#onError(
+      new Error(
+        'a text annotation was resolved but the preview has no glyph atlas, so it was not ' +
+          'drawn. Build one with `rasterizeGlyphs` + `uploadTextAtlas` from ' +
+          '`@loom/compositor/raster` and pass it as `textAtlas`; the export path has to be ' +
+          'handed the same object',
+      ),
+    );
   }
 
   #watchStall(hit: boolean, t: Seconds, nowMs: number): void {

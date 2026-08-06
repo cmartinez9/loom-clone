@@ -417,11 +417,27 @@ describe('the two privacy features are checked as effects on pixels', () => {
 
 describe('text', () => {
   it(
-    'CONTROL: a text span with no atlas refuses the frame',
+    'CONTROL: a text span with no atlas degrades — the rest of the frame still draws, and it is counted',
+    async () => {
+      // Refusing a frame is `blur` and `mask`'s alone. Text failing to render is
+      // cosmetic and *visible*; a redaction failing is invisible and publishes a
+      // secret. The control requires all three halves of the narrower rule: the
+      // frame is not refused, the other annotations still composite, and the skip is
+      // observable — which is what `PreviewLoop` turns into a single `onError`.
+      const { report } = await gate();
+      const check = control(report, 'a-text-span-with-no-atlas-degrades-and-is-reported');
+      expect(check.detected, check.detail).toBe(true);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'no ordinary frame was missing its atlas',
     async () => {
       const { report } = await gate();
-      const check = control(report, 'a-text-span-with-no-atlas-refuses-the-frame');
-      expect(check.detected, check.detail).toBe(true);
+      // The control above trips it exactly once, after the 24 timestamps, so the
+      // count over the whole run is the control's and nothing else's.
+      expect(report.textSpansWithoutAtlas).toBe(1);
     },
     TIMEOUT_MS,
   );

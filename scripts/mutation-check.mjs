@@ -321,8 +321,10 @@ const MUTATIONS = [
   // divergence — perturb an annotation's rendering and show the test goes red"*.
   // These are that control, at the same discipline as every mutation above: the
   // production source on disk is broken and `test/phase11-golden.test.ts` has to
-  // notice. Two of the five are privacy defects, which is why they are here and not
-  // only in a unit test — the failure they model publishes something.
+  // notice. Three of the six below are privacy defects — a redaction that lands in
+  // the wrong place, one that renders as the identity, and one that takes a default
+  // region instead of refusing — which is why they are here and not only in a unit
+  // test: the failure they model publishes something.
   {
     name: 'annotations-ignore-the-zoom-they-are-anchored-in',
     breaks:

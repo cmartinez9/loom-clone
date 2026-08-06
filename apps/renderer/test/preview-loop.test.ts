@@ -15,6 +15,7 @@ import { identityTimeline, type ResolvedState } from '@loom/edl';
 import {
   PreviewLoop,
   type FrameScheduler,
+  type PreviewCompositor,
   type PreviewSource,
 } from '../src/preview/preview-loop.ts';
 
@@ -109,6 +110,49 @@ function stubSource(
 /** A stand-in for a decoded frame. The loop only ever passes it through. */
 function fakeVideoFrame(timestampUs: number): VideoFrame {
   return { timestamp: timestampUs, close: () => undefined } as unknown as VideoFrame;
+}
+
+/**
+ * A compositor that models the real one's **render target**, so "nothing unredacted
+ * is left presentable" can be asserted rather than assumed.
+ *
+ * `render` puts the screen picture in the target and then the annotations over it;
+ * a redaction it cannot place clears the target to the background *before* the throw
+ * leaves, which is `Compositor.render`'s contract. `present` publishes whatever the
+ * target holds at that moment. The test can therefore look at both what a caller
+ * could publish and what one actually did.
+ */
+class TargetCompositor implements PreviewCompositor {
+  /** What a `present()` would publish right now. */
+  target: 'background' | 'unredacted-screen' | 'redacted-composite' = 'background';
+  /** What the last `present()` did publish. */
+  published: 'nothing' | 'background' | 'unredacted-screen' | 'redacted-composite' = 'nothing';
+  /** The frames object the loop handed over, kept so the test can look at it after. */
+  handed: CompositorFrames | null = null;
+  /** Stands in for a `blur` span whose region cannot be read. */
+  refuse = false;
+  /** Stands in for a `text` span drawn with no atlas: skipped, counted, not fatal. */
+  skipText = false;
+  renders = 0;
+  presents = 0;
+  readonly annotations = { textSpansWithoutAtlas: 0 };
+
+  render(frames: CompositorFrames): void {
+    this.renders += 1;
+    this.handed = frames;
+    this.target = 'unredacted-screen';
+    if (this.skipText) this.annotations.textSpansWithoutAtlas += 1;
+    if (this.refuse) {
+      this.target = 'background';
+      throw new Error('annotation "a-blur": blur has no usable `center` channel');
+    }
+    this.target = 'redacted-composite';
+  }
+
+  present(): void {
+    this.presents += 1;
+    this.published = this.target;
+  }
 }
 
 function loopWith(
@@ -393,6 +437,100 @@ describe('PreviewLoop', () => {
     expect(loop.metrics.count).toBe(2);
     expect(loop.metrics.maxMs).toBeCloseTo(4, 6);
     expect(loop.metrics.overBudget).toBe(0);
+  });
+});
+
+describe('PreviewLoop and the annotation surface’s two failure modes', () => {
+  function refusingLoop(compositor: TargetCompositor): {
+    loop: PreviewLoop;
+    scheduler: ManualScheduler;
+    onError: ReturnType<typeof vi.fn>;
+  } {
+    const scheduler = new ManualScheduler();
+    const onError = vi.fn();
+    const loop = new PreviewLoop({
+      compositor,
+      screen: stubSource({ frameAt: () => fakeVideoFrame(0) }),
+      durationSec: 10,
+      scheduler,
+      now: () => scheduler.nowMs,
+      onError,
+    });
+    return { loop, scheduler, onError };
+  }
+
+  it('degrades a text span with no atlas, and reports it once per run rather than per frame', () => {
+    // Refusing a frame is `blur` and `mask`'s alone: text failing to render is
+    // cosmetic and visible, where a redaction failing is invisible and publishes a
+    // secret. `textAtlas` defaults to null, so the wider rule made *any* text span
+    // refuse *every* frame with no editor open at all.
+    const compositor = new TargetCompositor();
+    compositor.skipText = true;
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    for (let i = 0; i < 30; i++) scheduler.tick();
+
+    expect(compositor.renders).toBe(30);
+    expect(compositor.presents).toBe(30);
+    expect(compositor.published).toBe('redacted-composite');
+    expect(loop.running).toBe(true);
+    expect(scheduler.pending).toBe(1);
+    // Once for the run, not sixty times a second.
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]?.[0] as Error).message).toMatch(/atlas/);
+
+    // And the latch clears with the condition, so a later run is reported again.
+    compositor.skipText = false;
+    for (let i = 0; i < 5; i++) scheduler.tick();
+    expect(onError).toHaveBeenCalledOnce();
+    compositor.skipText = true;
+    scheduler.tick();
+    expect(onError).toHaveBeenCalledTimes(2);
+    loop.stop();
+  });
+
+  it('refuses an unplaceable redaction loudly, without publishing it, leaking it or wedging', () => {
+    const compositor = new TargetCompositor();
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    scheduler.tick();
+    expect(compositor.published).toBe('redacted-composite');
+
+    compositor.refuse = true;
+    for (let i = 0; i < 30; i++) scheduler.tick();
+
+    // Loud: a refused redaction was the whole point of failing closed.
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]?.[0] as Error).message).toMatch(/center/);
+    // Non-publishing: neither what a caller could present nor what one did present is
+    // the screen picture with the redaction missing.
+    expect(compositor.target).toBe('background');
+    expect(compositor.published).not.toBe('unredacted-screen');
+    expect(compositor.presents).toBe(1);
+    // Leak-free: §10.2's `VideoFrame` lifetime holds on the throw path too.
+    expect(compositor.handed).not.toBeNull();
+    expect(compositor.handed?.screen).toBeNull();
+    // Not wedged: the loop is still running and the next frame is still armed.
+    expect(loop.running).toBe(true);
+    expect(scheduler.pending).toBe(1);
+    expect(compositor.renders).toBe(31);
+
+    // Revivable in both senses: the next placeable frame composites and presents,
+    // and a `stop()`/`start()` pair still re-arms the scheduler.
+    compositor.refuse = false;
+    scheduler.tick();
+    expect(compositor.published).toBe('redacted-composite');
+    compositor.refuse = true;
+    scheduler.tick();
+    expect(onError).toHaveBeenCalledTimes(2);
+
+    loop.stop();
+    expect(scheduler.pending).toBe(0);
+    loop.start();
+    expect(scheduler.pending).toBe(1);
+    loop.stop();
   });
 });
 

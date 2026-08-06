@@ -80,6 +80,7 @@ function failureReport(error: string): GoldenReport {
     controls: [],
     privacyFallbacks: 0,
     textTruncations: 0,
+    textSpansWithoutAtlas: 0,
     atlasGlyphs: 0,
     logs,
   };

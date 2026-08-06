@@ -11,9 +11,13 @@
  * That is not only a purity dodge. §4.5 puts annotation geometry on the
  * must-be-identical list, and glyph rasterisation is the one part of an annotation
  * that a *renderer* decides rather than we do. Preview and export therefore share
- * **one atlas object**, built once by `@loom/design`'s `buildTextAtlas`; identical
- * pixels then hold by construction rather than by both sides happening to ask the
- * same canvas the same question. What this package owns is everything downstream of
+ * **one atlas object**, built once by `rasterizeGlyphs` and `uploadTextAtlas` in
+ * `@loom/compositor/raster` — this package's one impure subpath, and the only
+ * supported way to make one; identical pixels then hold by construction rather than
+ * by both sides happening to ask the same canvas the same question. A pass handed no
+ * atlas at all skips its `text` spans and counts them
+ * (`AnnotationPass.textSpansWithoutAtlas`) rather than refusing the frame: that is
+ * `blur` and `mask`'s alone. What this package owns is everything downstream of
  * the raster — where each glyph goes — and {@link layoutText} is that, as arithmetic
  * over numbers, so it is the same in both paths for the same reason `resolve` is.
  *

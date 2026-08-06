@@ -149,6 +149,15 @@ function meanAbsDiff(
   return count === 0 ? 0 : sum / count;
 }
 
+/** Pixels whose RGB differs between two whole frames. */
+function changedPixels(a: Uint8Array, b: Uint8Array): number {
+  let count = 0;
+  for (let at = 0; at < a.length; at += 4) {
+    if (a[at] !== b[at] || a[at + 1] !== b[at + 1] || a[at + 2] !== b[at + 2]) count += 1;
+  }
+  return count;
+}
+
 function insideAny(
   boxes: { x0: number; y0: number; x1: number; y1: number }[],
   x: number,
@@ -365,6 +374,7 @@ async function run(): Promise<GoldenReport> {
     controls,
     privacyFallbacks: compositor.annotations.privacyFallbacks,
     textTruncations: compositor.annotations.textTruncations,
+    textSpansWithoutAtlas: compositor.annotations.textSpansWithoutAtlas,
     atlasGlyphs: raster.glyphs.size,
     logs,
   };
@@ -467,20 +477,35 @@ function runControls(
     });
   }
 
-  // 3. A text span with no atlas must refuse too — a caption that silently does not
-  //    appear is the same class of failure one layer over.
+  // 3. A text span with no atlas must NOT refuse — refusing is the two privacy kinds'
+  //    alone. The span is skipped, the rest of the frame (including its redactions)
+  //    still composites, and the condition is *observable*, which is what the preview
+  //    loop turns into a single `onError`. All three, or this is not detected: a
+  //    build that threw, one that drew nothing, and one that skipped silently each
+  //    fail it for their own reason.
   {
     const timeline = compile(fixtureDocument({ annotations: true }), EMPTY_COMPILE_CONTEXT);
+    const plainTimeline = compile(fixtureDocument({ annotations: false }), EMPTY_COMPILE_CONTEXT);
+    const before = compositor.annotations.textSpansWithoutAtlas;
     let threw = '';
+    let changed = 0;
     try {
       compositor.render({ screen: frames.screen }, resolve(timeline, t));
+      const withoutAtlas = compositor.readPixels(buffer).slice();
+      compositor.render(frames, resolve(plainTimeline, t));
+      const plain = compositor.readPixels(buffer);
+      changed = changedPixels(withoutAtlas, plain);
     } catch (error) {
       threw = error instanceof Error ? error.message : String(error);
     }
+    const reported = compositor.annotations.textSpansWithoutAtlas - before;
     controls.push({
-      name: 'a-text-span-with-no-atlas-refuses-the-frame',
-      detected: threw !== '',
-      detail: threw === '' ? 'render() returned normally' : threw,
+      name: 'a-text-span-with-no-atlas-degrades-and-is-reported',
+      detected: threw === '' && reported > 0 && changed > 1000,
+      detail:
+        threw !== ''
+          ? `render() threw: ${threw}`
+          : `${String(reported)} span(s) counted, ${String(changed)} pixels still drew`,
     });
   }
 
@@ -574,6 +599,7 @@ void (async () => {
       controls: [],
       privacyFallbacks: 0,
       textTruncations: 0,
+      textSpansWithoutAtlas: 0,
       atlasGlyphs: 0,
       logs,
     });
