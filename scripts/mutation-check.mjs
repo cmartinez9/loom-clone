@@ -54,6 +54,9 @@ const PHASE8 = 'test/phase8-gate.test.ts';
 const EXPORT_LOOP = 'apps/renderer/test/export-render-loop.test.ts';
 const EXPORT_MOVIE = 'packages/mux/test/export-movie.test.ts';
 const EXPORT_VERIFY = 'apps/main/test/export-verify.test.ts';
+const EXPORT_SESSION = 'apps/main/test/export-session.test.ts';
+const EXPORT_COPY = 'apps/main/test/export-stream-copy.test.ts';
+const EXPORT_AUDIO = 'apps/renderer/test/audio-source.test.ts';
 /** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
 const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
 const EDL_CONDITIONING = 'packages/edl/test/conditioning.test.ts';
@@ -413,6 +416,67 @@ const MUTATIONS = [
     find: `  if (!outcome.ok) {`,
     replace: `  if (false as boolean) {`,
     mustFail: [EXPORT_VERIFY],
+  },
+  {
+    name: 'early-export-chunks-refused-instead-of-held',
+    breaks:
+      'main holding the chunks that arrive before the writer can be opened. WebCodecs ' +
+      'hands the decoderConfig over WITH the first output chunk, so a chunk always ' +
+      'arrives before the writer exists — and on the recompose path §5.7 runs the ' +
+      'whole audio pass before the video encoder says a word. Refusing them fails ' +
+      'every export of a recording with audio before a single sample reaches disk.',
+    file: 'apps/main/src/export/session.ts',
+    find: '      held.push(message);',
+    replace: '      void message;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'held-export-chunks-flushed-out-of-order',
+    breaks:
+      'the held chunks reaching the writer in arrival order. Reversing them puts the ' +
+      "video's keyframe after the frames that reference it and the audio backwards, " +
+      'and `addVideoSample` is what has to notice — a sample table that cannot express ' +
+      'the order it was given is a file that plays and shows the wrong thing.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    for (const message of held) this.#appendChunk(job, message);',
+    replace: '    for (const message of held.reverse()) this.#appendChunk(job, message);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'mid-gop-cut-reported-as-instant',
+    breaks:
+      "§5.3's second condition — cut points snapped to keyframes — in the predicate " +
+      'the export routes on. Without it a mid-GOP trim is reported eligible, the job ' +
+      'commits to a copy with no video pass requested, and the plan then refuses it: ' +
+      'a failed export where recompose would have produced the file asked for.',
+    file: 'apps/main/src/export/stream-copy.ts',
+    find: '    reasons.push(...cutPointReasons(input.edit.clips, input.index));',
+    replace: '    reasons.push();',
+    mustFail: [EXPORT_COPY, EXPORT_SESSION],
+  },
+  {
+    name: 'stale-export-scratch-blocks-the-next-export',
+    breaks:
+      'the sweep of this output’s own scratch before the writer opens. The scratch ' +
+      'streams open `wx+`, so one SIGKILL mid-export means that recording can never ' +
+      'be exported under that name again — an opaque EEXIST pointing at files the ' +
+      'user has no reason to know exist.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: '    await sweepExportScratch(options.outputPath);',
+    replace: '    await Promise.resolve();',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'only-the-first-part-of-a-straddling-block-is-mixed',
+    breaks:
+      'every part an output block overlaps being mixed. A block is ~21 ms and a §7.4 ' +
+      'reacquire puts a part boundary wherever it falls, so mixing only the first ' +
+      'emits the far side of every seam as silence — §5.4 mechanism 5’s class of ' +
+      'error: small, silent, and permanent once it is in the file.',
+    file: 'apps/renderer/src/export/audio-source.ts',
+    find: '    for (const part of this.#partsCovering(startSec, endSec)) {',
+    replace: '    for (const part of this.#partsCovering(startSec, endSec).slice(0, 1)) {',
+    mustFail: [EXPORT_AUDIO],
   },
   // ---- phase 10: the generators ------------------------------------------
   {

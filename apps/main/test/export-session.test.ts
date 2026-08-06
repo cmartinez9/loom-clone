@@ -18,16 +18,30 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHANNEL, type ExportCommand, type ExportProgress } from '@loom/ipc';
-import type { ProjectDoc, RecordingId } from '@loom/format';
+import {
+  currentSchemaId,
+  newEditDocument,
+  type EditDocument,
+  type FrameIndexDoc,
+  type ProjectDoc,
+  type RecordingDoc,
+  type RecordingId,
+} from '@loom/format';
+import { parseMovie } from '@loom/mux';
 import { ProjectStore } from '../src/project-store.ts';
 import { ExportSession, bitrateFor, safeFileName } from '../src/export/session.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
 const fixture = loadEncodedFixture();
+
+/** AAC-LC, 48 kHz, stereo — the two bytes an `AudioSpecificConfig` is. */
+const AUDIO_SPECIFIC_CONFIG = new Uint8Array([0x11, 0x90]);
+const AUDIO_RATE = 48_000;
+const AAC_FRAME = 1024;
 
 /**
  * A `BrowserWindow` reduced to what `ExportSession` touches, plus a hook to see what
@@ -38,11 +52,14 @@ const fixture = loadEncodedFixture();
 class FakeWindow extends EventEmitter {
   readonly sent: ExportCommand[] = [];
   destroyed = false;
+  /** What `webContents.isLoading()` answers. The page is loaded unless a test says not. */
+  loading = false;
+  /** A real emitter, so a listener fires when the event happens and not before. */
+  readonly contents = new EventEmitter();
   readonly webContents = {
-    isLoading: (): boolean => false,
-    once: (event: string, listener: () => void): void => {
-      void event;
-      listener();
+    isLoading: (): boolean => this.loading,
+    once: (event: string, listener: (...args: unknown[]) => void): void => {
+      this.contents.once(event, listener);
     },
     send: (channel: string, payload: unknown): void => {
       expect(channel).toBe(CHANNEL.exportCommand);
@@ -64,6 +81,7 @@ interface Harness {
   clipboard: string[];
   revealed: string[];
   recordingId: RecordingId;
+  bundleDir: string;
   exportsDir: string;
 }
 
@@ -111,6 +129,7 @@ beforeEach(async () => {
     clipboard,
     revealed,
     recordingId: created.id,
+    bundleDir: created.paths.dir,
     exportsDir: join(root, 'recordings', 'Exports'),
   };
 });
@@ -144,6 +163,153 @@ function encodeLikeTheWindow(jobId: string, frames = fixture.frames.length): voi
     });
   }
   session.onPassDone({ jobId, kind: 'video', sampleCount: frames });
+}
+
+/**
+ * The audio half of the export page, in the order the real one produces it.
+ *
+ * §5.7 runs the audio pass **to completion** before the video pass, and WebCodecs
+ * hands the `decoderConfig` over with the first output chunk — so on the recompose
+ * path every audio chunk of the export arrives before the video encoder has said
+ * anything at all, which is what main has to be able to hold.
+ */
+function encodeAudioLikeTheWindow(jobId: string, frames: number): void {
+  const { session } = harness;
+  session.onMeta({
+    jobId,
+    kind: 'audio',
+    decoderConfig: {
+      codec: 'mp4a.40.2',
+      sampleRate: AUDIO_RATE,
+      numberOfChannels: 2,
+      description: AUDIO_SPECIFIC_CONFIG,
+    },
+  });
+  for (let i = 0; i < frames; i++) {
+    session.onChunk({
+      jobId,
+      kind: 'audio',
+      // The muxer writes the bytes it is handed; nothing in verification decodes
+      // audio, so a recognisable pattern is more useful here than real AAC.
+      data: new Uint8Array(96).fill(i % 251),
+      isKey: true,
+      timestampUs: Math.round((i * AAC_FRAME * 1e6) / AUDIO_RATE),
+    });
+  }
+  session.onPassDone({ jobId, kind: 'audio', sampleCount: frames });
+}
+
+/** A `recording.json` on disk, so `audioSources()` and eligibility have something to read. */
+async function seedRecording(doc: RecordingDoc): Promise<void> {
+  await writeFile(join(harness.bundleDir, 'recording.json'), JSON.stringify(doc), 'utf8');
+}
+
+/** An `edit.json` on disk, so a test can trim the timeline without an editor. */
+async function seedEdit(overrides: Partial<EditDocument>): Promise<void> {
+  const doc: EditDocument = { ...newEditDocument(), ...overrides };
+  await writeFile(join(harness.bundleDir, 'edit.json'), JSON.stringify(doc), 'utf8');
+}
+
+function micTrack(durationSec: number): RecordingDoc['tracks'] {
+  return {
+    mic: {
+      kind: 'audio',
+      parts: [
+        {
+          file: 'media/mic.000.m4a',
+          codec: 'mp4a.40.2',
+          startTimeSec: 0,
+          durationSec,
+          endedEarly: false,
+          sampleRate: AUDIO_RATE,
+          channels: 2,
+          measuredSampleRate: AUDIO_RATE,
+          gaps: [],
+        },
+      ],
+    },
+  };
+}
+
+function screenTrack(): RecordingDoc['tracks'] {
+  return {
+    screen: {
+      kind: 'video',
+      parts: [
+        {
+          file: 'media/screen.000.mp4',
+          index: 'media/screen.000.index.json',
+          codec: 'avc1.640028',
+          startTimeSec: 0,
+          durationSec: fixture.frames.length / fixture.fps,
+          endedEarly: false,
+          size: [fixture.width, fixture.height],
+          frameCount: fixture.frames.length,
+          rate: { mode: 'variable', nominalFps: fixture.fps, observedFps: fixture.fps },
+        },
+      ],
+    },
+  };
+}
+
+/** The fixture's own frames as a §2.4 sidecar — keyframes every 30, as it was encoded. */
+function frameIndex(): FrameIndexDoc {
+  const pts: number[] = [];
+  const sizes: number[] = [];
+  const offsets: number[] = [];
+  const keyframes: number[] = [];
+  let offset = 0;
+  for (const [i, frame] of fixture.frames.entries()) {
+    pts.push(Math.round((i * 1_000_000) / fixture.fps));
+    sizes.push(frame.data.byteLength);
+    offsets.push(offset);
+    offset += frame.data.byteLength;
+    if (frame.isKey) keyframes.push(i);
+  }
+  return {
+    schema: currentSchemaId('loom.index'),
+    timescale: 1_000_000,
+    keyframes,
+    pts,
+    sizes,
+    offsets,
+  };
+}
+
+/** What is in the Exports folder — including "the folder was never created". */
+async function exportsDirEntries(): Promise<string[]> {
+  return readdir(harness.exportsDir).catch(() => []);
+}
+
+function recordingDoc(tracks: RecordingDoc['tracks']): RecordingDoc {
+  return {
+    schema: currentSchemaId('loom.recording'),
+    clock: { kind: 'videoframe-timestamp-us', t0Us: 0 },
+    display: {
+      id: 1,
+      name: 'Built-in',
+      logicalSize: [1728, 1117],
+      pixelSize: [fixture.width, fixture.height],
+      scaleFactor: 2,
+      colorSpace: 'srgb',
+    },
+    tracks,
+    events: {},
+    capture: {
+      app: '0.0.0',
+      os: '14.0',
+      permissions: {
+        screen: 'granted',
+        camera: 'not-determined',
+        microphone: 'granted',
+        accessibility: false,
+      },
+      requestedFps: fixture.fps,
+      resolutionClamp: '3840',
+      droppedFrames: {},
+    },
+    integrity: { finalizedAt: null, recoveredFromCrash: false, truncatedToSec: null },
+  };
 }
 
 /** Answer §7.5's decode check the way `verify-decode.ts` would. */
@@ -312,6 +478,133 @@ describe('ExportSession', () => {
     expect(await readdir(harness.exportsDir)).toEqual([]);
     // A cancel is not a failure, so nothing is recorded against the recording.
     expect((await projectDoc(harness.recordingId)).exports).toEqual([]);
+  }, 60_000);
+
+  it('exports a recording that has audio, whose whole audio pass precedes the video meta', async () => {
+    // The bug this pins: `#openWriterWhenReady` cannot open until the video encoder
+    // has announced its `avcC`, and WebCodecs only hands that over with the video
+    // encoder's *first chunk* — which on the recompose path is after the entire audio
+    // pass (§5.7's deliberate order). Every audio chunk therefore arrives before the
+    // writer exists, and refusing them failed every export of a recording with audio
+    // before a single sample reached disk.
+    //
+    // Both existing gates missed it for the same reason: `test/export-golden/` exports
+    // video only, and every other case in this file uses a bundle with no tracks, so
+    // `passes.audio` was never true.
+    const durationSec = fixture.frames.length / fixture.fps;
+    await seedRecording(recordingDoc(micTrack(durationSec)));
+    const audioFrames = Math.ceil((durationSec * AUDIO_RATE) / AAC_FRAME);
+
+    answerVerification();
+    let passes: { audio: boolean; video: boolean } | null = null;
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind !== 'start') return;
+      passes = command.job.passes;
+      encodeAudioLikeTheWindow(command.job.jobId, audioFrames);
+      encodeLikeTheWindow(command.job.jobId);
+    });
+
+    await harness.session.start(harness.recordingId, { name: 'WithAudio' });
+    const outcome = await settled();
+
+    expect(passes).toEqual({ audio: true, video: true });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.phase).toBe('done');
+    expect(await readdir(harness.exportsDir)).toEqual(['WithAudio.mp4']);
+
+    // And both tracks are in the finished file — the audio was held and written, not
+    // merely tolerated. Read off the disk, because that is the only account of the
+    // export that phase 9 may act on.
+    const path = join(harness.exportsDir, 'WithAudio.mp4');
+    const bytes = new Uint8Array(await readFile(path));
+    const movie = parseMovie(bytes);
+    const video = movie.tracks.find((track) => track.handler === 'vide');
+    const audio = movie.tracks.find((track) => track.handler === 'soun');
+    expect(video?.samples).toHaveLength(fixture.frames.length);
+    expect(audio?.samples).toHaveLength(audioFrames);
+
+    // In the order they were produced, which is what "held, in arrival order" means:
+    // each chunk's payload is stamped with its own index, so a buffer flushed
+    // backwards is a file whose first audio sample is the last one encoded.
+    const first = audio?.samples[0];
+    const last = audio?.samples.at(-1);
+    expect(first).toBeDefined();
+    expect(last).toBeDefined();
+    if (first === undefined || last === undefined) return;
+    expect(bytes[first.offset]).toBe(0);
+    expect(bytes[last.offset]).toBe((audioFrames - 1) % 251);
+  }, 60_000);
+
+  it('recomposes a mid-GOP trim rather than failing the copy it cannot make', async () => {
+    // §5.3's fast path needs cut points on keyframes. A trim that misses one used to
+    // be reported eligible, so the job committed to a copy with no video pass asked
+    // for and `#copyVideo` then threw — a failed export where the recompose path
+    // could have produced exactly the file the user asked for.
+    const fps = fixture.fps;
+    await seedRecording(recordingDoc(screenTrack()));
+    await seedEdit({
+      clips: [{ id: 'a', sourceStart: 3 / fps, sourceEnd: 20 / fps, speed: 1 }],
+      output: { size: [fixture.width, fixture.height], fps, background: { kind: 'none' } },
+    });
+    await writeFile(
+      join(harness.bundleDir, 'media', 'screen.000.index.json'),
+      JSON.stringify(frameIndex()),
+      'utf8',
+    );
+
+    // The button says why, and it names the cut rather than shrugging.
+    const preview = await harness.session.previewMode(
+      harness.recordingId,
+      await harness.session.defaults(harness.recordingId),
+    );
+    expect(preview.mode).toBe('recompose');
+    expect(preview.reasons.join(' ')).toMatch(/cut at 0\.100s is not on a keyframe/);
+
+    answerVerification();
+    let passes: { audio: boolean; video: boolean } | null = null;
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind !== 'start') return;
+      passes = command.job.passes;
+      encodeLikeTheWindow(command.job.jobId);
+    });
+
+    const outcome = await (async () => {
+      await harness.session.start(harness.recordingId, { name: 'Trimmed' });
+      return settled();
+    })();
+
+    // The window was asked for a video pass, which is what "falls back" means.
+    expect(passes).toEqual({ audio: false, video: true });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.phase).toBe('done');
+    expect(outcome.mode).toBe('recompose');
+    expect(await readdir(harness.exportsDir)).toEqual(['Trimmed.mp4']);
+  }, 60_000);
+
+  it('fails a job whose window never loads instead of waiting for it for ever', async () => {
+    // §10.2's named symptom: an export that hangs with no error. `did-finish-load`
+    // was awaited unbounded, so a page that fails to load — or a window destroyed
+    // under the await — left the job in `preparing` with its scratch on disk.
+    harness.window.loading = true;
+    await harness.session.start(harness.recordingId, { name: 'NeverLoads' });
+    await new Promise((done) => setTimeout(done, 20));
+    harness.window.contents.emit('did-fail-load', {}, -6, 'ERR_FILE_NOT_FOUND');
+
+    const outcome = await settled();
+    expect(outcome.phase).toBe('failed');
+    expect(outcome.error).toMatch(/failed to load/);
+    expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+
+  it('lets a cancel break a job out of a load that never finishes', async () => {
+    harness.window.loading = true;
+    const { jobId } = await harness.session.start(harness.recordingId, { name: 'Wedged' });
+    await new Promise((done) => setTimeout(done, 20));
+    harness.session.cancel(jobId);
+
+    const outcome = await settled();
+    expect(outcome.phase).toBe('cancelled');
+    expect(await exportsDirEntries()).toEqual([]);
   }, 60_000);
 
   it('reports the failure from the window rather than hanging on it', async () => {

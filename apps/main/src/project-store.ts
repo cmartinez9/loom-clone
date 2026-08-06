@@ -75,6 +75,7 @@ import {
   directorySize,
   listBundles,
   loadAndUpgradeDocument,
+  loadDocument,
   readBundle,
   sweepTempArtifacts,
   writeAtomic,

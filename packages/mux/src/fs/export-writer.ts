@@ -32,9 +32,15 @@
  * Cancel is deliberately not "stop and keep what we have". A truncated export is a
  * shorter video that looks finished, and the one thing phase 9 must never delete
  * sources on the strength of.
+ *
+ * A kill leaves those scratch files behind, and the scratch streams are opened
+ * `wx+`, so without {@link sweepExportScratch} the *next* export to the same
+ * destination fails with an opaque `EEXIST` and that recording can never be exported
+ * under that name again. See that function for what it is and is not allowed to
+ * touch.
  */
 
-import { open, rename, unlink, type FileHandle } from 'node:fs/promises';
+import { open, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   FastStartWriter,
@@ -78,6 +84,53 @@ interface Stream {
   syncedBytes: number;
 }
 
+/** The scratch path one lane's payload accumulates in. */
+function scratchPath(outputPath: string, lane: Lane): string {
+  return `${outputPath}.${lane}.part`;
+}
+
+/** Where the finished bytes are assembled before the `rename(2)`. */
+function partialPath(outputPath: string): string {
+  return `${outputPath}.partial`;
+}
+
+/**
+ * Remove the leftovers of an export that was killed writing to this same output.
+ *
+ * `packages/format`'s `sweepTempArtifacts` is the shape; the bound is narrower,
+ * because that one runs inside a bundle under a lock and this one runs in the user's
+ * Exports folder. So: **exactly the three paths this output's own name derives** —
+ * `<out>.video.part`, `<out>.audio.part`, `<out>.partial` — and nothing else. No
+ * glob, no directory listing, no pattern match, so there is no input that can make
+ * this remove a file it was not named at.
+ *
+ * **`<out>` itself is never touched.** A file already at the output path is a
+ * previously exported video — the user's finished work — and a sweep that deleted it
+ * would be the destructive act this bound exists to prevent. `finalize`'s
+ * `rename(2)` is the only thing that ever replaces it, and only once the new bytes
+ * are complete on disk.
+ *
+ * Called immediately before {@link ExportMp4Writer.create} opens its streams, and
+ * nowhere else: a sweep at any other point in the lifecycle could reach a scratch
+ * file that a live writer is holding open.
+ */
+export async function sweepExportScratch(outputPath: string): Promise<string[]> {
+  const swept: string[] = [];
+  for (const path of [
+    scratchPath(outputPath, 'video'),
+    scratchPath(outputPath, 'audio'),
+    partialPath(outputPath),
+  ]) {
+    // `isFile` rather than "it exists": a directory sitting on one of these names is
+    // not something this wrote, and removing it is not this function's business.
+    const stats = await stat(path).catch(() => null);
+    if (stats?.isFile() !== true) continue;
+    await unlink(path).catch(() => undefined);
+    swept.push(path);
+  }
+  return swept;
+}
+
 export class ExportMp4Writer {
   readonly #options: ExportMp4WriterOptions;
   readonly #plan: FastStartWriter;
@@ -90,7 +143,7 @@ export class ExportMp4Writer {
   private constructor(options: ExportMp4WriterOptions) {
     this.#options = options;
     this.#plan = new FastStartWriter(options);
-    this.#partialPath = `${options.outputPath}.partial`;
+    this.#partialPath = partialPath(options.outputPath);
   }
 
   /**
@@ -99,13 +152,20 @@ export class ExportMp4Writer {
    * `wx+` on both scratch paths — exclusive create, so a second export aimed at the
    * same destination is a refusal rather than two writers interleaving into one
    * file, and readable because {@link finalize} copies back out of them.
+   *
+   * That exclusivity is why {@link sweepExportScratch} runs first: a killed export
+   * leaves its scratch behind, and without the sweep the `wx+` would turn "the app
+   * was force-quit once" into "this recording can never be exported under this name
+   * again", reported as an `EEXIST` pointing at files the user has no reason to know
+   * about.
    */
   static async create(options: ExportMp4WriterOptions): Promise<ExportMp4Writer> {
     const writer = new ExportMp4Writer(options);
+    await sweepExportScratch(options.outputPath);
     try {
       for (const lane of ['video', 'audio'] as const) {
         if (lane === 'audio' && options.audio === undefined) continue;
-        const path = `${options.outputPath}.${lane}.part`;
+        const path = scratchPath(options.outputPath, lane);
         const handle = await open(path, 'wx+', 0o644);
         writer.#streams.set(lane, { path, handle, bytes: 0, syncedBytes: 0 });
       }

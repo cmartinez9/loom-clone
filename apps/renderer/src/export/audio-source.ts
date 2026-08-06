@@ -156,6 +156,14 @@ export class AudioSourceTrack {
    * `out` is planar and is **added to**, not overwritten: two tracks mix into the
    * same buffers, which is what makes the mic and the system track one line each
    * rather than a mixing stage of their own.
+   *
+   * **Every part overlapping the block is mixed, not just the first.** One block is
+   * 21 ms and a part boundary is §7.4's device-loss-and-reacquire — the case this
+   * file exists to handle — so at every seam exactly one block straddles two parts.
+   * Mixing only the earlier one emitted the samples past its end as silence, which is
+   * §5.4 mechanism 5's class of error: small, silent, and permanent once it is in the
+   * file. Each part contributes only where {@link #positionAt} answers for it, so
+   * nothing is added twice and the gap between two parts stays silent.
    */
   async mixInto(
     out: Float32Array[],
@@ -166,22 +174,27 @@ export class AudioSourceTrack {
   ): Promise<void> {
     if (this.#closed || gain === 0) return;
     const endSec = startSec + count / outRate;
-    const part = this.#partCovering(startSec, endSec);
-    if (part === null) return;
+    for (const part of this.#partsCovering(startSec, endSec)) {
+      await this.#mixPart(out, part, startSec, count, outRate, gain);
+    }
+  }
 
+  async #mixPart(
+    out: Float32Array[],
+    part: PartState,
+    startSec: Seconds,
+    count: number,
+    outRate: number,
+    gain: number,
+  ): Promise<void> {
+    const endSec = startSec + count / outRate;
     // One `ensure` for the whole block rather than one per sample: the window has to
     // cover the block's span before any of it is read, or the read would decode
     // inside the interpolation loop and the loop would be doing I/O per sample.
-    // A block may begin or end inside a recorded gap, where there is no position at
-    // all. The window still has to cover whatever part of the block *is* audio, so
-    // the span is taken over the positions that exist — and if neither end does, the
-    // whole block is silence and there is nothing to decode.
-    const ends = [this.#positionAt(part, startSec), this.#positionAt(part, endSec)].filter(
-      (p): p is number => p !== null,
-    );
-    if (ends.length === 0) return;
-    const from = Math.floor(Math.min(...ends)) - 1;
-    const to = Math.ceil(Math.max(...ends)) + 2;
+    const span = this.#spanFor(part, startSec, endSec);
+    if (span === null) return;
+    const from = Math.floor(span.from) - 1;
+    const to = Math.ceil(span.to) + 2;
     await this.#ensure(part, from, to);
 
     for (let i = 0; i < count; i++) {
@@ -207,11 +220,38 @@ export class AudioSourceTrack {
 
   // ------------------------------------------------------------------ internals
 
-  #partCovering(fromSec: Seconds, toSec: Seconds): PartState | null {
-    for (const part of this.#parts) {
-      if (fromSec < part.endSec && toSec > part.startSec) return part;
+  /** Every part overlapping `[fromSec, toSec)`, in recording-clock order. */
+  #partsCovering(fromSec: Seconds, toSec: Seconds): PartState[] {
+    return this.#parts.filter((part) => fromSec < part.endSec && toSec > part.startSec);
+  }
+
+  /**
+   * The decoded-stream span a block needs from one part, or `null` for none.
+   *
+   * Taken over the part's **runs** clipped to the block rather than from the block's
+   * two ends, because neither end is reliable: a block that straddles a part boundary
+   * has one end outside the part, and a block containing a recorded gap has real
+   * audio on both sides of an instant that has no position at all. Reading the ends
+   * asked the decoder for a window too short in exactly the two cases this class
+   * exists for, and everything past it read back as silence.
+   */
+  #spanFor(part: PartState, fromSec: Seconds, toSec: Seconds): { from: number; to: number } | null {
+    const rate = part.part.measuredSampleRate > 0 ? part.part.measuredSampleRate : 0;
+    if (rate <= 0) return null;
+    let low: number | null = null;
+    let high = 0;
+    for (const run of part.runs) {
+      const runEndSec = run.startSec + run.sampleCount / rate;
+      const overlapFrom = Math.max(fromSec, run.startSec);
+      const overlapTo = Math.min(toSec, runEndSec);
+      if (overlapTo <= overlapFrom) continue;
+      const base = part.media.encoderDelaySamples + run.firstSample;
+      const first = base + (overlapFrom - run.startSec) * rate;
+      const last = base + (overlapTo - run.startSec) * rate;
+      low ??= first;
+      high = Math.max(high, last);
     }
-    return null;
+    return low === null ? null : { from: low, to: high };
   }
 
   /**

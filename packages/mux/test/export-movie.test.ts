@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process';
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FastStartWriter, movieHeaderLength, parseMovie, readBoxHeader } from '../src/index.ts';
-import { ExportMp4Writer } from '../src/fs/index.ts';
+import { ExportMp4Writer, sweepExportScratch } from '../src/fs/index.ts';
 import { encodeAac, haveAfconvert, writeWav } from './helpers/aac.ts';
 import { loadEncodedFixture } from './helpers/fixture.ts';
 import { withTempDir } from './helpers/temp.ts';
@@ -268,6 +268,50 @@ describe('the export movie', () => {
         timestampUs: 500,
       });
     }).toThrow(/backwards/);
+  });
+
+  it('re-exports over the scratch a killed export left behind', async () => {
+    await withTempDir(async (dir) => {
+      // What a `SIGKILL` mid-export leaves. The scratch streams open `wx+`, so
+      // without the sweep this is permanent: every later export to the same name
+      // fails in `create` with an opaque `EEXIST`, pointing at files the user has no
+      // reason to know exist, and that recording can never be exported again.
+      const outputPath = join(dir, 'Export.mp4');
+      await writeFile(`${outputPath}.video.part`, 'half a dead export');
+      await writeFile(`${outputPath}.audio.part`, 'and its audio');
+      await writeFile(`${outputPath}.partial`, 'and a partial assembly');
+
+      const path = await writeExport(dir, { frames: 12 });
+      expect(path).toBe(outputPath);
+      await assertSamplesTileTheMdat(path);
+      // And nothing of the dead export survives it.
+      expect((await readdir(dir)).filter((name) => name.startsWith('Export.mp4'))).toEqual([
+        'Export.mp4',
+      ]);
+    });
+  }, 120_000);
+
+  /**
+   * CONTROL for the sweep's bound.
+   *
+   * The sweep is allowed exactly three deterministic names derived from the output
+   * path. `<out>` is not one of them: a file already there is a previously exported
+   * video — the user's finished work — and removing it is the destructive act the
+   * bound exists to prevent. Without this test, "sweeps the scratch" and "clears the
+   * way by deleting whatever is in it" read identically.
+   */
+  it('control: the sweep does not touch an export already at the output path', async () => {
+    await withTempDir(async (dir) => {
+      const outputPath = join(dir, 'Export.mp4');
+      const earlier = 'an earlier export, which is the user’s finished work';
+      await writeFile(outputPath, earlier);
+      await writeFile(`${outputPath}.video.part`, 'scratch');
+
+      await sweepExportScratch(outputPath);
+
+      expect(await readFile(outputPath, 'utf8')).toBe(earlier);
+      expect((await readdir(dir)).sort()).toEqual(['Export.mp4']);
+    });
   });
 
   /**

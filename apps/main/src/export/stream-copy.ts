@@ -28,6 +28,15 @@
  * picture that is no longer in front of it. The result decodes into garbage for the
  * rest of the GOP. §5.3 says "snapped to keyframes" and this refuses anything else,
  * rather than producing a file that plays and is wrong.
+ *
+ * Both halves check it, and they are not redundant. {@link streamCopyEligibility} is
+ * where it *decides*: a mid-GOP trim is reported ineligible, so the caller routes the
+ * job to the recompose path — which can express that cut perfectly — and the button
+ * says why. {@link planStreamCopy}'s refusal is the backstop for a caller that asked
+ * for a copy anyway. Checking it only in the plan is how a perfectly ordinary trim
+ * became a failed export: eligibility said "Instant", the job committed to a copy
+ * with no video pass requested, and the plan then threw with nothing left to fall
+ * back to.
  */
 
 import { DemuxIndex } from '@loom/decode';
@@ -54,6 +63,16 @@ export interface EligibilityInput {
   edit: EditDocument;
   recording: RecordingDoc | null;
   settings: ExportSettings;
+  /**
+   * The screen part's frame index sidecar, when there is exactly one part and it
+   * could be read.
+   *
+   * §5.3's second condition — "cut points snapped to keyframes" — cannot be answered
+   * without it, so it is a required field rather than an optional one: a caller that
+   * has not read the sidecar has to say so, and `null` with a trimmed edit is a
+   * refusal (which routes to recompose) rather than a guess.
+   */
+  index: FrameIndexDoc | null;
 }
 
 /**
@@ -85,6 +104,7 @@ export function streamCopyEligibility(input: EligibilityInput): StreamCopyDecisi
           `${part.size[0]}x${part.size[1]}`,
       );
     }
+    reasons.push(...cutPointReasons(input.edit.clips, input.index));
   }
 
   if (input.recording?.tracks.webcam !== undefined) {
@@ -114,6 +134,35 @@ export function streamCopyEligibility(input: EligibilityInput): StreamCopyDecisi
 /** True for a track that changes the picture. Exported for the reason string above. */
 export function isVisualTrack(track: Track): boolean {
   return track.enabled && VISUAL_TARGETS.has(track.target);
+}
+
+/**
+ * §5.3's other condition: every clip has to begin on a keyframe.
+ *
+ * One reason rather than one per clip — a timeline trimmed in twenty places is one
+ * thing for the user to know, not twenty — but it names an offending cut, because
+ * "some cut is wrong" is not something anyone can act on.
+ */
+function cutPointReasons(clips: readonly Clip[], index: FrameIndexDoc | null): string[] {
+  if (clips.length === 0) return [];
+  if (index === null) {
+    return ["the screen part's frame index could not be read, so the cuts cannot be checked"];
+  }
+  const demux = new DemuxIndex(index);
+  if (demux.frameCount === 0) return ['the screen part has no frames'];
+
+  const missed = clips.filter((clip) => {
+    const frame = demux.frameAtTime(clip.sourceStart);
+    return frame < 0 || !demux.isKeyframe(frame);
+  });
+  const first = missed[0];
+  if (first === undefined) return [];
+  const at = `${first.sourceStart.toFixed(3)}s`;
+  return [
+    missed.length === 1
+      ? `the cut at ${at} is not on a keyframe`
+      : `${missed.length} cuts are not on keyframes, the first at ${at}`,
+  ];
 }
 
 export class StreamCopyRefused extends Error {

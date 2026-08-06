@@ -23,6 +23,7 @@ export {
 
 export {
   ExportMp4Writer,
+  sweepExportScratch,
   type ExportMp4WriterOptions,
   type FinalizedExport,
 } from './export-writer.ts';

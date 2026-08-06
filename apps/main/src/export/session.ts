@@ -54,18 +54,86 @@ import {
   isoTimestamp,
   type EditDocument,
   type ExportRecord,
+  type FrameIndexDoc,
   type RecordingDoc,
   type RecordingId,
+  type VideoPart,
 } from '@loom/format';
 import type { ProjectStore } from '../project-store.ts';
-import { COPY_TIMESCALE, planStreamCopy, streamCopyEligibility } from './stream-copy.ts';
+import {
+  COPY_TIMESCALE,
+  StreamCopyRefused,
+  planStreamCopy,
+  streamCopyEligibility,
+  type StreamCopyPlan,
+} from './stream-copy.ts';
 import { verifyExport, type VerificationIo } from './verify.ts';
 
 /** How long main waits for the export window to answer a verification request. */
 const VERIFY_TIMEOUT_MS = 60_000;
 
+/**
+ * How long main waits for the export window's page to load.
+ *
+ * Every other wait in this file is bounded and this one was not, which is §10.2's
+ * named symptom exactly: a load that fails, or a window destroyed while the await is
+ * pending, left the job in `phase: 'preparing'` for ever — no error broadcast, no
+ * `cancelExport`, and its scratch files never removed. A `loom://app` page off the
+ * local disk is milliseconds of work; thirty seconds is a machine in trouble, and a
+ * typed error beats a spinner.
+ */
+const LOAD_TIMEOUT_MS = 30_000;
+
 /** Bytes copied per read on the stream-copy path. */
 const COPY_BATCH_BYTES = 8 * 1024 * 1024;
+
+/**
+ * How much encoded media main will hold while it waits for the writer to open.
+ *
+ * The writer needs the video encoder's `avcC` to describe the file, and WebCodecs
+ * hands that over **with the first output chunk** — so it is not possible for both
+ * encoders to have announced themselves before either has emitted anything, and a
+ * chunk that arrives before the writer exists is the normal case rather than a race.
+ * On the recompose path it is the whole audio pass: §5.7 runs audio to completion
+ * first, so every audio chunk of the export arrives before the video encoder has said
+ * a word. Refusing them is what made every export of a recording with audio fail
+ * before a single sample reached disk.
+ *
+ * So they are held, in arrival order, and appended the moment `beginExport` is under
+ * way — the shape and the reason of `MAX_HELD_CHUNKS` in the recorder's `session.ts`.
+ *
+ * The bound is derived from the job rather than fixed, because "one audio pass" is a
+ * different number of bytes for a twenty-second recording and a two-hour one:
+ * twice what the pass could possibly encode, plus slack. More than that means the
+ * writer is never going to open, and the export ends loudly rather than quietly
+ * dropping audio nobody would notice missing.
+ */
+const HELD_SLACK_BYTES = 4 * 1024 * 1024;
+
+function heldBudgetBytes(settings: ExportSettings, totalSec: number): number {
+  const audioBytes = (Math.max(0, settings.audioBitrate) / 8) * (Math.max(0, totalSec) + 1);
+  return Math.ceil(audioBytes * 2) + HELD_SLACK_BYTES;
+}
+
+/** Raised when the held buffer overruns {@link heldBudgetBytes}. */
+export class HeldExportChunksOverflow extends Error {
+  constructor(jobId: string, bytes: number, budget: number) {
+    super(
+      `export ${jobId} held ${bytes} bytes of encoded media waiting for its writer to open, ` +
+        `past the ${budget} byte budget — the encoders never announced the tracks the file ` +
+        'has to be described with',
+    );
+    this.name = 'HeldExportChunksOverflow';
+  }
+}
+
+/** Raised when the export window never becomes usable. See {@link LOAD_TIMEOUT_MS}. */
+export class ExportWindowUnavailable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExportWindowUnavailable';
+  }
+}
 
 /**
  * How the two passes share the progress bar.
@@ -113,6 +181,29 @@ interface Job {
   startedAtMs: number;
   settle: { resolve: () => void; reject: (error: Error) => void } | null;
   decode: ((report: ExportDecodeReport) => void) | null;
+  /**
+   * Chunks that arrived before the writer was opened, in arrival order, and the
+   * bytes they hold. `null` once the writer is opening — see
+   * {@link heldBudgetBytes}.
+   */
+  held: ExportChunkMsg[] | null;
+  heldBytes: number;
+  /**
+   * Waits that a cancel or a failure has to be able to break out of.
+   *
+   * `settle` covers the passes; this covers everything else that awaits an event
+   * from a window, so a cancel is not silently lost against a load that will never
+   * finish.
+   */
+  waiters: Set<(error: Error) => void>;
+}
+
+/** Everything `#copyVideo` needs, read and refused-or-accepted before any window exists. */
+interface CopySources {
+  part: VideoPart;
+  mediaPath: string;
+  plan: StreamCopyPlan;
+  avcC: Uint8Array;
 }
 
 export class ExportSession {
@@ -158,8 +249,28 @@ export class ExportSession {
       edit: opened.edit,
       recording: opened.recording,
       settings,
+      index: await this.#screenIndex(id, opened.recording),
     });
     return { mode: decision.eligible ? 'stream-copy' : 'recompose', reasons: decision.reasons };
+  }
+
+  /**
+   * The screen part's frame index, for §5.3's keyframe condition.
+   *
+   * Only when there is exactly one part — with any other number the copy is already
+   * refused for a reason that does not need a sidecar — and `null` rather than a
+   * throw when it cannot be read, because an unreadable sidecar is a reason to
+   * recompose rather than a reason to refuse the export.
+   */
+  async #screenIndex(
+    id: RecordingId,
+    recording: RecordingDoc | null,
+  ): Promise<FrameIndexDoc | null> {
+    const parts = recording?.tracks.screen?.parts ?? [];
+    if (parts.length !== 1) return null;
+    const part = parts[0];
+    if (part === undefined) return null;
+    return this.#options.store.readFrameIndex(id, part.index).catch(() => null);
   }
 
   async start(id: RecordingId, overrides: Partial<ExportSettings>): Promise<{ jobId: string }> {
@@ -179,6 +290,7 @@ export class ExportSession {
       edit: opened.edit,
       recording: opened.recording,
       settings,
+      index: await this.#screenIndex(id, opened.recording),
     });
     const hasAudio = audioSources(id, opened.recording).length > 0;
     const job: Job = {
@@ -200,6 +312,9 @@ export class ExportSession {
       startedAtMs: Date.now(),
       settle: null,
       decode: null,
+      held: [],
+      heldBytes: 0,
+      waiters: new Set(),
     };
     this.#jobs.set(jobId, job);
 
@@ -214,6 +329,7 @@ export class ExportSession {
     if (job === undefined || job.cancelled) return;
     job.cancelled = true;
     this.#send(job, { kind: 'cancel', jobId });
+    this.#abandonWaits(job, new ExportCancelled());
     job.settle?.reject(new ExportCancelled());
   }
 
@@ -221,11 +337,18 @@ export class ExportSession {
   async shutdown(): Promise<void> {
     for (const job of [...this.#jobs.values()]) {
       job.cancelled = true;
+      this.#abandonWaits(job, new ExportCancelled());
       job.settle?.reject(new ExportCancelled());
       await this.#options.store.cancelExport(job.id).catch(() => undefined);
       this.#options.closeWindow(job.id);
     }
     this.#jobs.clear();
+  }
+
+  /** Break every wait this job has outstanding. See {@link Job.waiters}. */
+  #abandonWaits(job: Job, error: Error): void {
+    for (const waiter of [...job.waiters]) waiter(error);
+    job.waiters.clear();
   }
 
   // ------------------------------------------------- messages from the window
@@ -280,6 +403,27 @@ export class ExportSession {
     // nobody's hands or grow a file that is about to be unlinked.
     if (job === undefined) return;
     if (job.failure !== null) return;
+
+    // Before the writer exists there is nothing to append to, and refusing is not an
+    // option — see {@link heldBudgetBytes}. Held in arrival order, and the buffer is
+    // what decides, not `hasOpenExport`: `held` is emptied synchronously by the same
+    // call that starts the open, so a chunk can never overtake one already waiting.
+    const held = job.held;
+    if (held !== null) {
+      const budget = heldBudgetBytes(job.settings, job.totalSec);
+      if (job.heldBytes + message.data.byteLength > budget) {
+        this.#fail(job, new HeldExportChunksOverflow(job.id, job.heldBytes, budget).message);
+        return;
+      }
+      held.push(message);
+      job.heldBytes += message.data.byteLength;
+      return;
+    }
+    this.#appendChunk(job, message);
+  }
+
+  /** One chunk into the writer, queued behind whatever is already writing. */
+  #appendChunk(job: Job, message: ExportChunkMsg): void {
     const kind = message.kind;
     const durationUnits = kind === 'video' ? (job.video?.durationUnits ?? 1000) : AAC_FRAME_SAMPLES;
     // Queued behind whatever is already writing, and its rejection is not dropped: a
@@ -332,15 +476,21 @@ export class ExportSession {
     this.#report(job, 'preparing');
     let renamed = false;
     try {
-      // The window first, always: on the fast path the copy below waits for the
-      // writer, and the writer waits for the audio encoder to announce its track —
-      // so a copy that started before the window would wait for a message nobody
-      // had been asked to send.
+      // The copy is *planned* before anything is told anything, so a plan that has to
+      // be refused becomes a recompose rather than a failed export. §5.3's conditions
+      // are already in `streamCopyEligibility`, so this is the backstop rather than
+      // the decision — but a refusal after the window has been given `passes.video:
+      // false` cannot be recovered from, and recompose was available the whole time.
+      const copy = job.mode === 'stream-copy' ? await this.#planCopy(job, edit, recording) : null;
+      // The window next: on the fast path the copy below waits for the writer, and
+      // the writer waits for the audio encoder to announce its track — so a copy that
+      // started before the window would wait for a message nobody had been asked to
+      // send.
       if (job.passes.audio || job.passes.video) {
         await this.#runWindow(job, edit, recording);
       }
-      if (job.mode === 'stream-copy') {
-        await this.#copyVideo(job, edit, recording);
+      if (copy !== null) {
+        await this.#copyVideo(job, copy);
       }
       await this.#awaitPasses(job);
 
@@ -411,16 +561,54 @@ export class ExportSession {
     }
   }
 
-  /** §5.3's remux, in main: source bytes in, output samples out, no decoder anywhere. */
-  async #copyVideo(job: Job, edit: EditDocument, recording: RecordingDoc | null): Promise<void> {
+  /**
+   * Read what a copy would need, and refuse it into a recompose if it cannot.
+   *
+   * Returns `null` having downgraded the job — mode, passes and all — so the window
+   * is asked for a video pass and the export produces the same file it would have
+   * produced had eligibility said so in the first place. A refusal is not a failure:
+   * §5.3's fast path is an optimisation, and the slow path can express every edit.
+   *
+   * Only {@link StreamCopyRefused} downgrades. An I/O error reading the sidecar or
+   * the part is a real problem with the recording and is reported as one, rather than
+   * being turned into a recompose that will hit the same file three layers down.
+   */
+  async #planCopy(
+    job: Job,
+    edit: EditDocument,
+    recording: RecordingDoc | null,
+  ): Promise<CopySources | null> {
     const part = recording?.tracks.screen?.parts[0];
-    if (part === undefined) throw new Error('the recording has no screen part to copy');
+    if (part === undefined) {
+      this.#recompose(job, 'the recording has no screen part to copy');
+      return null;
+    }
     const store = this.#options.store;
-
     const mediaPath = await store.resolveBundleFile(job.recordingId, part.file);
     const indexDoc = await store.readFrameIndex(job.recordingId, part.index);
-    const plan = planStreamCopy(indexDoc, part, edit.clips);
+    let plan: StreamCopyPlan;
+    try {
+      plan = planStreamCopy(indexDoc, part, edit.clips);
+    } catch (error) {
+      if (!(error instanceof StreamCopyRefused)) throw error;
+      this.#recompose(job, error.message);
+      return null;
+    }
     const avcC = await store.readPartAvcC(job.recordingId, part.file);
+    return { part, mediaPath, plan, avcC };
+  }
+
+  /** Move a job off the fast path before anything has been committed to it. */
+  #recompose(job: Job, reason: string): void {
+    console.warn(`[export] ${job.id}: recomposing rather than copying — ${reason}`);
+    job.mode = 'recompose';
+    job.passes.video = true;
+  }
+
+  /** §5.3's remux, in main: source bytes in, output samples out, no decoder anywhere. */
+  async #copyVideo(job: Job, copy: CopySources): Promise<void> {
+    const { part, mediaPath, plan, avcC } = copy;
+    const store = this.#options.store;
     const colour = colourOf(part);
 
     job.video = {
@@ -490,15 +678,56 @@ export class ExportSession {
     };
     // The window is created here rather than at `start`, so a job that is refused
     // before this point never lights one up.
-    const window = this.#options.openWindow(job.id);
-    if (window.webContents.isLoading()) {
-      await new Promise<void>((done) => {
-        window.webContents.once('did-finish-load', () => {
-          done();
-        });
-      });
-    }
+    await this.#awaitWindowReady(job, this.#options.openWindow(job.id));
     this.#send(job, { kind: 'start', job: message });
+  }
+
+  /**
+   * Wait for the window's page, bounded on every axis it can fail on.
+   *
+   * A load that fails, a window destroyed under us, a machine that has stopped
+   * answering, and a cancel that lands while this is pending — each of them used to
+   * be the same thing: a promise nobody would ever settle, and a job wedged in
+   * `phase: 'preparing'` with its scratch files still on disk (§10.2).
+   */
+  async #awaitWindowReady(job: Job, window: BrowserWindow): Promise<void> {
+    if (window.isDestroyed()) {
+      throw new ExportWindowUnavailable('the export window was destroyed before it loaded');
+    }
+    if (!window.webContents.isLoading()) return;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        job.waiters.delete(finish);
+        if (error === null) resolve();
+        else reject(error);
+      };
+      const timer = setTimeout(() => {
+        finish(
+          new ExportWindowUnavailable(
+            `the export window did not finish loading within ${LOAD_TIMEOUT_MS} ms`,
+          ),
+        );
+      }, LOAD_TIMEOUT_MS);
+      // A cancel or a failure reaches in through here rather than being lost.
+      job.waiters.add(finish);
+
+      window.webContents.once('did-finish-load', () => {
+        finish(null);
+      });
+      window.webContents.once('did-fail-load', (_event, code: number, description: string) => {
+        finish(
+          new ExportWindowUnavailable(`the export window failed to load (${code} ${description})`),
+        );
+      });
+      window.webContents.once('destroyed', () => {
+        finish(new ExportWindowUnavailable('the export window was destroyed before it loaded'));
+      });
+    });
   }
 
   /**
@@ -506,25 +735,36 @@ export class ExportSession {
    *
    * Both encoders emit their `decoderConfig` with their first chunk, and the writer
    * needs the video one to describe the file and the audio one to describe its
-   * track. So the first chunks are held by the store's own append queue behind this
-   * call — which is why `onChunk` may be called before the writer exists and must
-   * not drop what it is holding.
+   * track. So chunks *always* arrive before this can be called — `onChunk` holds
+   * them, and this is what releases them.
+   *
+   * The flush is synchronous and happens the instant `beginExport` is entered rather
+   * than when it resolves: `ProjectStore.openExports` registers its promise before
+   * its first `await`, so an append issued from here queues behind the open, and
+   * emptying `job.held` in the same turn is what guarantees no later chunk can
+   * overtake one that was waiting.
    */
   #openWriterWhenReady(job: Job): void {
-    if (this.#options.store.hasOpenExport(job.id)) return;
+    // `held` rather than `hasOpenExport`: this is set synchronously below, so two
+    // announcements in one turn cannot both start an open.
+    if (job.held === null) return;
     if (job.video?.spec == null) return;
     if (job.passes.audio && job.audio?.spec == null) return;
     const video = job.video.spec;
     const audio = job.audio?.spec ?? undefined;
-    void this.#options.store
-      .beginExport(job.id, {
-        outputPath: job.outputPath,
-        video,
-        ...(audio === undefined ? {} : { audio }),
-      })
-      .catch((error: unknown) => {
-        this.#fail(job, error instanceof Error ? error.message : String(error));
-      });
+    const held = job.held;
+    job.held = null;
+    job.heldBytes = 0;
+
+    const opening = this.#options.store.beginExport(job.id, {
+      outputPath: job.outputPath,
+      video,
+      ...(audio === undefined ? {} : { audio }),
+    });
+    for (const message of held) this.#appendChunk(job, message);
+    void opening.catch((error: unknown) => {
+      this.#fail(job, error instanceof Error ? error.message : String(error));
+    });
   }
 
   async #waitForWriter(job: Job): Promise<void> {
@@ -565,6 +805,12 @@ export class ExportSession {
 
   #fail(job: Job, message: string): void {
     job.failure ??= message;
+    // Held chunks belong to a file that is not going to exist. Dropped here rather
+    // than left, so a job that fails before its writer opened does not sit on the
+    // memory it was holding until `#run`'s `finally` deletes it.
+    job.held = null;
+    job.heldBytes = 0;
+    this.#abandonWaits(job, new Error(job.failure));
     job.settle?.reject(new Error(job.failure));
   }
 
@@ -586,18 +832,20 @@ export class ExportSession {
    * The window is still open at this point on both paths: a stream copy that had no
    * audio never opened one, so it is opened now — the decoder has to live somewhere,
    * and §7.5's fifth check is not optional on the fast path.
+   *
+   * A window that cannot be reached is answered as a *failed check* rather than
+   * thrown out of: §7.5's fifth question is "does the last frame decode", and "we
+   * could not ask" is not a yes. Failing it here keeps the record in `project.json`,
+   * which is what phase 9 reads.
    */
   async #decodeInWindow(
     job: Job,
     request: ExportDecodeRequest,
   ): Promise<{ ok: boolean; error?: string }> {
-    const window = this.#options.openWindow(job.id);
-    if (window.webContents.isLoading()) {
-      await new Promise<void>((done) => {
-        window.webContents.once('did-finish-load', () => {
-          done();
-        });
-      });
+    try {
+      await this.#awaitWindowReady(job, this.#options.openWindow(job.id));
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     return new Promise((resolve) => {
       const timer = setTimeout(() => {

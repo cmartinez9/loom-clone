@@ -143,6 +143,7 @@ describe('streamCopyEligibility', () => {
       edit: edit(),
       recording: recording(),
       settings: settings(),
+      index: index(),
     });
     expect(decision).toEqual({ eligible: true, reasons: [] });
   });
@@ -152,6 +153,7 @@ describe('streamCopyEligibility', () => {
       edit: edit({ tracks: [zoomTrack()] }),
       recording: recording({ webcam: { kind: 'video', parts: [part()] } }),
       settings: settings({ width: 1280, height: 720 }),
+      index: index(),
     });
     expect(decision.eligible).toBe(false);
     // The UI's job is to say what to turn off, and this is three things, not one.
@@ -166,6 +168,7 @@ describe('streamCopyEligibility', () => {
       edit: edit({ tracks: [{ ...zoomTrack(), enabled: false }] }),
       recording: recording(),
       settings: settings(),
+      index: index(),
     });
     expect(decision.eligible).toBe(true);
   });
@@ -175,6 +178,7 @@ describe('streamCopyEligibility', () => {
       edit: edit({ clips: [{ id: 'c', sourceStart: 0, sourceEnd: 2, speed: 2 }] }),
       recording: recording(),
       settings: settings(),
+      index: index(),
     });
     expect(decision.reasons.join(' ')).toMatch(/plays at 2x/);
   });
@@ -183,8 +187,77 @@ describe('streamCopyEligibility', () => {
     const two = recording();
     two.tracks.screen = { kind: 'video', parts: [part(), { ...part(), startTimeSec: 5 }] };
     expect(
-      streamCopyEligibility({ edit: edit(), recording: two, settings: settings() }).reasons,
+      streamCopyEligibility({ edit: edit(), recording: two, settings: settings(), index: null })
+        .reasons,
     ).toContain('the screen track is in 2 parts');
+  });
+
+  it('refuses a cut that is not on a keyframe, and names it', () => {
+    // §5.3's *second* condition. Checked here and not only in `planStreamCopy`,
+    // because a job that has already committed to a copy has no way back: the window
+    // was never asked for a video pass, and the export dies where a recompose would
+    // have produced exactly the file the user asked for.
+    const decision = streamCopyEligibility({
+      edit: edit({ clips: [{ id: 'a', sourceStart: 3 / FPS, sourceEnd: 20 / FPS, speed: 1 }] }),
+      recording: recording(),
+      settings: settings(),
+      index: index(),
+    });
+    expect(decision.eligible).toBe(false);
+    expect(decision.reasons.join(' ')).toMatch(/cut at 0\.100s is not on a keyframe/);
+  });
+
+  it('control: the same cut on a keyframe is eligible', () => {
+    // Without this, "it refuses every trim" and "it refuses mid-GOP trims" read the
+    // same way round.
+    const decision = streamCopyEligibility({
+      edit: edit({ clips: [{ id: 'a', sourceStart: GOP / FPS, sourceEnd: 20 / FPS, speed: 1 }] }),
+      recording: recording(),
+      settings: settings(),
+      index: index(),
+    });
+    expect(decision).toEqual({ eligible: true, reasons: [] });
+  });
+
+  it('counts the cuts that missed and names the first of them', () => {
+    const decision = streamCopyEligibility({
+      edit: edit({
+        clips: [
+          { id: 'a', sourceStart: 1 / FPS, sourceEnd: 10 / FPS, speed: 1 },
+          { id: 'b', sourceStart: 20 / FPS, sourceEnd: 30 / FPS, speed: 1 },
+        ],
+      }),
+      recording: recording(),
+      settings: settings(),
+      index: index(),
+    });
+    // One reason, not one per clip — a timeline trimmed in twenty places is one thing
+    // to know — but it says which cut, because "some cut" is not actionable.
+    expect(decision.reasons).toHaveLength(1);
+    expect(decision.reasons[0]).toMatch(/^2 cuts are not on keyframes, the first at 0\.033s$/);
+  });
+
+  it('refuses a trimmed edit whose index could not be read, rather than guessing', () => {
+    const decision = streamCopyEligibility({
+      edit: edit({ clips: [{ id: 'a', sourceStart: 0, sourceEnd: 1, speed: 1 }] }),
+      recording: recording(),
+      settings: settings(),
+      index: null,
+    });
+    expect(decision.eligible).toBe(false);
+    expect(decision.reasons.join(' ')).toMatch(/frame index could not be read/);
+  });
+
+  it('needs no index at all when nothing has been cut', () => {
+    // An untrimmed recording has no cut points, so §5.3's second condition is
+    // vacuously true and a missing sidecar is not a reason to re-encode.
+    const decision = streamCopyEligibility({
+      edit: edit(),
+      recording: recording(),
+      settings: settings(),
+      index: null,
+    });
+    expect(decision).toEqual({ eligible: true, reasons: [] });
   });
 });
 
