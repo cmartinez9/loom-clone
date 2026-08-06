@@ -22,6 +22,12 @@ export {
 } from './audio-part-writer.ts';
 
 export {
+  ExportMp4Writer,
+  type ExportMp4WriterOptions,
+  type FinalizedExport,
+} from './export-writer.ts';
+
+export {
   UnrecoverablePartError,
   recoverAudioPart,
   recoverMediaPart,

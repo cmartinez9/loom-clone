@@ -33,6 +33,15 @@ import {
   type EditDocument,
   type EditOp,
   type EraseMsg,
+  type ExportChunkMsg,
+  type ExportCommand,
+  type ExportDecodeReport,
+  type ExportFailedMsg,
+  type ExportMetaMsg,
+  type ExportPassDoneMsg,
+  type ExportPassProgressMsg,
+  type ExportProgress,
+  type ExportSettings,
   type LoomApi,
   type MetaMsg,
   type OverlayStatus,
@@ -222,6 +231,53 @@ const api: LoomApi = {
       subscribe(CHANNEL.overlayStatus, (payload) => {
         callback(payload as OverlayStatus);
       }),
+  },
+
+  export: {
+    defaults: (id: RecordingId): Promise<ExportSettings> =>
+      ipcRenderer.invoke(CHANNEL.exportDefaults, id) as Promise<ExportSettings>,
+    chooseOutputFolder: (): Promise<string | null> =>
+      ipcRenderer.invoke(CHANNEL.exportChooseFolder) as Promise<string | null>,
+    start: (id: RecordingId, settings?: Partial<ExportSettings>): Promise<{ jobId: string }> =>
+      ipcRenderer.invoke(CHANNEL.exportStart, id, settings ?? {}) as Promise<{ jobId: string }>,
+    cancel: (jobId: string): void => {
+      ipcRenderer.send(CHANNEL.exportCancel, jobId);
+    },
+    onProgress: (callback: (progress: ExportProgress) => void): Unsubscribe =>
+      subscribe(CHANNEL.exportProgress, (payload) => {
+        callback(payload as ExportProgress);
+      }),
+  },
+
+  /**
+   * The hidden export window's half. Present on every window because there is one
+   * preload; accepted by main only from an export window, and only for the job that
+   * window was given — same rule as `capture`, and for the same reason: a renderer
+   * cannot be trusted to decline a capability.
+   */
+  exportRender: {
+    onCommand: (callback: (command: ExportCommand) => void): Unsubscribe =>
+      subscribe(CHANNEL.exportCommand, (payload) => {
+        callback(payload as ExportCommand);
+      }),
+    meta: (message: ExportMetaMsg): void => {
+      ipcRenderer.send(CHANNEL.exportMeta, message);
+    },
+    chunk: (message: ExportChunkMsg): void => {
+      ipcRenderer.send(CHANNEL.exportChunk, message);
+    },
+    passProgress: (message: ExportPassProgressMsg): void => {
+      ipcRenderer.send(CHANNEL.exportPassProgress, message);
+    },
+    passDone: (message: ExportPassDoneMsg): void => {
+      ipcRenderer.send(CHANNEL.exportPassDone, message);
+    },
+    failed: (message: ExportFailedMsg): void => {
+      ipcRenderer.send(CHANNEL.exportFailed, message);
+    },
+    decoded: (report: ExportDecodeReport): void => {
+      ipcRenderer.send(CHANNEL.exportDecoded, report);
+    },
   },
 };
 

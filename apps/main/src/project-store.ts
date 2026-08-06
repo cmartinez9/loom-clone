@@ -23,7 +23,9 @@
  * moving a bundle to the Trash — is injected.
  */
 
-import { mkdir, realpath, rm, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, open, realpath, rm, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   BUNDLE,
@@ -39,6 +41,7 @@ import {
   ulid,
   validateCursorIndexDoc,
   validateEditDocument,
+  validateFrameIndexDoc,
   validateProjectDoc,
   validateSettingsDoc,
   type AudioPart,
@@ -48,6 +51,8 @@ import {
   type EditDocument,
   type EditOp,
   type EventLogKind,
+  type ExportRecord,
+  type FrameIndexDoc,
   type PartEndReason,
   type PartIndex,
   type ProjectDoc,
@@ -77,20 +82,28 @@ import {
   type BundlePaths,
   type OpenedBundle,
 } from '@loom/format/fs';
-import type { ColourDescription, EncodedSample } from '@loom/mux';
+import {
+  parseInitSegment,
+  type ColourDescription,
+  type EncodedSample,
+  type FastStartAudioSpec,
+  type FastStartVideoSpec,
+} from '@loom/mux';
 import {
   AudioPartWriter,
+  ExportMp4Writer,
   MediaPartWriter,
   recoverAudioPart,
   recoverMediaPart,
   type FinalizedAudioPart,
+  type FinalizedExport,
   type FinalizedPart,
   type RecoveredPart,
 } from '@loom/mux/fs';
 
 // `@loom/mux/fs` has exactly one caller, so what a finalized part reports is
 // re-exported from here rather than imported a second time by the recorder.
-export type { FinalizedAudioPart, FinalizedPart };
+export type { FinalizedAudioPart, FinalizedExport, FinalizedPart };
 
 export interface ProjectStoreOptions {
   /** Absolute path to the recordings root. */
@@ -183,11 +196,36 @@ export interface BundleRecovery {
   error: string | null;
 }
 
+/** How much of a part is read to find its initialisation segment. See `readPartAvcC`. */
+const INIT_SEGMENT_PROBE_BYTES = 64 * 1024;
+
 export class UnknownRecordingError extends Error {
   constructor(id: RecordingId) {
     super(`no recording with id ${JSON.stringify(id)} under the recordings root`);
     this.name = 'UnknownRecordingError';
   }
+}
+
+/**
+ * A chunk arrived for a job that is not writing.
+ *
+ * Typed, and never swallowed: an export whose chunks are being dropped would
+ * otherwise finish "successfully" with a shorter video in it, which is the one
+ * outcome phase 9 must never delete sources on the strength of.
+ */
+export class UnknownExportError extends Error {
+  constructor(jobId: string) {
+    super(`no export job ${JSON.stringify(jobId)} is open for writing`);
+    this.name = 'UnknownExportError';
+  }
+}
+
+/** What an export needs before its first sample. Shapes come from `@loom/mux`. */
+export interface ExportWriteRequest {
+  /** Absolute path of the finished file. Its directory is created if it is missing. */
+  outputPath: string;
+  video: FastStartVideoSpec;
+  audio?: FastStartAudioSpec;
 }
 
 export class PathEscapeError extends Error {
@@ -244,6 +282,24 @@ export class ProjectStore {
    * holds.
    */
   private readonly openMedia = new Map<string, MediaPartWriter | AudioPartWriter>();
+  /**
+   * Exports open for writing, keyed by job id.
+   *
+   * Separate from `openMedia` because an export is not part of a bundle and outlives
+   * no recording: main owns the export window (§1.2), so a job survives the editor
+   * closing and has to be findable by its own id rather than by a recording's.
+   *
+   * **Promises, not writers.** The encoder announces its `decoderConfig` and emits
+   * its first chunk in the *same* callback, so `meta` and the first `chunk` are one
+   * IPC message apart — and opening the file is two `await`s long. Registering the
+   * open synchronously, before the first `await`, is what makes an append queue
+   * behind it instead of arriving at an empty map: the same shape, and the same
+   * reason, as `videoTrack()` in the recorder's `session.ts`. Without it the first
+   * chunk of every export is dropped, and the first chunk of a video is its
+   * keyframe — a file that demuxes, reports the right duration, and cannot be
+   * decoded from the front.
+   */
+  private readonly openExports = new Map<string, Promise<ExportMp4Writer>>();
   private settings: SettingsDoc | null = null;
   /**
    * Settings writes, serialized — the same reason the per-project queue exists.
@@ -689,6 +745,242 @@ export class ProjectStore {
           await writer.abort();
         }),
     );
+  }
+
+  // ---------------------------------------------------------------- exports
+
+  /**
+   * Open an export for writing.
+   *
+   * The exported MP4 lives **outside** the bundle (§2.1): captain decision 9 is
+   * "save to disk, reveal in Finder", and revealing a file buried inside a
+   * `.loomrec` directory is hostile. It is still written here, because §0 rule 2 is
+   * about *the process that owns a file descriptor*, not about a directory — a
+   * second writer would be an architecture change whether or not it wrote inside a
+   * bundle. The read-back helpers below are here for the same reason: the honest way
+   * to verify an export is to re-read the bytes on disk, and this class is what put
+   * them there.
+   *
+   * Not on the per-project queue, and for the same reason media appends are not: an
+   * export writes a different file, shares no revision with `edit.json`, and must
+   * not be able to queue behind a snapshot's recursive bundle-size walk.
+   */
+  async beginExport(jobId: string, request: ExportWriteRequest): Promise<void> {
+    if (this.openExports.has(jobId)) throw new Error(`export ${jobId} is already open`);
+    const opening = (async (): Promise<ExportMp4Writer> => {
+      await mkdir(dirname(request.outputPath), { recursive: true });
+      return ExportMp4Writer.create({
+        outputPath: request.outputPath,
+        video: request.video,
+        ...(request.audio === undefined ? {} : { audio: request.audio }),
+      });
+    })();
+    // Registered before the first `await`, so a chunk that arrives while the file is
+    // being created queues rather than being refused.
+    this.openExports.set(jobId, opening);
+    try {
+      await opening;
+    } catch (error) {
+      this.openExports.delete(jobId);
+      throw error;
+    }
+  }
+
+  /** Whether a job is still writing. */
+  hasOpenExport(jobId: string): boolean {
+    return this.openExports.has(jobId);
+  }
+
+  async appendExportSample(
+    jobId: string,
+    kind: 'video' | 'audio',
+    sample: { data: Uint8Array; durationUnits: number; isKey: boolean; timestampUs?: number },
+  ): Promise<void> {
+    const writer = await this.requireExport(jobId);
+    const record = {
+      data: sample.data,
+      byteLength: sample.data.byteLength,
+      durationUnits: sample.durationUnits,
+      isKey: sample.isKey,
+      ...(sample.timestampUs === undefined ? {} : { timestampUs: sample.timestampUs }),
+    };
+    if (kind === 'video') await writer.appendVideo(record);
+    else await writer.appendAudio(record);
+  }
+
+  /** Assemble the file and move it into place. The writer is closed either way. */
+  async finalizeExport(jobId: string): Promise<FinalizedExport> {
+    const writer = await this.requireExport(jobId);
+    this.openExports.delete(jobId);
+    try {
+      return await writer.finalize();
+    } catch (error) {
+      await writer.cancel();
+      throw error;
+    }
+  }
+
+  /**
+   * Abandon an export, leaving nothing behind. Idempotent, and safe after
+   * {@link finalizeExport} — the finished file has been renamed by then.
+   */
+  async cancelExport(jobId: string): Promise<void> {
+    const opening = this.openExports.get(jobId);
+    if (opening === undefined) return;
+    this.openExports.delete(jobId);
+    // A cancel that lands while the file is still being created still has to remove
+    // it, so the open is awaited rather than abandoned — and an open that failed is
+    // already cleaned up by `ExportMp4Writer.create`.
+    const writer = await opening.catch(() => null);
+    await writer?.cancel();
+  }
+
+  /** Size of a file, or `null` if it is not there or is not one. */
+  async fileSize(path: string): Promise<number | null> {
+    try {
+      const stats = await stat(path);
+      return stats.isFile() ? stats.size : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read the first `byteLength` bytes of a file, for a header. */
+  async readFileHead(path: string, byteLength: number): Promise<Uint8Array> {
+    const handle = await open(path, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(byteLength);
+      const { bytesRead } = await handle.read(buffer, 0, byteLength, 0);
+      return new Uint8Array(buffer.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** Read a list of byte ranges out of a file, in one open. */
+  async readFileRanges(
+    path: string,
+    ranges: readonly { offset: number; byteLength: number }[],
+  ): Promise<Uint8Array[]> {
+    const handle = await open(path, 'r');
+    try {
+      const out: Uint8Array[] = [];
+      for (const range of ranges) {
+        const buffer = Buffer.allocUnsafe(range.byteLength);
+        let read = 0;
+        while (read < range.byteLength) {
+          const { bytesRead } = await handle.read(
+            buffer,
+            read,
+            range.byteLength - read,
+            range.offset + read,
+          );
+          if (bytesRead <= 0) {
+            throw new Error(
+              `${path} ends inside the range at ${range.offset}; the sample table ` +
+                'describes bytes that are not in the file',
+            );
+          }
+          read += bytesRead;
+        }
+        out.push(new Uint8Array(buffer));
+      }
+      return out;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * `sha256` of an export, streamed.
+   *
+   * §7.5, obligation 1's fifth recorded fact. Streamed rather than read whole: a
+   * ten-minute 4K export is gigabytes, and hashing it must not be the thing that
+   * decides how much memory the app needs.
+   */
+  async hashFile(path: string): Promise<string> {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+    return hash.digest('hex');
+  }
+
+  /**
+   * Append an export to `project.json`.
+   *
+   * Queued like every other document write, so it cannot race a debounced snapshot
+   * and lose. Phase 9 reads `exports[].verified` to decide whether the sources may
+   * go; a failed export is recorded too, with the checks that *did* pass, because
+   * "no record" and "a record saying it failed" are different things to wake up to.
+   */
+  async recordExport(id: RecordingId, record: ExportRecord): Promise<void> {
+    const open = this.requireOpen(id);
+    await this.enqueue(open, async () => {
+      open.project = {
+        ...open.project,
+        exports: [...open.project.exports.filter((e) => e.id !== record.id), record],
+      };
+      await this.writeProjectDoc(open);
+    });
+  }
+
+  /**
+   * Where exports go.
+   *
+   * `settings.exportRoot` when the user has changed it, `<recordingsRoot>/Exports`
+   * otherwise — the default `types/settings.ts` has always documented. Captain
+   * decision 9: *"Pick a sensible default output location and let the captain change
+   * it. Do not prompt for a path on every export."*
+   */
+  async exportRoot(): Promise<string> {
+    const settings = this.settings ?? (await this.loadSettings());
+    return settings.exportRoot ?? join(this.recordingsRoot, 'Exports');
+  }
+
+  /** Remember a new export destination. */
+  async setExportRoot(path: string): Promise<void> {
+    const settings = this.settings ?? (await this.loadSettings());
+    const next: SettingsDoc = { ...settings, exportRoot: path };
+    const result = validateSettingsDoc(next);
+    if (!result.ok) {
+      throw new Error(
+        `refusing to write invalid settings: ` +
+          result.issues.map((issue) => `${issue.path}: ${issue.message}`).join('; '),
+      );
+    }
+    await writeJsonAtomic(this.options.settingsPath, next);
+    this.settings = next;
+  }
+
+  /**
+   * Read one part's frame index sidecar (§2.4), through parse → migrate → validate.
+   *
+   * The stream-copy fast path needs it: the sidecar already holds a byte offset and
+   * a PTS per frame, so a remux is a list of byte ranges rather than a demux.
+   */
+  async readFrameIndex(id: RecordingId, relativePath: string): Promise<FrameIndexDoc> {
+    const path = await this.resolveBundleFile(id, relativePath);
+    const { doc } = await loadDocument(path, 'loom.index', validateFrameIndexDoc);
+    return doc;
+  }
+
+  /**
+   * The `avcC` out of a capture part's initialisation segment.
+   *
+   * The exported file has to carry the *source's* codec description on the
+   * stream-copy path, because the samples it describes are the source's samples,
+   * unaltered. Read from the file rather than from `recording.json`, which does not
+   * carry it — the same answer `source-reader.ts` gives to "where does the
+   * description come from after a restart".
+   */
+  async readPartAvcC(id: RecordingId, relativePath: string): Promise<Uint8Array> {
+    const path = await this.resolveBundleFile(id, relativePath);
+    return parseInitSegment(await this.readFileHead(path, INIT_SEGMENT_PROBE_BYTES)).avcC;
+  }
+
+  private requireExport(jobId: string): Promise<ExportMp4Writer> {
+    const opening = this.openExports.get(jobId);
+    if (opening === undefined) return Promise.reject(new UnknownExportError(jobId));
+    return opening;
   }
 
   // ------------------------------------------------------------------ recovery

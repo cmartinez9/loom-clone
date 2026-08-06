@@ -39,10 +39,13 @@
  * `recorder.preflight` under the name §1.4 gives it, plus two namespaces the sketch
  * has no name for — `permissions` and `setup` — because "ask for four grants up
  * front, explain each, and relaunch for Accessibility" is a conversation with the
- * user, not a property of a capture. `devices` belongs to phase 3/4 and `export` to
- * phase 8; both stay absent rather than stubbed, because a guessed shape that
- * thirteen workers compile against is worse than no shape. Adding a namespace is
- * three lines here, one handler in main, and one line in the preload.
+ * user, not a property of a capture. Phase 8 adds `export`, with the sketch's three
+ * members and two more the captain's decision requires: `defaults` (so a path is not
+ * prompted for on every export) and `chooseOutputFolder` (so it can still be
+ * changed). `devices` belongs to phase 3/4 and stays absent rather than stubbed,
+ * because a guessed shape that thirteen workers compile against is worse than no
+ * shape. Adding a namespace is three lines here, one handler in main, and one line
+ * in the preload.
  *
  * ## What must never cross
  *
@@ -55,26 +58,31 @@
 
 import type {
   AudioCaptureSummary,
+  AudioPart,
   AudioTrackKey,
   DrawingTool,
   EditDocument,
   EditOp,
+  ExportVerification,
   PartEndReason,
   RecordingDoc,
   RecordingId,
   RecordingSummary,
   SetupState,
   TrackKey,
+  VideoPart,
   VideoTrackKey,
 } from '@loom/format';
 import type { PermissionKind, PermissionReport } from '@loom/permissions';
 
 export type {
   AudioCaptureSummary,
+  AudioPart,
   AudioTrackKey,
   DrawingTool,
   EditDocument,
   EditOp,
+  ExportVerification,
   PartEndReason,
   PermissionKind,
   PermissionReport,
@@ -83,6 +91,7 @@ export type {
   RecordingSummary,
   SetupState,
   TrackKey,
+  VideoPart,
   VideoTrackKey,
 };
 
@@ -893,6 +902,250 @@ export interface CaptureApi {
   failed(message: string): void;
 }
 
+// ----------------------------------------------------------------- export
+
+/**
+ * What an export runs with.
+ *
+ * Captain decision 9 (`decision-share-target.md`): *"Pick a sensible default output
+ * location and let the captain change it. **Do not prompt for a path on every
+ * export.**"* So the destination is a directory plus a name, both defaulted by
+ * {@link ExportApi.defaults} and both overridable — never a modal in the way of the
+ * button.
+ */
+export interface ExportSettings {
+  /** Output size in pixels. Defaults to `edit.json`'s `output.size`. */
+  width: number;
+  height: number;
+  /**
+   * Output frame rate. **CFR** — §5.3: *"QuickTime, Premiere and Final Cut all
+   * handle CFR more predictably"*. §5.7 defaults to 30 even for a 60 fps capture.
+   */
+  fps: number;
+  bitrate: number;
+  audioBitrate: number;
+  /** Absolute directory the finished file is written into. */
+  outputDir: string;
+  /** File name, without the `.mp4`. */
+  name: string;
+  /**
+   * §7.5, obligation 4 — *"a cheap 'keep the source this time' escape hatch … Costs
+   * one boolean and one branch. Build it."*
+   *
+   * Phase 9 owns the deletion; this is the boolean it reads, recorded on the export
+   * as `sourcesKept`. Phase 8 never deletes anything.
+   */
+  keepSources: boolean;
+}
+
+/**
+ * Which pipeline an export is on. §5.3: *"Show the user which path they are on
+ * ('Instant' vs '≈4 min') because the difference is enormous"* — 235× realtime
+ * against 2.1–2.5×.
+ */
+export type ExportMode = 'recompose' | 'stream-copy';
+
+export type ExportPhase =
+  'preparing' | 'audio' | 'video' | 'muxing' | 'verifying' | 'done' | 'failed' | 'cancelled';
+
+export interface ExportProgress {
+  jobId: string;
+  recordingId: RecordingId;
+  phase: ExportPhase;
+  mode: ExportMode;
+  /** `0..1` across the whole job, audio and video weighted by their real cost. */
+  completed: number;
+  /** Seconds of output produced so far, and how many there are in total. */
+  renderedSec: number;
+  totalSec: number;
+  /** `null` until enough has been produced to extrapolate from. */
+  etaSec: number | null;
+  /** Present exactly when `phase === 'done'`. */
+  result?: ExportResult;
+  /** Present exactly when `phase === 'failed'`, and already phrased for a person. */
+  error?: string;
+}
+
+/**
+ * What a finished export is.
+ *
+ * Captain decision 9: *"Export success = a file on disk, on the clipboard, and
+ * Finder revealed. That is the whole contract."* Each of the three is a field here
+ * rather than an assumption, because phase 9 deletes the user's only copy of the
+ * sources on the strength of this object and a signal that cannot be inspected is
+ * not a signal.
+ */
+export interface ExportResult {
+  path: string;
+  bytes: number;
+  durationSec: number;
+  /** The five §7.5 checks, every one of which passed. */
+  verified: ExportVerification;
+  copiedToClipboard: boolean;
+  revealed: boolean;
+  sourcesKept: boolean;
+  mode: ExportMode;
+}
+
+export interface ExportApi {
+  /**
+   * The settings this recording would export with if the user pressed the button
+   * now — size and fps from `edit.json`, destination from `settings.json`.
+   */
+  defaults(id: RecordingId): Promise<ExportSettings>;
+  /** A native folder picker, for changing the destination. `null` if cancelled. */
+  chooseOutputFolder(): Promise<string | null>;
+  start(id: RecordingId, settings?: Partial<ExportSettings>): Promise<{ jobId: string }>;
+  /** Fire-and-forget, per §1.4's sketch. Cancellation is reported as progress. */
+  cancel(jobId: string): void;
+  onProgress(callback: (progress: ExportProgress) => void): Unsubscribe;
+}
+
+// ------------------------------------------- the hidden export window's half
+
+/** One captured video part, as the export page is handed it. */
+export interface ExportVideoSource {
+  /** `loom://recording/<id>/media/screen.000.mp4`. */
+  mediaUrl: string;
+  /** `loom://recording/<id>/media/screen.000.index.json` — the §2.4 sidecar. */
+  indexUrl: string;
+  part: VideoPart;
+}
+
+/** One captured audio part. `gaps` and `measuredSampleRate` ride along on `part`. */
+export interface ExportAudioSource {
+  track: AudioTrackKey;
+  mediaUrl: string;
+  part: AudioPart;
+}
+
+/**
+ * Everything the export page needs, and nothing it could get for itself.
+ *
+ * It fetches the frame index, the initialisation segments and the media bytes over
+ * `loom://` with range requests, exactly as the editor does — so this message
+ * carries URLs and timing, never bytes.
+ */
+export interface ExportJob {
+  jobId: string;
+  recordingId: RecordingId;
+  settings: ExportSettings;
+  edit: EditDocument;
+  /** `compile()`'s context needs it for the source duration an empty clip list means. */
+  recording: RecordingDoc | null;
+  /** In `startTimeSec` order. The reference track (§5.4). */
+  screen: ExportVideoSource[];
+  audio: ExportAudioSource[];
+  /** Timeline duration, seconds — what `compile()` reports for this document. */
+  durationSec: number;
+  /**
+   * Which passes this window is responsible for.
+   *
+   * On §5.3's stream-copy path main copies the video samples itself and the window
+   * is asked only for the mixed audio — the report's condition list is entirely
+   * about pictures, and mixing two audio tracks is seconds of work against minutes
+   * of compositing. A recording with no audio at all needs no window.
+   */
+  passes: { audio: boolean; video: boolean };
+}
+
+export type ExportCommand =
+  | { kind: 'start'; job: ExportJob }
+  | { kind: 'cancel'; jobId: string }
+  /**
+   * §7.5's fifth verification point: *"last frame actually decodes"*.
+   *
+   * Main re-reads the finished file, reconstructs the last GOP from the sample
+   * table on disk, and sends the encoded chunks here — a decoder lives in a
+   * renderer, and encoded chunks are exactly what may cross (§1.4). A verifier that
+   * asked the writer whether it had written correctly would be asking the wrong
+   * process.
+   */
+  | { kind: 'verify'; jobId: string; request: ExportDecodeRequest };
+
+export interface ExportDecodeRequest {
+  codec: string;
+  codedWidth: number;
+  codedHeight: number;
+  /** The `avcC`, read back out of the written file's `moov`. */
+  description: Uint8Array;
+  /** In decode order, starting at a sync sample. */
+  chunks: { data: Uint8Array; isKey: boolean; timestampUs: number }[];
+  /** Presentation timestamp the last chunk must come back out at, microseconds. */
+  expectLastTimestampUs: number;
+}
+
+export interface ExportDecodeReport {
+  jobId: string;
+  ok: boolean;
+  framesDecoded: number;
+  /** The last decoded frame's timestamp, so a decoder that skipped it is visible. */
+  lastTimestampUs: number | null;
+  error?: string;
+}
+
+/** Which encoder a chunk came out of. */
+export type ExportTrackKind = 'video' | 'audio';
+
+/**
+ * The encoder's own configuration, sent before its first chunk.
+ *
+ * Same rule as capture's `MetaMsg`: main writes what the encoder said, never what
+ * the request asked for. The `moov` this becomes has to describe the bitstream that
+ * is actually in the file.
+ */
+export interface ExportMetaMsg {
+  jobId: string;
+  kind: ExportTrackKind;
+  decoderConfig: {
+    codec: string;
+    codedWidth?: number;
+    codedHeight?: number;
+    sampleRate?: number;
+    numberOfChannels?: number;
+    description?: Uint8Array;
+  };
+}
+
+/** One encoded sample, on the same high-rate channel argument as `ChunkMsg`. */
+export interface ExportChunkMsg {
+  jobId: string;
+  kind: ExportTrackKind;
+  data: Uint8Array;
+  isKey: boolean;
+  timestampUs: number;
+}
+
+export interface ExportPassProgressMsg {
+  jobId: string;
+  phase: ExportPhase;
+  renderedSec: number;
+  totalSec: number;
+}
+
+/** A pass finished cleanly. `video` being the last one is what completes a job. */
+export interface ExportPassDoneMsg {
+  jobId: string;
+  kind: ExportTrackKind;
+  /** Samples the encoder emitted, so main can refuse a pass that produced none. */
+  sampleCount: number;
+}
+
+export interface ExportFailedMsg {
+  jobId: string;
+  message: string;
+}
+
+export interface ExportRenderApi {
+  onCommand(callback: (command: ExportCommand) => void): Unsubscribe;
+  meta(message: ExportMetaMsg): void;
+  chunk(message: ExportChunkMsg): void;
+  passProgress(message: ExportPassProgressMsg): void;
+  passDone(message: ExportPassDoneMsg): void;
+  failed(message: ExportFailedMsg): void;
+  decoded(report: ExportDecodeReport): void;
+}
+
 // ---------------------------------------------------------------- app
 
 /** Ambient facts about the running app, for the window chrome and the About box. */
@@ -929,6 +1182,9 @@ export interface LoomApi {
   setup: SetupApi;
   capture: CaptureApi;
   overlay: OverlayApi;
+  export: ExportApi;
+  /** The hidden export window's half, accepted by main only from that window. */
+  exportRender: ExportRenderApi;
 }
 
 // ---------------------------------------------------------------- channels
@@ -1012,6 +1268,29 @@ export const CHANNEL = {
   captureEnded: 'loom.capture.ended',
   /** send-only, capture window -> main */
   captureFailed: 'loom.capture.failed',
+
+  exportDefaults: 'loom.export.defaults',
+  exportChooseFolder: 'loom.export.chooseFolder',
+  exportStart: 'loom.export.start',
+  /** send-only */
+  exportCancel: 'loom.export.cancel',
+  /** event: main -> every renderer */
+  exportProgress: 'loom.export.progress',
+
+  /** event: main -> the export window */
+  exportCommand: 'loom.exportRender.command',
+  /** send-only, export window -> main */
+  exportMeta: 'loom.exportRender.meta',
+  /** send-only, export window -> main. The other high-rate channel. */
+  exportChunk: 'loom.exportRender.chunk',
+  /** send-only, export window -> main */
+  exportPassProgress: 'loom.exportRender.passProgress',
+  /** send-only, export window -> main */
+  exportPassDone: 'loom.exportRender.passDone',
+  /** send-only, export window -> main */
+  exportFailed: 'loom.exportRender.failed',
+  /** send-only, export window -> main. The answer to a `verify` command. */
+  exportDecoded: 'loom.exportRender.decoded',
 } as const;
 
 export type ChannelName = (typeof CHANNEL)[keyof typeof CHANNEL];
@@ -1030,6 +1309,9 @@ export const INVOKE_CHANNELS: readonly ChannelName[] = [
   CHANNEL.recorderStop,
   CHANNEL.setupState,
   CHANNEL.setupComplete,
+  CHANNEL.exportDefaults,
+  CHANNEL.exportChooseFolder,
+  CHANNEL.exportStart,
 ];
 
 export const SEND_CHANNELS: readonly ChannelName[] = [
@@ -1052,6 +1334,13 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.overlayStroke,
   CHANNEL.overlayErase,
   CHANNEL.overlayClear,
+  CHANNEL.exportCancel,
+  CHANNEL.exportMeta,
+  CHANNEL.exportChunk,
+  CHANNEL.exportPassProgress,
+  CHANNEL.exportPassDone,
+  CHANNEL.exportFailed,
+  CHANNEL.exportDecoded,
 ];
 
 /** Main -> renderer pushes. A renderer subscribes; it never sends on these. */
@@ -1060,6 +1349,8 @@ export const EVENT_CHANNELS: readonly ChannelName[] = [
   CHANNEL.recorderStatus,
   CHANNEL.captureCommand,
   CHANNEL.overlayStatus,
+  CHANNEL.exportProgress,
+  CHANNEL.exportCommand,
 ];
 
 /** The key the preload binds the API to on `window`. */

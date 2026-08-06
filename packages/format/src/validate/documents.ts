@@ -519,6 +519,11 @@ export function validateSettingsDoc(input: unknown): ValidationResult<SettingsDo
       if (setup[key] !== null) requireIsoTimestamp(sink, setup[key], `setup.${key}`);
     }
   }
+
+  const exportRoot = doc['exportRoot'];
+  if (exportRoot !== undefined && (typeof exportRoot !== 'string' || exportRoot.length === 0)) {
+    sink.add('exportRoot', 'expected a non-empty path, or nothing at all');
+  }
   return sink.ok ? ok(input as SettingsDoc) : fail(sink);
 }
 

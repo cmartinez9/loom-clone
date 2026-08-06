@@ -1,8 +1,8 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
  * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
- * model, phase 10's generators, phase 11's golden-frame gate over annotations and
- * phase 12's live drawing overlay.
+ * model, phase 8's export, phase 10's generators, phase 11's golden-frame gate over
+ * annotations and phase 12's live drawing overlay.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -49,6 +49,11 @@ const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
 const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
 const EDL_HISTORY = 'packages/edl/test/history.test.ts';
 const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
+/** Phase 8's gate — preview and export pixel-identical — and the tests around it. */
+const PHASE8 = 'test/phase8-gate.test.ts';
+const EXPORT_LOOP = 'apps/renderer/test/export-render-loop.test.ts';
+const EXPORT_MOVIE = 'packages/mux/test/export-movie.test.ts';
+const EXPORT_VERIFY = 'apps/main/test/export-verify.test.ts';
 /** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
 const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
 const EDL_CONDITIONING = 'packages/edl/test/conditioning.test.ts';
@@ -343,6 +348,71 @@ const MUTATIONS = [
     find: '      removeTrackKeys(fields, remove, op);',
     replace: '      removeTrackKeys(fields, undefined, op);',
     mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
+  },
+  // ---------------------------------------------------------------- phase 8
+  {
+    name: 'export-composites-a-stale-frame',
+    breaks:
+      'the exporter checks that the frame it was handed is the one the index puts ' +
+      'at that instant. `FrameRing.frameAtMicros` is hold-last *within the ring*, so ' +
+      'a reader whose decode has not caught up returns an older frame rather than ' +
+      'null — right for preview (§4.3 holds the previous picture) and a wrong frame ' +
+      'written into a file for an export. Without the check the export is stuck on ' +
+      'whatever the ring happened to hold, and the file plays, is the right length, ' +
+      'and shows the wrong picture.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    const expected = this.#screen.selectionMicros?.(sourceTime);',
+    replace: '    const expected = undefined as number | undefined;',
+    mustFail: [EXPORT_LOOP],
+  },
+  {
+    name: 'export-writer-registered-after-it-opens',
+    breaks:
+      'an export chunk that arrives while the output file is still being created ' +
+      'queues behind the open instead of being refused. The encoder announces its ' +
+      'decoderConfig and emits its first chunk in the same callback, so meta and the ' +
+      'first chunk are one IPC message apart and opening the file is two awaits ' +
+      'long. Registering the open late loses the first chunk — which is the video’s ' +
+      'keyframe, so the file cannot be decoded from the front.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    this.openExports.set(jobId, opening);',
+    replace: '    void opening.then(() => this.openExports.set(jobId, opening));',
+    mustFail: [PHASE8],
+  },
+  {
+    name: 'export-chunk-offsets-off-by-one',
+    breaks:
+      'every chunk offset in the exported moov points at the sample data. Off by a ' +
+      'byte, the file demuxes, reports the right duration, passes four of §7.5’s ' +
+      'five checks and decodes into garbage — which is exactly the damage phase 9 ' +
+      'must never delete the user’s sources on the strength of.',
+    file: 'packages/mux/src/faststart.ts',
+    find: '      offsets[i] = cursor;',
+    replace: '      offsets[i] = cursor + 1;',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'cancelled-export-leaves-its-partial',
+    breaks:
+      'a cancelled export leaves nothing behind. §7.5 obligation 1 read the other ' +
+      'way round: a truncated export is a shorter video that looks finished, and it ' +
+      'must not be there to be mistaken for one.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: `    await this.#removeScratch();
+    await unlink(this.#partialPath).catch(() => undefined);`,
+    replace: '    await Promise.resolve();',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'verification-assumes-the-last-frame-decodes',
+    breaks:
+      '§7.5’s fifth check — *"last frame actually decodes"*. Assuming it turns the ' +
+      'verification into four checks that a truncated or mis-offset file passes, and ' +
+      'phase 9 deletes the only copy of the sources on the strength of the answer.',
+    file: 'apps/main/src/export/verify.ts',
+    find: `  if (!outcome.ok) {`,
+    replace: `  if (false as boolean) {`,
+    mustFail: [EXPORT_VERIFY],
   },
   // ---- phase 10: the generators ------------------------------------------
   {

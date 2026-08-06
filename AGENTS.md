@@ -36,9 +36,9 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model, the generators,
+npm run verify:mutation   # break capture, the timeline model, export, the generators,
                           # annotations, the drawing overlay and the event logs
-                          # 57 ways; each must fail a gate
+                          # 62 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -67,8 +67,12 @@ packages/format/   the on-disk format: schemas, types, validation, migrations,
                    §1.3 does not list because every function in it is a reading of
                    a §2.3 field.  `@loom/format` is PURE (no node, no DOM);
                    `@loom/format/fs` is the filesystem half.
-packages/mux/      the fragmented-MP4 writer and the scanner recovery reads it with.
-                   `@loom/mux` is PURE; `@loom/mux/fs` owns the file descriptor and,
+packages/mux/      both MP4 writers §1.3 asks for: `fragment-writer.ts` (capture,
+                   fragmented, survives SIGKILL) and `faststart.ts` (export, one
+                   `moov` first, real sample tables), plus the two readers — `scan.ts`
+                   for fragments and `movie-scan.ts` for a finished movie, which is
+                   what §7.5's verification demuxes with.
+                   `@loom/mux` is PURE; `@loom/mux/fs` owns the file descriptors and,
                    like `@loom/format/fs`, has exactly one caller.
 packages/ipc/      the typed main<->renderer contract. Not in the report's §1.3 list;
                    §1.4 requires a shared contract and this is it.
@@ -98,7 +102,9 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
-                   PermissionManager, OverlayController, loom:// protocol, IPC.
+                   PermissionManager, OverlayController, `export/` (ExportSession,
+                   §7.5 verification, the file clipboard, §5.3's stream-copy plan),
+                   loom:// protocol, IPC.
                    `input-sampler.ts` is the sampler's only seam onto the world — the
                    `EventLogSink` backed by `ProjectStore`, and the clock reading
                    `t0Us` is derived from. `verify/marker.ts` is the paint-capture-count
@@ -107,14 +113,16 @@ apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
 apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
                    capture page (screen in `capture/main.ts`, camera in
                    `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
-                   the live drawing overlay (`overlay/main.ts`) and the preview loop
-                   today; the editor later.
+                   the live drawing overlay (`overlay/main.ts`), the hidden export page
+                   (`export/`), the preview loop, and `media/` — the loom:// readers
+                   both of them share, including `TrackReader`, which is what turns a
+                   multi-part track into the one-part seam preview and export already
+                   speak. The editor later.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
-A later phase adds `apps/export` beside these (report §1.3). The
-report also lists `apps/capture`; the hidden capture page lives in
-`apps/renderer/src/capture/` instead, because a window in this repo is a role in
+`apps/export` and `apps/capture` from report §1.3 live as `apps/renderer/src/export/`
+and `apps/renderer/src/capture/` instead, because a window in this repo is a role in
 `apps/main/src/windows.ts` plus an entry in `apps/renderer/vite.config.ts`, and a
 second renderer app would fork that.
 
@@ -300,6 +308,34 @@ the `CompiledTimeline`'s **own** state object, overwritten in place; keep one wi
 `cloneResolvedState`. Undo/redo is the inverse-op stack in the editor
 (`EditHistory`), over the same §2.7 op vocabulary that main journals — so an undo is
 journalled, revisioned and crash-safe on exactly the path the edit it reverses took.
+
+## Export, in one paragraph
+
+Report §5. A hidden export window per job, owned by **main** and not by the editor
+(§1.2), composites with the same `Compositor` and reads through the same
+`SourceReader` the preview does — that is §4.2's whole point, and
+`ExportRenderLoop.renderAt` is the one function from a timeline instant to pixels.
+Two passes, **audio first** then video: audio is seconds of work against minutes
+(§5.7), so a machine that cannot encode AAC fails in the first second rather than
+after four minutes. Encoded chunks cross to main; main muxes. The output is a
+**faststart** MP4 — `moov` first — which cannot be written in one pass, so
+`ExportMp4Writer` streams each track to its own scratch file and assembles
+`<name>.mp4.partial` behind the finished header, then `fsync`/`rename`/`fsync` the
+directory exactly as `writeAtomic` does. A cancelled or killed export therefore
+leaves **nothing**: §7.5 obligation 1 read the other way round, because a truncated
+export is a shorter video that looks finished. Success is not "nothing threw" — it
+is §7.5's five checks, answered off the disk by `apps/main/src/export/verify.ts`
+(exists · non-zero · demuxes · duration within 100 ms · **the last frame decodes**,
+plus a sha256), with the decode done in the export window because that is where a
+decoder lives. Phase 8 deletes nothing; `sourcesKept` is the boolean phase 9 reads.
+Captain decision 9 is the rest: the file is written to `settings.exportRoot`
+(default `<recordingsRoot>/Exports`, changed by a picker and remembered, never
+prompted for), put on the clipboard as a **file** via `NSFilenamesPboardType`, and
+revealed in Finder. §5.3's stream-copy path is `apps/main/src/export/stream-copy.ts`
+— eligibility is a pure predicate that returns _every_ reason so the UI can say what
+to turn off, and the copy itself is byte ranges out of the `loom.index/1` sidecar
+with no decoder anywhere. Audio is still mixed by the window on that path: §5.3's
+condition list is entirely about pictures.
 
 ## The generators, in one paragraph
 
@@ -658,7 +694,27 @@ was not a control.
   gone: a second of footage per part, silently, with the recording simply starting
   late. `videoTrack()` in `session.ts` is the get-or-create that closes it, and
   `held-frames-dropped-while-a-part-opens` in `npm run verify:mutation` keeps it
-  closed.
+  closed. **The export writer has the same shape and the same reason**: the encoder
+  announces its `decoderConfig` and emits its first chunk in one callback, so `meta`
+  and the first `chunk` are one IPC message apart while opening the output file is
+  two awaits long. `ProjectStore.openExports` therefore holds a **promise**,
+  registered before the first `await`, and an append queues behind it. Registering
+  late loses exactly one chunk — the video's first keyframe — and produces a file
+  that demuxes, reports the right duration, passes four of §7.5's five checks and
+  cannot be decoded from the front. Kept closed by
+  `export-writer-registered-after-it-opens`.
+- **`frameAt` is hold-last _within the ring_, which a preview wants and an export must
+  not accept.** `FrameRing.frameAtMicros` returns the newest frame it holds at or
+  before the requested time, so a reader whose decode has not caught up hands back an
+  **older frame rather than `null`**. In preview that is §4.3 exactly — hold the
+  previous picture for a tick. In an export it is a wrong frame written into a file,
+  and because nothing else asks the ring to move, the picture stays stuck there for
+  the rest of the recording; the file plays, is the right length and shows the wrong
+  thing. So `ExportRenderLoop` primes **before** every read rather than only after a
+  miss, and compares the frame it was handed against `selectionMicros(t)` — the
+  index's own answer, which is why that method is public on `SourceReader` and
+  `TrackReader`. This was a real bug, caught by the phase-8 gate's decode of the
+  finished file; `export-composites-a-stale-frame` keeps it caught.
 - **Every track announcement is a read-modify-write of one `recording.json`.** Every
   encoder — three, or four with a camera — announces itself within milliseconds of the
   others, so `RecorderSession` serializes them on `metaChain`; without it the second
@@ -962,16 +1018,39 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
 - **An empty `activeRanges` means never active, and "always" is `[[0, 1e9]]`** — the
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
+- **The export encoder runs `latencyMode: 'realtime'`, and that is not a leftover.**
+  Quality mode lets VideoToolbox reorder frames; a reordered stream needs a `ctts`
+  table, `FastStartWriter` writes none, and the failure mode is a file that presents
+  its frames in the wrong order silently. So realtime mode is what makes decode order
+  and presentation order the same thing — the assumption the muxer is built on — and
+  `addVideoSample` refuses a backwards timestamp rather than writing a table that
+  cannot express it. §5.2 already states the rate-control trade this project accepts.
+- **The export's video timescale is `fps * 1000`, so every CFR frame is 1000 units.**
+  A microsecond timescale would put 33333.333 µs frames in a 30 fps file and
+  accumulate a millisecond every hundred seconds. The stream-copy path is the
+  exception and uses microseconds, because there it is carrying the _source's_ timings
+  and `DemuxIndex` answers in µs whatever timescale the part was written with.
+- **There are two golden-frame gates and neither subsumes the other.**
+  `test/phase8-gate.test.ts` (harness in `test/export-golden/`) drives the shipping
+  `PreviewLoop` and `ExportRenderLoop` over a real decoded VFR stream, in **two**
+  WebGL2 contexts with **two** readers, and then decodes the finished MP4 to check the
+  pictures reached the file. Phase 11's `test/phase11-golden.test.ts` (harness in
+  `test/golden/`) checks the other axis — that annotations are not vacuous — over one
+  painted frame with a two-line stand-in where the export loop belongs. The seam
+  between them is `ExportRenderLoop.renderAt`, which takes a timeline instant rather
+  than a frame number for exactly that reason.
 
-## Carried forward: four closed, four still open, one from phase 2 and one from the event logs
+## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 
-Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
-signed-bundle gate. Three are now closed on real measurements from a granted, signed
-bundle; four are not, and **phase 2's harness does not cover them** — its only audio
-check is `microphone-revocation`, which is about a grant being withdrawn rather than
-about any of these, and it has no camera checks at all. Phase 2 then left one of its
-own (item 8, still open) and phase 10 one of its own (item 9, now closed on real
-measurements — see the click-capture section below).
+Phases 1, 3, 4 and 8 shipped nine things **unverified**, not verified-and-passing, as
+obligations on phase 2's signed-bundle gate. Three are now closed on real measurements
+from a granted, signed bundle; six are not, and **phase 2's harness does not cover
+them** — its only audio check is `microphone-revocation`, which is about a grant being
+withdrawn rather than about any of these, and it has no camera and no export checks at
+all, so nothing here has looked at them. Until something does, no report may describe
+them as working. Phase 2 then left one of its own (item 10, still open) and phase 10
+one of its own (item 11, now closed on real measurements — see the click-capture
+section below).
 
 **Closed** (see the gate status below for the figures):
 
@@ -1000,11 +1079,27 @@ measurements — see the click-capture section below).
    platform's own behaviour: whether `ended` fires at all for the built-in camera,
    how long `getUserMedia` refuses a device that has just re-enumerated, and whether
    the same `deviceId` really comes back.
+8. **The clipboard, from a signed bundle.** Measured by hand on this machine with
+   Electron 43 — writing the `NSFilenamesPboardType` plist makes
+   `osascript -e 'clipboard info'` report `«class furl»` and
+   `the clipboard as «class furl»` return the file, which is a file reference and not
+   text. That is the mechanism captain decision 9 requires. What no run has watched is
+   the paste landing in Slack, Messages or Mail as a video, and a pasteboard is global
+   state so no automated test writes to it: `export-clipboard.test.ts` asserts the
+   payload's _content_ and injects the one platform call.
+9. **An export of a recording with real audio.** `test/phase8-gate.test.ts` exports
+   video end to end and `packages/mux/test/export-movie.test.ts` muxes a real AAC
+   track from `afconvert` — but no run has taken a `.loomrec` with a mic _and_ a
+   system track through `AudioSourceTrack`'s decode-mix-resample path and listened to
+   the result. The arithmetic each step rests on is covered (`packages/format/test/
+sync.test.ts`, and `verify:mutation`'s four audio mutations); the composition of
+   them at length is not.
 
-None of the four is answered by an ordinary `npm run verify:permissions`: the two audio ones need
-`node scripts/smoke-capture.mjs` without `--synthetic` on a granted machine, and the
-two camera ones need a real camera and a real cable. Do not read the gate's green rows
-as covering them.
+None of the six is answered by an ordinary `npm run verify:permissions`: the two audio
+ones need `node scripts/smoke-capture.mjs` without `--synthetic` on a granted machine,
+the two camera ones need a real camera and a real cable, and the two export ones need a
+paste into a real app and a `.loomrec` with real audio taken through the export path.
+Do not read the gate's green rows as covering them.
 
 What _is_ covered without the grant: `node scripts/smoke-capture.mjs --synthetic`
 replaces only the _source acquisition_ — `getDisplayMedia` and `getUserMedia` — in the
@@ -1019,13 +1114,13 @@ click tap was live — and it is what caught both of phase 3's real bugs.
 
 **And one phase 2 opened, now closed in code and open on hardware:**
 
-8. ~~**A revoked Microphone is recorded as a lost device.**~~ Fixed — see § A revoked
-   Microphone, below. What is **still owed** is the same kind of evidence items 4–7 are
-   owed: nobody has watched a real grant move under a signed bundle.
-   `node scripts/verify-permissions.mjs --mic-revocation` is the check that would, and it has
-   **never been run**, because running it repackages and re-signs the bundle and that
-   costs the captain his grants. Its row therefore reports `skipped`, which is the
-   honest answer and not a pass.
+10. ~~**A revoked Microphone is recorded as a lost device.**~~ Fixed — see § A revoked
+    Microphone, below. What is **still owed** is the same kind of evidence items 4–9 are
+    owed: nobody has watched a real grant move under a signed bundle.
+    `node scripts/verify-permissions.mjs --mic-revocation` is the check that would, and it has
+    **never been run**, because running it repackages and re-signs the bundle and that
+    costs the captain his grants. Its row therefore reports `skipped`, which is the
+    honest answer and not a pass.
 
 ## A revoked Microphone, and why it is not the webcam path
 
@@ -1069,27 +1164,27 @@ merely went away must _not_ stop the recording, and an encoder failure is not a
 revocation), `apps/renderer/test/capture-session.test.ts` (the renderer names no
 cause), `test/hud-notice.test.ts` (the notice measured in pixels, with the same
 no-fit control §7.4's banner has) and two mutations in `npm run verify:mutation`.
-What none of them can establish is on hardware — see carried-forward item 8.
+What none of them can establish is on hardware — see carried-forward item 10.
 
 **And one phase 10 opened and closed:**
 
-9. ~~**Post-grant click rate and latency are unmeasured.**~~ Closed. The captain's
-   accessibility decision recorded them as unverified and said _"Validate during the
-   build"_; phase 2 confirmed the tap was live from a signed bundle but nobody clicked
-   during its window. Phase 10 built the instrument — `scripts/record-cursor-corpus.mjs`
-   posts clicks with `CGEventPost` stamped from `CLOCK_UPTIME_RAW` and
-   `loom-input-sampler.m` stamps every line it emits from the same clock — and
-   **measured 2026-08-05 with the grant in place**, across the ten corpus recordings:
-   158/158 clicks delivered, latency min 0.177 ms, 0.389 ms as the mean of the
-   per-recording medians, 7.711 ms as the mean of their p95s, max 20.520 ms.
-   `packages/edl/test/corpus/manifest.json` carries the figures under `clickCapture`
-   with `measured: true`, and the phase-10 gate reads that field and fails loudly if a
-   future corpus is recorded without the grant. The reading, what the instrument refuses
-   to report and why, are in § Post-grant click rate and latency — measured, below.
+11. ~~**Post-grant click rate and latency are unmeasured.**~~ Closed. The captain's
+    accessibility decision recorded them as unverified and said _"Validate during the
+    build"_; phase 2 confirmed the tap was live from a signed bundle but nobody clicked
+    during its window. Phase 10 built the instrument — `scripts/record-cursor-corpus.mjs`
+    posts clicks with `CGEventPost` stamped from `CLOCK_UPTIME_RAW` and
+    `loom-input-sampler.m` stamps every line it emits from the same clock — and
+    **measured 2026-08-05 with the grant in place**, across the ten corpus recordings:
+    158/158 clicks delivered, latency min 0.177 ms, 0.389 ms as the mean of the
+    per-recording medians, 7.711 ms as the mean of their p95s, max 20.520 ms.
+    `packages/edl/test/corpus/manifest.json` carries the figures under `clickCapture`
+    with `measured: true`, and the phase-10 gate reads that field and fails loudly if a
+    future corpus is recorded without the grant. The reading, what the instrument refuses
+    to report and why, are in § Post-grant click rate and latency — measured, below.
 
 **And one the event-log wiring opened:**
 
-10. **The cursor log's origin carries the first frame's encode and IPC latency.**
+12. **The cursor log's origin carries the first frame's encode and IPC latency.**
     `RecorderSession` names the recording clock's origin on the helper's clock from a
     paired `process.hrtime`/`CLOCK_UPTIME_RAW` reading and the elapsed time to the
     first screen chunk. That elapsed term is now stamped in `onVideoChunk`, where the
@@ -1126,7 +1221,7 @@ What none of them can establish is on hardware — see carried-forward item 8.
     but their counts stay at the zero a provisional document carries — `recoverBundle`
     rebuilds tracks from the frame indices and does not read `events/`.
 
-## Post-grant click rate and latency — measured, and the last open item closed
+## Post-grant click rate and latency — measured, and phase 10's item closed
 
 The captain's accessibility decision closed with _"Post-grant event rate and latency
 are unmeasured. Validate during the build."_ Phase 2 confirmed the tap was live from a
@@ -1208,7 +1303,7 @@ nothing about either of them.
 | `screen-enumeration`         | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `content-protection`         | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `accessibility-clicks`       | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in this run's window, so it measured no rate. Rate and latency were deferred to phase 10 by captain decision — measured there; see § Post-grant click rate and latency.                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `microphone-revocation`      | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `microphone-revocation`      | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 10.                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `overlay-content-protection` | **skipped** | Phase 12's, added after that run and **never executed**. The check is written — five readings and phase 2's own thresholds, moved out of `test/phase12-overlay.test.ts` because it needs the Screen Recording grant to look — and its control window is what would make its result mean anything: the protected overlay's absence counts only once the control has shown the marker. Running it at all repackages and re-signs the bundle, which voids the captain's grants, so it awaits the project's single signed-bundle pass. The figures in § The live drawing overlay are from an unpackaged dev run of the vitest gate it replaced, not from this check. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The export page renders nothing a person sees. It composites into an
+      OffscreenCanvas and hands the result to an encoder; the window it lives in is
+      1x1 and never shown (architecture report §1.2). Its CSP says so — only its own
+      script, plus `connect-src loom:` so it can range-request the recording's media
+      from main, which is the only way a sandboxed renderer reaches a file.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               connect-src loom:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <title>Export</title>
+    <script type="module" src="./export/main.ts"></script>
+  </head>
+  <body></body>
+</html>
