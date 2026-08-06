@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The library window's CSP, unchanged. `connect-src loom:` is what the editor
+      actually needs it for: the frame-index sidecar is `fetch`ed as JSON and every
+      keyframe seek is a `Range` request against `loom://recording/…`, which is how
+      §2.4 says an editor reads a 4K MP4 without a filesystem.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self';
+               font-src 'self';
+               img-src 'self' data: loom:;
+               media-src loom:;
+               connect-src 'self' loom:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Editor</title>
+    <script type="module" src="./editor/main.ts"></script>
+  </head>
+  <body class="editor-body">
+    <!--
+      `titleBarStyle: 'hiddenInset'` leaves the traffic lights over our own chrome,
+      so the top bar is the drag strip and its controls opt out with `.no-drag`.
+    -->
+    <header class="top titlebar" id="top">
+      <span class="top-name" id="name">Loading…</span>
+      <span class="top-meta t-num-sm" id="meta"></span>
+      <span class="vr"></span>
+      <button class="ib no-drag" id="undo" type="button" title="Undo" disabled></button>
+      <button class="ib no-drag" id="redo" type="button" title="Redo" disabled></button>
+      <span class="top-sp"></span>
+      <span class="chip chip-muted" id="save-state">Saved</span>
+    </header>
+
+    <!--
+      Shown instead of the editor when the recording cannot be opened at all — a
+      bundle with no `recording.json`, no screen track, or a part that will not
+      decode. §7 wants a sentence a person can act on, not an empty window.
+    -->
+    <section class="refusal" id="refusal" hidden>
+      <div class="refusal-card obj">
+        <span class="ic-slot" id="refusal-icon"></span>
+        <h1 class="t-d3" id="refusal-title">This recording could not be opened.</h1>
+        <p id="refusal-detail"></p>
+      </div>
+    </section>
+
+    <main class="body" id="body" hidden>
+      <!--
+        The tool rail. One tool today — `loom-p15` owns the zoom, annotation and
+        bubble tools that fill the gaps below it, which is why the separators are
+        already here rather than being introduced by that change.
+      -->
+      <nav class="rail" aria-label="Tools">
+        <button
+          class="tb"
+          id="tool-select"
+          type="button"
+          aria-pressed="true"
+          title="Select"
+        ></button>
+      </nav>
+
+      <div class="mat" id="mat">
+        <div class="film" id="film">
+          <canvas id="preview"></canvas>
+        </div>
+        <div class="mat-foot">
+          <div class="cf obj obj-float">
+            <button class="ib" id="restart" type="button" title="Back to the start"></button>
+            <button class="ib" id="playpause" type="button" title="Play"></button>
+            <span class="tcode t-num-sm" id="tcode"></span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="insp" aria-label="Details">
+        <div class="insp-h">
+          <span class="t-d4">Recording</span>
+        </div>
+        <dl class="insp-facts" id="facts"></dl>
+        <div class="insp-h">
+          <span class="t-d4">Trim</span>
+        </div>
+        <dl class="insp-facts" id="trim-facts"></dl>
+        <p class="insp-note" id="insp-note"></p>
+      </aside>
+    </main>
+
+    <!-- Every notice the editor can raise, in one place, below the picture. -->
+    <div class="trouble" id="trouble" role="status" hidden></div>
+
+    <section class="tl" id="tl" hidden>
+      <div class="tl-bar">
+        <span class="tc t-num-sm" id="tl-tc"></span>
+        <span class="vr"></span>
+        <span class="tl-hint" id="tl-hint"></span>
+        <span class="top-sp"></span>
+        <button class="ib" id="zoom-out" type="button" title="Zoom out"></button>
+        <span class="t-num-sm tl-zoom" id="tl-zoom"></span>
+        <button class="ib" id="zoom-in" type="button" title="Zoom in"></button>
+        <button class="btn btn-sm btn-ghost" id="zoom-fit" type="button">Fit</button>
+      </div>
+      <div class="tl-body">
+        <div class="heads" id="heads"></div>
+        <div class="lanes" id="lanes" tabindex="0" role="slider" aria-label="Playhead">
+          <div class="ruler" id="ruler"></div>
+          <div class="lane-stack" id="lane-stack"></div>
+          <div class="trim-shade trim-shade-head" id="shade-head"></div>
+          <div class="trim-shade trim-shade-tail" id="shade-tail"></div>
+          <div
+            class="handle handle-start"
+            id="handle-start"
+            role="separator"
+            tabindex="0"
+            aria-label="Trim start"
+          ></div>
+          <div
+            class="handle handle-end"
+            id="handle-end"
+            role="separator"
+            tabindex="0"
+            aria-label="Trim end"
+          ></div>
+          <div class="ph" id="playhead"></div>
+        </div>
+      </div>
+    </section>
+  </body>
+</html>

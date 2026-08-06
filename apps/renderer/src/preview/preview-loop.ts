@@ -24,9 +24,9 @@
  * time — `prime`, `release` and `hasSourceFrameAt` exactly as much as `frameAt`, which
  * §4.3 already spells correctly. §4.3 was written before §3.1 had a clip list to
  * disagree with, so it reads as though the two were the same number; they are equal
- * only over an identity clip list, which is every document this app can produce until
- * an editing UI exists. **§4.3 of the architecture report needs the same correction
- * this docblock carries.**
+ * only over an identity clip list, which was every document this app could produce
+ * until the editor shipped a trim. **§4.3 of the architecture report now carries the
+ * matching correction**, made after PR #15 merged; this docblock and the report agree.
  *
  * What it costs to get wrong is latent rather than loud, which is why it survived: the
  * first `sourceStart > 0`, trim or speed change makes preview prime the decoder at the

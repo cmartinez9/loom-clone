@@ -37,10 +37,10 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
-                          # generators, annotations, the drawing overlay, the event logs
-                          # and both gates' judgement policies; one way per entry in
-                          # scripts/mutation-check.mjs's MUTATIONS registry, which is
-                          # where the count lives — each must fail a gate
+                          # generators, annotations, the drawing overlay, the event logs,
+                          # the editor and both gates' judgement policies; one way per
+                          # entry in scripts/mutation-check.mjs's MUTATIONS registry, which
+                          # is where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -122,10 +122,11 @@ apps/renderer/     renderer windows. First-run setup, library — including the 
                    capture page (screen in `capture/main.ts`, camera in
                    `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
                    the live drawing overlay (`overlay/main.ts`), the hidden export page
-                   (`export/`), the preview loop, and `media/` — the loom:// readers
+                   (`export/`), the preview loop, `media/` — the loom:// readers
                    both of them share, including `TrackReader`, which is what turns a
                    multi-part track into the one-part seam preview and export already
-                   speak. The editor later.
+                   speak — and `editor/`, the editor window: the preview host, the
+                   timeline and trimming.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -144,6 +145,18 @@ an adapter has to decide (where the `avcC` description comes from after a restar
 since `recording.json` does not carry it). `apps/renderer/src/media/loom-media.ts` is
 the adapter that answered it — out of the part's own initialisation segment, never a
 second copy beside it — and its header says why.
+
+**There is exactly one adapter for that seam, and keeping it that way is a §4.5
+obligation rather than tidiness.** Phase 8 and phase 14 each wrote one independently —
+`media/track-reader.ts` and an editor-local `ScreenSource` — with the same interface
+and the same answers. §4.5 puts _"which source frame is selected for a given time"_ on
+the list preview and export may never disagree about, and two implementations of that
+selection is that guarantee with a second answer beside it waiting to drift, most
+likely on a part boundary where neither loop looks. Phase 14's copy was deleted, both
+loops open a track through `openVideoTrack`, and the editor's coverage moved onto the
+survivor: `apps/renderer/test/track-reader.test.ts` is the part-selection test, and
+`the-part-offset-is-dropped` in `verify:mutation` points at `TrackReader.frameAt`.
+**Do not add a third.**
 
 ## The four rules that are not style preferences
 
@@ -632,6 +645,130 @@ re-derive them here.
   Accessibility, moving the _pointer_ is not. That is why a corpus can be recorded on a
   machine with no grant, and why clicks cannot be.
 
+## The editor, in one paragraph
+
+Report §8 has a phase for the timeline _model_ (7), the _generators_ (10) and
+_annotations_ (11), and no phase that builds the window they live in; the captain
+settled that in `data/loom-scope/decision-editor-scope.md` ("full editor", with
+**track stacking and blending UI out of the MVP** and **manual zoom alongside the
+automatic generators**). `apps/renderer/src/editor/` is the shell half: the window,
+the preview host, playback transport, the timeline and trimming. The library's
+**Open** button sends `loom.editor.open(id)`; `apps/main/src/editor.ts` shows the
+`editor` role keyed by the recording — which is what §1.2's `multiple: true` already
+meant by one editor per recording — and puts the id in the page's URL, so a window is
+_told_ what it is showing. That module also owns the other half of the lifetime:
+**closing an editor gives back the hold it took**, because `openProject` took the
+bundle `.lock` and a lock held by a window nobody can see is a recording the app
+cannot record over with nothing on screen to explain it. It is `releaseProject` and
+**not** `close`: an export of the same recording holds the same project for a job
+that outlives the window which started it (§1.2), and the library offers Open and
+Export on the same row for the same `editable` state — so an unconditional close
+there takes the lock and the `JournalWriter` out from under a running export, which
+then cannot record its own result and discards a verified MP4 already on disk. The
+two are indistinguishable in what a lone editor leaves behind, so
+`apps/main/test/editor-window.test.ts` asserts the method rather than the outcome and
+`closing-an-editor-closes-a-project-somebody-else-holds` is the mutation. It refuses
+to open the bundle the recorder is using, and refuses to release that one, for a
+sharper reason: `close()` aborts every media part still open, and those are capture's
+own file descriptors — with counted holds that guard is defence in depth rather than
+the only protection.
+
+**The framework question `library/main.ts` deferred to "phase 6 or 7" is answered
+here: vanilla TypeScript against the Pressroom design system, like the other four
+windows.** The argument is in `editor/main.ts`'s header and is not only consistency —
+the two things this window does sixty times a second are a WebGL draw and one style
+write, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
+inherits the choice; re-taking it is a decision to write down, not one to drift into.
+
+**The timeline is drawn in _source_ time**, and that is the load-bearing layout
+decision (`timeline-geometry.ts` argues it). Its full width is the recording as
+captured; the trimmed-away head and tail stay on screen, dimmed, with the handles
+still on them. §3.2 anchors effect tracks in source time _"so that trimming does not
+re-time your zooms"_, so a timeline-time ruler would draw those tracks sliding under
+a trim they are explicitly independent of — and a keyframe placed by hand, which is
+`loom-p15`'s job, would not stay over the frame it was placed on. The playhead is
+the one thing that crosses: it is drawn at `resolve(...).sourceTime`, and a scrub
+converts back with `timelineTimeAt`. **A trim is `clips.set` with one clip and no new
+primitive**, at `speed: 1` always — `trim.ts` says why a speed control is not a local
+change.
+
+**There is no audio, deliberately.** §5.4 mechanism 4 requires playback time to come
+from the audio output's played-sample count and `PreviewLoop` accumulates
+`requestAnimationFrame` deltas, so sound against that clock would walk away from the
+scrub bar at the device's own error — 90 ms over thirty minutes at §5.5's 50 ppm.
+`packages/format/src/sync/align.ts`'s table now records mechanism 4 as unimplemented
+and says where it belongs; adding sound means implementing it first.
+
+**The gate is `test/editor-gate.test.ts`**, a real Electron run: a real `.loomrec`
+built from the committed H.264 fixture through the shipping writer, the real library
+window, its real Open button, the real editor. Its one assertion worth the whole
+gate: _trim two seconds off the front, and the picture at timeline 0 is
+**byte-for-byte** the picture that was at source 2.0 s before the trim_ — with the
+control beside it that source 0 and source 2.0 differ, or the equality would pass on
+any recording of a still screen and on a preview that decoded nothing after its first
+frame. `testsrc2` is what makes a pixel hash a fingerprint of a source instant. Five
+`preview-*`/`a-trim-*`/`the-part-*`/`the-timeline-*` entries in `npm run
+verify:mutation` break the production source on disk, and each names what has to
+notice it — this gate for the two that move the picture, `editor-trim.test.ts` and
+`track-reader.test.ts` for the three that do not. It deliberately does **not** time
+the frame budget: §8's 16.67 ms is `test/phase6-gate.test.ts`'s, and a second opinion
+about one number is a weaker one.
+
+## Sharp edges — the editor
+
+- **The editor reads its picture through `media/track-reader.ts`, not through anything
+  of its own.** That is seam S4's bridge — `SourceReader` knows one part in
+  **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —
+  and it is shared with the exporter on purpose (§4.5, above). Every method that
+  crosses it — `frameAt`, `hasSourceFrameAt`, `selectionMicros`, `prime`, `release` —
+  carries its own copy of `t - part.startTimeSec`, so each has its own assertion in
+  `apps/renderer/test/track-reader.test.ts`: three of them were droppable with every
+  other test in that file still green, which is what "ported a shim, not
+  coverage" looks like from the inside. The way that was established is worth reusing
+  — break the source ten ways and require each break to fail — because a test that has
+  never been seen to fail is a claim, not a measurement.
+- **`edit.output.size` is `[1920, 1080]` on every bundle and nothing sets it from the
+  recording.** `newEditDocument()` is the only thing that writes it, so a 3456×2234
+  capture previews — and will export — letterboxed into 1080p. The editor shows the
+  number as a measured fact rather than overriding the document, which is how this was
+  noticed at all. Whoever owns output settings has to decide it; do not paper over it
+  in a renderer, because the exporter reads the same field.
+- **An author `display` outranks the UA's `[hidden] { display: none }`.** Every panel
+  in this window that toggles is a grid or a flex box, so without the `[hidden]` rule
+  at the top of `editor.css` the refusal card and the empty trouble line sit over the
+  editor permanently. `library.css` and `recorder.css` already carried the same note;
+  the editor still shipped without it until a screenshot showed it.
+- **`.stage` is `@loom/design`'s, not yours.** `components.css` owns a `.stage`
+  primitive — the one dark, theme-invariant surface — and a second rule of that name
+  in a page stylesheet takes its background depending on which sheet the bundler
+  emitted last. The editor's mat is `.mat`.
+- **A `<canvas>` cannot be fitted to a ratio in CSS alone.** It is a replaced element
+  with an intrinsic size, so every "contain this ratio in that box" goes circular: the
+  wrapper's size comes from the canvas and the canvas's percentage `max-*` resolve
+  against the wrapper. `fitStage` in `editor/main.ts` measures the mat and sets the
+  size in pixels; it is the one place that arithmetic lives.
+- **The lane area is `overflow: hidden`, so both ends of the recording need an
+  inset.** A trim handle centred on `x = widthPx` has half of itself — including its
+  hit target — clipped away, and "trim the very end" is a grab that lands on nothing.
+  `EDGE_PX` in `timeline-geometry.ts` is that inset. It was found by the gate dragging
+  a real pointer, not by reading the stylesheet, which is the argument for the gate
+  driving real input rather than synthetic events.
+- **A failed `applyOps` is repaired by the next edit, not latched.** The editor
+  applied the batch optimistically, so a send that failed leaves it one revision ahead
+  of disk with no op that could reconcile it; §2.7's conflict path is the repair —
+  main refuses the next batch and hands back what it holds. `EditorProject` remembers
+  only which of the two happened, so the reload names a disk error as one instead of
+  sending somebody looking for a second editor window that does not exist.
+- **`window.__loomEditor` is a read-only probe, not a capability.** `editor/probe.ts`
+  argues it: the gate has to be able to tell "the trim moved the picture" from "the
+  playhead moved and the picture did not", nothing in the DOM can, and a frame counter
+  counts a stale frame just as happily. A renderer can already read its own canvas, so
+  it grants nothing. Keep it read-only.
+- **The preview is rendered at `edit.output.size`, not at the window size.** CSS
+  scales the element; the composite is what the exporter will encode, at the
+  resolution it will encode it, and it does not change because somebody dragged a
+  corner. It also keeps the frame budget off the window geometry.
+
 ## Annotations, in one paragraph
 
 Phase 11 added **no primitive**: §3.3 already makes an annotation a `kind: 'object'`
@@ -961,6 +1098,17 @@ was not a control.
   from a tree while a mutation run owns it, and if a commit's diff touches a production
   file the change had no business in, check it against the registry before anything else.
   A `find` string missing from a source file is the signature.
+  **What catches a restore that did not happen is `test/mutation-registry.test.ts`, on
+  every `npm test`.** `MUTATIONS` is exported from `mutation-check.mjs` behind a
+  main-module guard, with its shape pinned in `scripts/mutation-check.d.mts` so a new
+  field is a compile error rather than an unchecked property, and every entry's `find`
+  — the _original_ text — must occur in its file exactly **once**. Zero occurrences is
+  the loud case: the mutation is committed into the production source, which no other
+  mechanical check can see (nothing was deleted, the tree typechecks, and the suite is
+  green because a mutation is by construction the kind of change only its own gate
+  notices). More than one means the entry cannot say which line it breaks. It also
+  refuses a replacement equal to its target, a `mustFail` file that is not there, and a
+  duplicate name, which is how an entry stops proving anything quietly.
 - **The mutation proof has three outcomes, and its old two over-claimed.** A gate that
   withholds its verdict exits 0 exactly as one that ran and noticed nothing does, so
   `runTests` reads vitest's per-test statuses rather than the exit code alone: a guard
@@ -1100,9 +1248,9 @@ was not a control.
   `prime(t, 0.5)` — and **§4.3 needs the correction the docblock in `preview-loop.ts`
   now carries**; it was written before §3.1 had a clip list to disagree with. Nothing
   catches this by accident: the two numbers are equal over an identity clip list, which
-  is every document this app produces until an editing UI exists, and both golden and
-  phase-6 gates stub the reader so the argument is discarded. The regression test that
-  does catch it is the `SOURCE time` describe in `apps/renderer/test/preview-loop.test.ts`
+  was every document this app produced until the editor shipped a trim, and both golden
+  and phase-6 gates stub the reader so the argument is discarded. The regression test
+  that does catch it is the `SOURCE time` describe in `apps/renderer/test/preview-loop.test.ts`
   — a real `compile` over a non-zero `sourceStart`, asserting the argument the reader
   was handed. Any new consumer of a `SourceReader` gets the same test or the same bug.
 - **Anchoring `prime`/`release` in source time makes their _windows_ source seconds too,
@@ -1110,15 +1258,16 @@ was not a control.
   `SourceReader.prime` covers `[t, t + aheadSec]` in source time
   (`packages/decode/src/source-reader.ts:254`), so the default `lookaheadSec: 0.5` buys
   0.25 s of playback ahead on a 2× clip — half of §4.2's target — and 1.0 s on a 0.5×
-  one; `retainBehindSec: 0.1` scales identically, keeping 0.05 s behind at 2×. If you
-  are on `fm/loom-p14-editor-shell`, this is live the moment your UI can set a speed:
-  nothing regresses today only because every document this app produces has an identity
-  clip list. **Do not compensate here.** §4.5 puts preview and export on the
-  must-be-identical list, so scaling the window in `PreviewLoop` alone manufactures
-  exactly the divergence phase 8's golden-frame gate exists to catch — a new defect, not
-  a partial fix. Any change is one decision for both §4.5 paths together, and it needs
-  `CompiledTimeline.clips.speeds`, which is `@internal` to `@loom/edl` — a cross-package
-  API call, not a local tweak.
+  one; `retainBehindSec: 0.1` scales identically, keeping 0.05 s behind at 2×. The
+  editor is the first UI that writes a clip list and it writes `speed: 1` only, with no
+  speed control — `apps/renderer/src/editor/trim.ts` records that as a scope statement
+  rather than a placeholder. That, and only that, is why nothing regresses today; the
+  first speed control makes it live. **Do not compensate here.** §4.5 puts preview and
+  export on the must-be-identical list, so scaling the window in `PreviewLoop` alone
+  manufactures exactly the divergence phase 8's golden-frame gate exists to catch — a
+  new defect, not a partial fix. Any change is one decision for both §4.5 paths
+  together, and it needs `CompiledTimeline.clips.speeds`, which is `@internal` to
+  `@loom/edl` — a cross-package API call, not a local tweak.
 - **`Compositor.render` does not clear when it is handed no frame — it returns.** §4.3's
   "a miss holds the previous frame" is kept by leaving the render target alone; a clear
   before the null check turns every backward scrub into a black flash. The loop cannot
@@ -1271,9 +1420,17 @@ was not a control.
   `npm run verify:mutation` 17 s before the phase-6 gate's window and the gate reported
   one frame at 29.10 ms, against a p99 of 1.80 ms and a 2.20 ms worst frame on the run
   before it, with the gate's own pure-arithmetic host control stretched from 8.50 ms to
-  11.40 ms in those same frames. **Never add a second macOS job that runs concurrently
-  with `verify`**: these three gates cannot tell a busy host apart from the defect they
-  exist to catch, and a job we start on purpose is a busy host we chose.
+  11.40 ms in those same frames. A second reading of the same overlap, run 31074470239,
+  shows it is not only a CPU effect: there the **GPU** composite came back at 18.08 ms
+  median scrubbing and 22.97 ms playing against 2.37–2.48 ms on three previous runs of
+  the same gate on the same runner class, while the CPU frame body stayed inside §8's
+  budget — and what failed was not a time but the picture, one playback readback
+  holding an all-dark frame-code band between two correct ones with no miss and no seek
+  in that phase. Serialising also costs nothing that was worth having: a mutation proof
+  over a red tree is vacuous, because `mutation-check.mjs` reads a non-zero exit as
+  "caught". **Never add a second macOS job that runs concurrently with `verify`**:
+  these three gates cannot tell a busy host apart from the defect they exist to catch,
+  and a job we start on purpose is a busy host we chose.
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
@@ -1520,9 +1677,9 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   `CompositorFrames`, `ExportRenderLoop` builds its frames without one, and a `text`
   span with no atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`)
   rather than refused — `PreviewLoop` reports that count through `onError` and the
-  export loop does not read it. Nothing authors an annotation today, because the
-  editor is a later phase; hand the export window the same atlas object before
-  anything can.
+  export loop does not read it. Nothing authors an annotation today — the editor shell
+  has no annotation tools, and they are `loom-p15`'s — so hand the export window the
+  same atlas object before anything can.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 

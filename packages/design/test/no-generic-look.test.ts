@@ -148,6 +148,11 @@ describe('no AI-generated look', () => {
       join(packageRoot, 'src/icons.ts'),
       join(repoRoot, 'apps/renderer/src/library/main.ts'),
       join(repoRoot, 'apps/renderer/src/library.html'),
+      // The editor is the largest surface in the app and the one most likely to
+      // reach for a glyph instead of an icon, so it is on the list too.
+      join(repoRoot, 'apps/renderer/src/editor/main.ts'),
+      join(repoRoot, 'apps/renderer/src/editor/timeline.ts'),
+      join(repoRoot, 'apps/renderer/src/editor.html'),
     ];
     const emoji = /\p{Extended_Pictographic}/u;
     for (const path of sources) {

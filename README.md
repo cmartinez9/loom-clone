@@ -11,7 +11,8 @@ recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
 WebGL2 compositor, phase 7's timeline model, phase 8's exporter, phase 9's
 delete-after-export retention, phase 10's cursor-follow and auto-zoom generators,
 phase 11's annotations and phase 12's live drawing overlay, built early and out of
-order because they are self-contained.
+order because they are self-contained — and the editor window that finally puts the
+decode path, the compositor and the timeline model in front of a person.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -31,8 +32,19 @@ revealing them in Finder or moving them to the Trash. System audio needs no driv
 no admin prompt, which is why the floor is macOS 14. The camera records as a track of
 its own when a recording asks for one, but it is opt-in and the HUD has no toggle yet:
 opening a camera lights the hardware indicator, so it should follow from a user asking,
-and that asking is later HUD work. The editor window that will drive phase 7's timeline
-model is later still, deliberately absent rather than stubbed.
+and that asking is later HUD work.
+
+**Open** on a finished recording's library row opens it in an editor window of its own.
+The transport plays and pauses the picture, the timeline scrubs it, and the handles at
+the two ends of the recording trim its start and its end — written to disk the moment
+you let go of a handle, and there again the next time you open it. Nothing is baked
+into pixels: a trim is a line in that recording's edit document, and the captured media
+is never rewritten. The timeline is drawn as the recording was captured, so the
+trimmed-away head and tail stay on screen rather than disappearing. The editor is
+deliberately silent: sound played against the frame clock would drift away from the
+scrub bar, and doing it properly means making the audio device the clock first.
+Keyframes, manual zoom, annotation tools and the buttons that run the generators are
+the next piece of work.
 
 The property phase 1 established: **a recording survives the process being killed.**
 Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
@@ -74,7 +86,7 @@ way. That log is what phase 10's cursor-follow and auto-zoom-on-click read.
 Phase 6's one decode path and WebGL2 compositor — the pair preview and export share —
 are complete alongside it too, built ahead of the capture spine against
 synthetic fixtures and held to a 16 ms frame budget on a 4K fixture at a 1440p viewport
-by a gate that runs in `npm test`. No shipping window drives the preview loop yet.
+by a gate that runs in `npm test`. The editor window is what drives that preview loop.
 
 The property phase 7 establishes: **an edit means the same thing every time it is
 read.** Tracks, keyframes and the springs that move a zoom live in one model, resolved
@@ -102,7 +114,7 @@ itself on the clipboard, as a file reference rather than as a path string, and r
 it in Finder. There is no network code anywhere in that path: no share sheet, no
 upload, no account. An export starts from the library today: an editable recording's
 row carries an Export button that expands into an export sheet in the row itself. The
-editor window that will also start one is a later phase. `AGENTS.md` records what has
+editor window has no Export button of its own yet. `AGENTS.md` records what has
 and has not been watched by hand — the pasteboard mechanism has, a paste landing in
 another app as a video has not.
 
@@ -132,7 +144,8 @@ than on synthetic fixtures, with controls that must fail: the same ten logs foll
 with the rest box and the spring removed, and each of those two mechanisms removed on
 its own. Following the cursor needs no permission; only the click-driven zoom needs
 Accessibility, and without that grant it declines and names why, rather than quietly
-generating nothing. No shipping window offers either yet; the editor is later.
+generating nothing. The editor window exists now, but it has no button that runs either
+of them yet.
 
 The property phase 11 establishes: **a redaction that cannot be drawn is never
 published.** Arrows, boxes, ellipses, highlights, text and blur/mask are spans on that
@@ -142,9 +155,9 @@ be placed refuses the frame instead of compositing without it, and one that cann
 blurred is filled opaque rather than quietly weakened. `npm test` proves it by drawing
 24 fixed timestamps through the shipping preview loop and through a fixed-timestamp
 export loop and requiring **max per-pixel delta 0**, plus a third annotation-free frame
-at every timestamp so a pair that both drew nothing cannot pass. The editor that lets
-you place one is later; the only annotations a shipping window writes today are the
-strokes below.
+at every timestamp so a pair that both drew nothing cannot pass. The editor window
+exists now, but it has no tools for authoring one yet; the only annotations a shipping
+window writes today are the strokes below.
 
 The property phase 12 establishes: **the ink is on the screen and not in the
 recording.** The HUD's Draw button lays a transparent sheet over the display — a pen,
@@ -165,12 +178,23 @@ means capturing the screen, so it lives in `npm run verify:permissions` beside p
 carries the readings an unpackaged dev run of the test it replaced produced, and says
 plainly that they are not evidence the shipped check has reproduced them.
 
-`npm run verify:mutation` proves those gates are real by breaking the production source
-behind them one property at a time — editing it on disk rather than a copy of it — and
-requiring a test to fail each time. `scripts/mutation-check.mjs`'s registry is what it
-breaks and where that list lives. The one property it deliberately leaves uncovered,
-because no test in `npm test` can catch it, is named in `AGENTS.md` rather than papered
-over.
+The property the editor establishes: **the edit you made is the edit that comes back.**
+`npm test` proves it in a real Electron run, driving the real library window's Open
+button and the real editor: trim two seconds off the front, and the picture at the
+start of the output is **byte-for-byte** the picture that was two seconds in before the
+trim. Beside it is the control that those two pictures differ at all, without which the
+equality would pass on a recording of a still screen and on a preview that decoded one
+frame and stopped. The trim itself is read back twice by a store that has never seen
+that recording — once while the editor still holds it, once after the window closed —
+which is the round trip a person makes by quitting and coming back.
+
+`npm run verify:mutation` proves those gates are real by breaking capture, the
+timeline model, the generators, the annotation path, the drawing overlay, the event logs
+and the editor one way at a time — editing the production source on disk rather than a
+copy of it — and requiring a test to fail each time. `scripts/mutation-check.mjs`'s
+registry is what it breaks and where that list lives. The one property it deliberately
+leaves uncovered, because no test in `npm test` can catch it, is named in `AGENTS.md`
+rather than papered over.
 
 ## Requirements
 
@@ -194,6 +218,10 @@ To look at the library window with something in it:
 node scripts/seed-fixtures.mjs ~/Movies/"Loom Clone"
 npm start
 ```
+
+Those are bundles of real metadata over placeholder media, so the library draws them in
+full but **Open** reaches an editor that cannot decode a picture and says so. Recording
+one for real is what gives you something to play and trim.
 
 To check that screen capture really works on this machine, end to end:
 

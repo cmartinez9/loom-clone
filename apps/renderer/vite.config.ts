@@ -9,9 +9,8 @@
  *
  * One entry per window in the §1.2 table. Phase 0 shipped `library.html`; phase 1
  * adds the recorder HUD and the hidden capture page; phase 2 adds first run; phase 8
- * adds the hidden export page; phase 12 adds the live drawing overlay.
- * `countdown.html` and `editor.html` arrive with the phases that have something to
- * put in them.
+ * adds the hidden export page; phase 12 adds the live drawing overlay; phase 14 adds
+ * the editor. `countdown.html` arrives with the phase that has something to put in it.
  */
 
 import { defineConfig } from 'vite';
@@ -42,6 +41,7 @@ export default defineConfig({
         capture: resolve(root, 'capture.html'),
         overlay: resolve(root, 'overlay.html'),
         export: resolve(root, 'export.html'),
+        editor: resolve(root, 'editor.html'),
       },
     },
   },

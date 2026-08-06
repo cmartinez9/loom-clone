@@ -699,12 +699,12 @@ describe('PreviewLoop stall watchdog — §10.2', () => {
  * the loop's own `time` is not it.
  *
  * The loop used to pass `state.sourceTime` to `frameAt` and the raw timeline time to
- * the other three. That is invisible today because nothing produces a non-identity
- * clip list — there is no editing UI yet — and it is invisible in both gates for a
- * second reason: they stub the reader so the argument is discarded, and they drive
- * `identityTimeline`, where the two numbers are equal by construction. **These tests
- * break that pattern deliberately**: a real `compile` over a real clip list with a
- * non-zero `sourceStart`, and assertions on the argument the reader was handed.
+ * the other three. That was invisible until the editor shipped a trim, because until
+ * then nothing produced a non-identity clip list — and it is invisible in both gates
+ * for a second reason: they stub the reader so the argument is discarded, and they
+ * drive `identityTimeline`, where the two numbers are equal by construction. **These
+ * tests break that pattern deliberately**: a real `compile` over a real clip list with
+ * a non-zero `sourceStart`, and assertions on the argument the reader was handed.
  *
  * Report §4.3's own pseudo-code has the same defect (`screenReader.prime(t, 0.5)`
  * under a `frameAt(state.sourceTime)`) and needs the same correction; the docblock in

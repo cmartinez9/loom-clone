@@ -1,9 +1,10 @@
 /**
  * The library window.
  *
- * Vanilla TypeScript and the design system, no framework. Phase 0's job is the
- * skeleton, and picking a UI framework for the editor is a decision phase 6/7 gets
- * to make with the compositor in front of them rather than one this file imposes.
+ * Vanilla TypeScript and the design system, no framework. Phase 0 deferred the
+ * framework question to whoever built the editor rather than imposing an answer from
+ * here; phase 14 took it, kept vanilla TypeScript, and wrote the reasoning down in
+ * `apps/renderer/src/editor/main.ts`'s header — which is where it lives now.
  *
  * Everything this window can do is `window.loom` — the preload surface. There is
  * no `fs`, no `require`, no network. That is the point (§0, rule 2).
@@ -359,6 +360,22 @@ function renderActions(summary: RecordingSummary): HTMLElement {
   const actions = document.createElement('div');
   actions.className = 'row-actions';
 
+  // The route into the editor, and the only one. Offered exactly for the states
+  // §2.2 says have something to edit: a recording still being made is the
+  // recorder's, `exported` had its sources deleted after a verified export
+  // (captain decision 5), and a bundle that is damaged or awaiting repair has
+  // nothing to open. Main refuses each of those too — a library that declines to
+  // send the message is not an enforcement of anything — but being told here beats
+  // pressing a button that opens a window to say no.
+  if (canEdit(summary)) {
+    const open = button('Open', 'btn btn-sm btn-primary');
+    open.prepend(iconSpan('play', 14));
+    open.addEventListener('click', () => {
+      loom.editor.open(summary.id);
+    });
+    actions.append(open);
+  }
+
   // Only an editable recording can be exported. An `exported` one has no sources
   // left to compose from (captain decision 5), and the other states are a recording
   // that is not finished being one.
@@ -396,6 +413,11 @@ function renderActions(summary: RecordingSummary): HTMLElement {
 
   actions.append(reveal, remove);
   return actions;
+}
+
+/** Whether this recording has something an editor could open. */
+function canEdit(summary: RecordingSummary): boolean {
+  return summary.unreadable === undefined && summary.state === 'editable';
 }
 
 function button(label: string, className: string): HTMLButtonElement {
