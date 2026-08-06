@@ -31,6 +31,7 @@ import { registerExportRenderIpc, registerIpc, unregisterIpc } from './ipc.ts';
 import { OverlayController } from './overlay.ts';
 import { RecorderSession } from './recorder/session.ts';
 import { ExportSession } from './export/session.ts';
+import { resumeInterruptedRetention } from './export/retention.ts';
 import { copyFileToClipboard } from './export/clipboard.ts';
 import { WindowRegistry } from './windows.ts';
 
@@ -263,6 +264,23 @@ async function main(): Promise<void> {
   await recorder.recoverOnLaunch().catch((error: unknown) => {
     console.error('[main] crash recovery failed:', error);
   });
+
+  // §7.5's other half of crash recovery: a recording whose sources a verified export
+  // had begun deleting when the process died. It finishes what was started and
+  // **starts nothing** — the only thing it can act on is the `retention` record a
+  // verified-good export wrote, which is what keeps obligation 3, *"an unexported
+  // recording is never auto-deleted"*, true of a launch-time pass.
+  await resumeInterruptedRetention(store)
+    .then((outcomes) => {
+      for (const outcome of outcomes) {
+        if (outcome.finished) console.log(`[main] finished deleting the sources of ${outcome.id}`);
+        else
+          console.error(`[main] could not finish deleting ${outcome.id}: ${outcome.error ?? ''}`);
+      }
+    })
+    .catch((error: unknown) => {
+      console.error('[main] retention recovery failed:', error);
+    });
 
   // First run gets the setup window instead of the library. The captain's decision
   // (`data/loom-scope/decision-accessibility-clicks.md`) is "ask up front": all four

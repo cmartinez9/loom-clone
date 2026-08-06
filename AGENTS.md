@@ -36,9 +36,9 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model, export, the generators,
-                          # annotations, the drawing overlay and the event logs
-                          # 80 ways; each must fail a gate
+npm run verify:mutation   # break capture, the timeline model, export, retention, the
+                          # generators, annotations, the drawing overlay and the event
+                          # logs 91 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -62,10 +62,13 @@ npx electron scripts/screenshot.cjs --out shots --theme light   # capture the re
 
 ```
 packages/format/   the on-disk format: schemas, types, validation, migrations,
-                   writeAtomic, the edit journal, and `src/sync/` — the A/V
+                   writeAtomic, the edit journal, `src/sync/` — the A/V
                    alignment arithmetic, which lives here rather than in a package
                    §1.3 does not list because every function in it is a reading of
-                   a §2.3 field.  `@loom/format` is PURE (no node, no DOM);
+                   a §2.3 field — and `src/retention.ts`, which is the same bargain
+                   for §7.5: whether an `ExportRecord` has earned the deletion of the
+                   sources, and the sentences the user is shown before it does.
+                   `@loom/format` is PURE (no node, no DOM);
                    `@loom/format/fs` is the filesystem half.
 packages/mux/      both MP4 writers §1.3 asks for: `fragment-writer.ts` (capture,
                    fragmented, survives SIGKILL) and `faststart.ts` (export, one
@@ -103,14 +106,17 @@ packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitma
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    PermissionManager, OverlayController, `export/` (ExportSession,
-                   §7.5 verification, the file clipboard, §5.3's stream-copy plan),
-                   loom:// protocol, IPC.
+                   §7.5 verification, `retention.ts` — the delete-after-export path
+                   and its launch-time resume — the file clipboard, §5.3's
+                   stream-copy plan), loom:// protocol, IPC.
                    `input-sampler.ts` is the sampler's only seam onto the world — the
                    `EventLogSink` backed by `ProjectStore`, and the clock reading
                    `t0Us` is derived from. `verify/marker.ts` is the paint-capture-count
                    instrument phases 2 and 12 both prove content protection with — one
                    instrument, so there is one opinion about what counts as evidence.
-apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
+apps/renderer/     renderer windows. First-run setup, library — including the export
+                   sheet, which is where §7.5's retention warning and the keep-sources
+                   switch live — recorder HUD, the hidden
                    capture page (screen in `capture/main.ts`, camera in
                    `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
                    the live drawing overlay (`overlay/main.ts`), the hidden export page
@@ -335,8 +341,9 @@ fps` on the recompose path and the copy plan's own duration on the fast path, be
 `FastStartWriter.plan()`'s tally is the number `mvhd.duration` was written from and a
 check answered with it can only fail on header bytes the parse already rejected.
 `exportFrameCount` lives in `@loom/ipc` so the window that produces the frames and the
-main process that measures them cannot drift. Phase 8 deletes nothing **of the
-user's**; `sourcesKept` is the boolean phase 9 reads. It does remove its own failed
+main process that measures them cannot drift. A verified-good export then hands the
+recording to **retention** (below); every failure path throws above that call, so a
+failed export deletes nothing. It does remove its own failed
 output: §7.5's order is rename-then-verify, so a file that fails the checks is already
 in place under its real name, and a broken video the app knows is broken is worse in
 the user's Exports folder than absent. **Every** failure is recorded in `project.json`,
@@ -350,6 +357,133 @@ revealed in Finder. §5.3's stream-copy path is `apps/main/src/export/stream-cop
 to turn off, and the copy itself is byte ranges out of the `loom.index/1` sidecar
 with no decoder anywhere. Audio is still mixed by the window on that path: §5.3's
 condition list is entirely about pictures.
+
+## Retention, in one paragraph
+
+Phase 9, report §7.5, and `data/loom-scope/decision-loom-storage-retention.md` — the
+captain chose auto-delete of the raw sources after export, was shown the contradiction
+with his earlier "save everything", and confirmed. The **decision** is
+`mayDeleteSources` in `@loom/format` (pure, beside `src/sync/` and for the same
+reason: it is a reading of §2.2 fields), which reads the durable `ExportRecord` and
+returns _every_ reason it says no — the `streamCopyEligibility` shape. It does **not**
+re-verify anything: §7.5's five checks are phase 8's `verify.ts`, answered off the
+bytes on disk, and a second opinion about "is this file good" would be a second thing
+to keep correct with the wrong one doing the deleting. What it does instead is refuse a
+record that does not _say_ all five passed, field by field rather than by
+`error === undefined` — a record claiming four of five is one to refuse whatever else
+it says. The **act** is `apps/main/src/export/retention.ts`, and it is §7.5's three
+steps in §7.5's order: write `retention.sourcesDeletedAt` **first**, then unlink
+`media/` and `events/`, then set `state: "exported"`. That order is the whole crash
+story — there is no instant at which the library says `exported` beside media that is
+still there, and none at which an editable recording has lost its sources with nothing
+on disk saying a deletion began. `resumeInterruptedRetention`, called once at launch,
+finishes what a crash interrupted; it is a **resume and not a sweep**, because the only
+thing it can act on is a `retention` record and only a verified export writes one.
+Deletion never fails an export: the file is written, verified and about to go on the
+clipboard, and `#run`'s `catch` discards the output, so a cleanup error there would take
+the user's finished video away. `ExportResult.sourcesDeleted` is what actually happened
+and is **not** the negation of `sourcesKept` — an authorised deletion that failed
+part-way is a third state, and a surface that inferred "final" from the checkbox would
+be lying in both directions. That third state is `retentionError`, carried beside
+`retentionReasons` for the same reason phase 8 carries the other three: a signal that
+cannot be inspected is not a signal. The library says all three in
+`apps/renderer/src/library/export-notice.ts` — pure, so what the user is told is pinned
+by `npm test` rather than eyeballed — out of `RETENTION_COPY`'s `exported`, `kept` and
+`deletionFailed`, which is where the before-the-export warning lives so the two cannot
+drift. Telling someone their recording "was kept" when half its media is gone is worse
+than silence: it is a false assurance they discover only when they try to edit.
+
+**The gate is `apps/main/test/phase9-retention.test.ts`**: the real `ExportSession` over
+a real bundle with real bytes in `media/` and `events/`, failed at **each** of
+`VERIFICATION_FAILURES`'s ten members individually, with every source surviving each
+one byte-for-byte. It is bound to that array rather than to a copy — the scenarios are a
+`Record<VerificationFailure, …>`, so a new failure mode with no scenario does not
+compile — because a retention gate covering nine of ten modes is exactly the shape of
+bug that deletes someone's footage. Three things keep it from passing vacuously: the
+inventory must be non-empty before each run, each scenario must produce _its own_
+failure message, and an undamaged control must actually delete.
+`apps/main/test/retention-crash.test.ts` is the other half: a real `SIGKILL` **aimed**
+at each of the three steps through `RetentionPacing`, with a `contradictions()`
+inspector that has its own control. Nine retention mutations in
+`npm run verify:mutation` break the production source on disk — including making the
+deletion unconditional, which is the mutation the gate exists for.
+
+**Obligation 2's surface has never been observed rendering, and that is a hole in a
+data-destruction safeguard rather than a documentation nicety.** The export sheet in
+`apps/renderer/src/library/main.ts` _is_ §7.5 obligation 2 — the settled decision that
+the user is **told** before their sources go, and that there is no silent destruction —
+and `RETENTION_COPY.warning` is that promise in words. Nobody has watched it appear on
+a screen. **The failure mode is not cosmetic**: if the sheet does not open at all, or
+opens with the warning clipped, off-screen or below the fold, the user is not told and
+the sources are deleted anyway — and the safeguard fails **silently, with every test
+still green**. `packages/format/test/retention.test.ts` pins the sentences,
+`apps/renderer/test/export-notice.test.ts` pins which one is chosen, and `main.ts`
+builds the nodes; none of that is the claim that a person can read the warning where it
+is put. Copy asserted in a DOM and copy read by a human are different claims.
+**What _is_ established**, so this is honest in both directions: the library window
+loads and renders with this code without throwing (observed),
+`packages/design/test/no-generic-look.test.ts` passes over `library.css`, and the sheet
+reuses only existing tokens and component classes. What is missing is specifically the
+human observation, and the reason is environmental — `scripts/screenshot.cjs` boots the
+real main process, whose recordings root is `homedir()` with no override but
+`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
+scratch library, and seeding the captain's real recordings root from a task worktree
+was not acceptable. **Where it is discharged**: the project's single signed-bundle
+end-to-end pass, the one run once and deliberately at the end because packaging and
+re-signing void the captain's grants. It belongs to that pass beside
+`microphone-revocation` and `overlay-content-protection`, which report `skipped` in
+§ Phase 2 gate status for the same reason — one item on a known list, not an orphan.
+**And it may not be upgraded to verified on the strength of a test.** No number of
+passing assertions about the copy discharges it; only a human seeing that sheet
+rendered in a running app does. It is recorded here rather than in § Carried forward on
+purpose, and should stay: that list is obligations on phase 2's signed-bundle gate, and
+this is not one of them — moving it there would dilute what that list means.
+
+## Sharp edges — retention
+
+- **`RETENTION_SOURCE_DIRECTORIES` is exactly §7.5's `media/` and `events/`.**
+  `cursors/` (deduplicated bitmaps, kilobytes) and `thumbs/` (the poster an exported
+  recording's library card still shows) are not named in the report and are not ours to
+  add. Over-deleting is the one direction this may never err in, and the control asserts
+  both survive.
+- **Three independent guards, and they are not redundant.** `mayDeleteSources` refuses a
+  record that does not say all five checks passed; `ProjectStore.deleteSources` throws
+  `RetentionNotAuthorisedError` unless `project.json` already carries the retention
+  record step 1 wrote; and `validateProjectDoc` refuses to write `state: "exported"`
+  without one, so even a caller running the steps backwards cannot persist the forbidden
+  document. Obligation 3 — _"an unexported recording is never auto-deleted"_ — is
+  therefore a property of the method rather than of its callers.
+- **The directories survive their contents.** `deleteBundleSources` unlinks entries and
+  leaves `media/` and `events/` in place, so the §2.1 layout is valid at every instant
+  and a re-run after a crash costs a `readdir`. Each directory is `fsync`'d after its
+  entries go, because `unlink(2)` is no more durable than `rename(2)`.
+- **`RetentionPacing` and `DeleteSourcesPacing` exist so the crash gate kills the real
+  function.** Same bargain as `WriteAtomicPacing`, and the same justification: a harness
+  that wrote §7.5's three steps out itself would keep passing after they were reordered.
+  Production callers pass nothing.
+- **Only `ENOENT` means "already deleted".** `deleteBundleSources` tolerates a directory
+  that is not there — that is what makes the resume idempotent — and **raises everything
+  else**. A swallowed `EACCES`/`EIO`/`ENOTDIR` reports a directory it could not read as
+  one it emptied, and the caller's next act is `state: "exported"`: the library saying
+  the recording is final beside every source still on disk. That is the first state
+  `contradictions()` forbids and the only unrecoverable one, because
+  `listInterruptedRetention` skips an `exported` recording and no later launch would
+  look at it again. `retention-treats-an-unreadable-directory-as-an-empty-one` is the
+  mutation.
+- **Two exports of one recording are refused; two recordings sharing one _name_ are
+  not.** `ExportSession.start` throws `ExportRecordingBusyError` when a live job already
+  holds that `RecordingId` — claimed before the first `await` and before `openProject`,
+  released in `#run`'s `finally` on every exit path. It is refused rather than made safe
+  because the alternative is an invariant held across two jobs, a `rename(2)` and a
+  deletion, guarding a case nobody wants. **What it does not reach**: two _different_
+  recordings whose `safeFileName(project.name)` collides (two "Untitled"s) still resolve
+  to the same `<name>.mp4`. Phase 8 accepted that knowingly in `discardExport`'s docblock
+  — _"an earlier good export sharing the name is what that costs"_ — when it cost an old
+  export; with retention it can cost a deleted recording's only file, because the second
+  job's `rename(2)` replaces a verified export and its `discardExport` unlinks the shared
+  path. `ProjectStore`'s destination claim only spans a **writer's** life, so it does not
+  close it either. Recorded rather than fixed: it needs a durable claim on the output
+  name, which is a decision, not a patch.
 
 ## The generators, in one paragraph
 

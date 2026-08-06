@@ -252,6 +252,65 @@ h1.t-d1 {
   max-width: 24ch;
 }
 
+/* ---------- the export sheet ----------
+   §7.5 obligation 2: "the export sheet states plainly that this recording can no
+   longer be edited … Not a footnote, not a toast afterwards." So it takes the same
+   shape the delete confirmation does — the row's controls swapped for the
+   consequence, read in the act of confirming — rather than a modal, and it is the
+   widest thing in the row because the sentence is the point of it. */
+.export-sheet {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-left: var(--line-thin) solid var(--divider);
+  background: var(--accent-wash);
+  align-self: stretch;
+  max-width: 46ch;
+}
+
+.export-warning {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+  color: var(--accent-press);
+}
+
+.export-keep {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+}
+.export-keep-label {
+  font-size: var(--ui-sm);
+  line-height: var(--ui-sm-lh);
+  font-weight: var(--w-bold);
+  color: var(--fg);
+}
+.export-keep-hint {
+  font-size: var(--ui-xs);
+  line-height: var(--ui-xs-lh);
+  color: var(--fg-muted);
+}
+
+.export-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.export-status {
+  font-family: var(--font-num);
+  font-size: var(--num-sm);
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
 .btn-danger {
   color: var(--danger);
 }

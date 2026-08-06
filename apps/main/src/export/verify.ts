@@ -42,18 +42,33 @@ export const DURATION_TOLERANCE_SEC = 0.1;
  */
 export const MAX_VERIFY_SAMPLES = 600;
 
-/** Everything a check can fail on, named so a failure says which one. */
-export type VerificationFailure =
-  | 'missing'
-  | 'empty'
-  | 'undemuxable'
-  | 'not-faststart'
-  | 'no-video-track'
-  | 'no-samples'
-  | 'duration'
-  | 'no-sync-sample'
-  | 'gop-too-long'
-  | 'last-frame';
+/**
+ * Everything a check can fail on, named so a failure says which one.
+ *
+ * A `const` array with the type derived from it, rather than the other way round,
+ * because phase 9's gate — *"fail the export at each of these, and the sources
+ * survive every time"* — has to be **bound to this list rather than to a copy of
+ * it**. `apps/main/test/phase9-retention.test.ts` builds a
+ * `Record<VerificationFailure, …>` of scenarios, so a member added here with no
+ * scenario is a compile error, and it iterates this array at runtime so a scenario
+ * that stops provoking its own failure is a test failure. A retention gate that
+ * covered nine of ten failure modes is exactly the shape of bug that deletes
+ * someone's footage.
+ */
+export const VERIFICATION_FAILURES = [
+  'missing',
+  'empty',
+  'undemuxable',
+  'not-faststart',
+  'no-video-track',
+  'no-samples',
+  'duration',
+  'no-sync-sample',
+  'gop-too-long',
+  'last-frame',
+] as const;
+
+export type VerificationFailure = (typeof VERIFICATION_FAILURES)[number];
 
 export class VerificationError extends Error {
   readonly failure: VerificationFailure;

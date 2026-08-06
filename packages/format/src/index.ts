@@ -163,6 +163,15 @@ export {
   type CapturedGap,
 } from './sync/audio-meter.ts';
 
+// ---- retention -------------------------------------------------------------
+export {
+  RETENTION_COPY,
+  RETENTION_SOURCE_DIRECTORIES,
+  mayDeleteSources,
+  newRetentionRecord,
+  type RetentionVerdict,
+} from './retention.ts';
+
 // ---- validation ------------------------------------------------------------
 export { IssueSink, ValidationError, type ValidationIssue } from './validate/issues.ts';
 export {

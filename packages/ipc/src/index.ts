@@ -1021,6 +1021,29 @@ export interface ExportResult {
   copiedToClipboard: boolean;
   revealed: boolean;
   sourcesKept: boolean;
+  /**
+   * Whether phase 9 actually deleted this recording's raw sources.
+   *
+   * Not the negation of {@link ExportResult.sourcesKept}: the escape hatch is one of
+   * several reasons a verified export leaves the sources alone, and a deletion that
+   * was authorised and then failed part-way is a third state again. §7.5's
+   * consequence — *"this recording can no longer be edited"* — follows from this
+   * field and from nothing else, so a surface that inferred it from `sourcesKept`
+   * would tell the user the recording is final when it is still editable.
+   */
+  sourcesDeleted: boolean;
+  /** Why the sources are still there. Empty exactly when `sourcesDeleted`. */
+  retentionReasons: string[];
+  /**
+   * Set only for the third state: a deletion that was authorised and failed part-way.
+   *
+   * Its presence is what tells the escape hatch — *"the original recording was
+   * kept"* — apart from a bundle that has lost some of its media, which the reasons
+   * alone cannot do: both arrive with `sourcesDeleted: false` and a sentence. A
+   * signal that cannot be inspected is not a signal, and this one is the difference
+   * between reassuring the user and misleading them.
+   */
+  retentionError?: string;
   mode: ExportMode;
 }
 
