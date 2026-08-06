@@ -336,10 +336,10 @@ re-derive them here.
   arithmetic.
 - **§6.5 step 1 is spatial as written, and needs a time criterion; `clusterGapSec` is
   derived, not chosen.** Clustering on the bounding box alone let one cluster span a
-  whole recording — measured on the ten real logs as eight single segments of 20.6–24.9 s
-  in 25 s, with `mergeGapSec`, `minDurationSec` and the `activeRanges` handover to
-  cursor-follow all inert. A click joins the current cluster only if it is under
-  `clusterGapSec` after the **previous** click, and that is
+  whole recording — measured on the ten real logs as a single segment spanning nearly
+  all of eight of them, with `mergeGapSec`, `minDurationSec` and the `activeRanges`
+  handover to cursor-follow all inert. A click joins the current cluster only if it is
+  under `clusterGapSec` after the **previous** click, and that is
   `preRollSec + postRollSec + mergeGapSec` = 2.6 s exactly: the gap at which step 1 and
   step 4 already agree, so a step-1 split below it is undone by step 4 and a join at or
   above it contradicts it. It has to be that sum rather than `postRollSec` alone, because
@@ -359,24 +359,20 @@ re-derive them here.
   the edge, and at a segment `end` they do not: the last keys say identity but the
   spring is still on its way there, so the window drags the difference to identity over
   `blendMs` and turns a 1.2 s post-roll zoom-out into a 250 ms one. Measured on the ten
-  real recordings with the tail removed: the worst pan acceleration falls within 0.25 s
-  of a segment `end` in **seven of ten**, at 124–205 UV/s²; with it, 39–73. Pan speed is
-  1.21–2.17 UV/s either way — the crossfade was corrupting the acceleration.
+  real recordings: with the tail removed the worst pan acceleration lands at a segment
+  `end` on most of them and is several times what the tail leaves, while pan speed is
+  the same either way — the crossfade was corrupting the acceleration, not the speed.
+  The figures are at `auto-zoom.ts`'s module header.
 - **Auto-zoom's own §6.6 figure is over budget, and it is geometry rather than a
-  defect.** 39–73 UV/s² against 1.2 and 1.22–2.17 UV/s against 0.35, on the ten. The
-  legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval that _opens as
-  the zoom tightens_, so a centre edge-snapped for the segment's full `amount` slides
-  `0.5 − 0.5/A` outward while the pre-roll zooms in — 0.30 UV at `A = 2.5` against
-  0.08 UV at `A = 1.2`, in the same 0.6 s. That is why `clusterGapSec` raised the figure
-  from 9–66 and 0.42–2.17: bounded clusters have tighter boxes, so the corpus goes 16 to
-  37 segments with the mean `amount` 1.92 → 2.35 and 31 of 37 pinned at
-  `amountRange[1]`, and nearly every segment now takes the longest version of that
-  slide. A real picture, correctly measured, and the measurement moving with the
-  geometry is the explanation holding rather than failing. Slowing it means changing
-  `preRollSec`, `amountRange` or the edge snap, all §6.5's specified numbers — covered by
-  `data/loom-scope/decision-comfort-ladder.md`. The budget is reported on
-  `AutoZoomResult.budget` and not gated, because §6.6's remedy is a rest box and this
-  generator has none.
+  defect.** The legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval
+  that _opens as the zoom tightens_, so a centre edge-snapped for the segment's full
+  `amount` slides outward while the pre-roll zooms in — and the deeper the segment
+  zooms, the longer that slide. It is reported on `AutoZoomResult.budget` and **not
+  gated**, because §6.6's remedy is a rest box and this generator has none. Slowing it
+  means changing `preRollSec`, `amountRange` or the edge snap, all §6.5's specified
+  numbers — covered by `data/loom-scope/decision-comfort-ladder.md`. The derivation and
+  the measured corpus figures are at `auto-zoom.ts`'s module header; do not re-derive
+  them here.
 - **`arrayClickStream`/`arrayCursorStream` sort with `(a, b) => a.t - b.t`, which is an
   inconsistent comparator once a `t` is `NaN`** — the order is then
   implementation-defined, so a test that pins exact survivor counts on a log containing
