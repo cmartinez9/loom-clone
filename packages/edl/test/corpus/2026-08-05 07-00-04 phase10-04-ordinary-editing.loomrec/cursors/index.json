@@ -1,0 +1,13 @@
+{
+  "schema": "loom.cursors/1",
+  "images": {
+    "1456180c0d9b6d67eb11a39692b6ed01874295ebf0f67ed55521a0656a756c93": {
+      "file": "cursors/1456180c0d9b6d67eb11a39692b6ed01874295ebf0f67ed55521a0656a756c93.png",
+      "hotspot": [
+        50,
+        50
+      ],
+      "shape": "arrow"
+    }
+  }
+}

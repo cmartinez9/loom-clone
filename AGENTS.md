@@ -31,8 +31,8 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model and annotations 27 ways;
-                          #   each must fail a gate
+npm run verify:mutation   # break capture, the timeline model, the generators and
+                          # annotations 40 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -40,6 +40,9 @@ node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, 
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
+npm run record:cursor-corpus                     # re-record phase 10's ten real
+                                                 # recordings (drives the pointer for
+                                                 # ~5 min; --manual to move it yourself)
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 node scripts/smoke-capture.mjs --synthetic       # ...with a canvas and an oscillator instead
@@ -77,10 +80,12 @@ packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls, 
                    canvas.
 packages/edl/      the timeline model (report §3): tracks, channels, keyframes, the
                    two evaluators, `compile`/`resolve`, inverse ops and undo/redo,
-                   and what an annotation span's channels and style MEAN
-                   (`annotations.ts`). Owns the SEMANTICS; `@loom/format` owns the
-                   `EditDocument` types and their schema. `ResolvedState` lives here
-                   and the compositor imports it.
+                   `src/generators/` — report §6: cursor-follow, auto-zoom-on-click,
+                   the §6.6 comfort budget, and §3.5's regenerate and bake — and what
+                   an annotation span's channels and style MEAN (`annotations.ts`).
+                   Owns the SEMANTICS; `@loom/format` owns the `EditDocument` types
+                   and their schema. `ResolvedState` lives here and the compositor
+                   imports it. `test/corpus/` is phase 10's ten real recordings.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
@@ -241,6 +246,93 @@ the `CompiledTimeline`'s **own** state object, overwritten in place; keep one wi
 `cloneResolvedState`. Undo/redo is the inverse-op stack in the editor
 (`EditHistory`), over the same §2.7 op vocabulary that main journals — so an undo is
 journalled, revisioned and crash-safe on exactly the path the edit it reverses took.
+
+## The generators, in one paragraph
+
+Report §6, and `packages/edl/src/generators/` is all of it. **Cursor-follow** is §6.1
+conditioning (shake filter, decimation to 60 Hz, cursor-shape debounce) → §6.2's dead
+zone → keyframes shifted `friction/tension` seconds earlier for §6.4's phase lead →
+§6.3's spring, integrated by `precomputeSpring` at compile time and nowhere else. It
+emits a **`center`-only** zoom track and takes the magnification it is framed for as a
+parameter, because §6.2's rest box is a fraction of the _visible zoomed viewport_ and
+§3.5's stack is read per channel — so anything above it keeps its own `amount`.
+**Auto-zoom-on-click** is §6.5's five steps and emits `amount` + `center` with
+`activeRanges` set to its merged segments, so between clusters the follow underneath
+shows through. Both are ordinary `Track`s; `lifecycle.ts` is §3.5's other half —
+staleness against the `GeneratorSpec` fingerprint, regeneration as `track.remove` +
+`track.add` **at the same index**, and bake as one `track.patch` whose `remove`
+survives `JSON.stringify`. **Clicks are not a stream, they are a `ClickSource`**: a
+discriminated union, so "the tap was dead" and "nobody clicked" cannot arrive as the
+same empty array — the one failure `@loom/sampler`'s `count: number | null` exists to
+prevent, restated at the seam that consumes it.
+
+## §6.6's budget, the ten real recordings, and the one divergence
+
+`npm test` runs `packages/edl/test/phase10-gate.test.ts` over
+`packages/edl/test/corpus/` — **ten real `.loomrec` bundles**, recorded on this
+machine by `npm run record:cursor-corpus`. Everything below
+`CGWarpMouseCursorPosition` is the shipping path (real `loom-input-sampler` at 120 Hz,
+real `InputSampler`, real `createBundle`); the hand is a script by default and a
+person under `--manual`, and `corpus/manifest.json` says which. Two controls make the
+budget mean something: the same ten logs followed with §6.2 and §6.3 **removed** must
+fail it, and the same generator with the rest box set to nothing must leave the target
+still for less of the recording. Measured: 75–94% still with the box, 6–66% without.
+
+**The divergence, raised rather than taken.** §6.6's own remedy — _"widen the rest box
+by 20% … up to three attempts"_ — moves the failing metrics by under 5%, and 8 of the
+10 recordings fail. The cause is structural: §6.2's target sits at a fixed offset from
+the cursor, so **the target's velocity is the cursor's velocity**, and §6.3's spring
+passes it through nearly intact (velocity time constant `1/(ζω₀) = 0.11 s` against the
+`0.35/1.2 = 0.29 s` §6.6's own two limits imply — the budget's speed and acceleration
+numbers cannot both be met by that spring). `COMFORT_LADDER` in `cursor-follow.ts`
+therefore softens two more things on the later rungs: §6.3's spring (ω₀ scaled, ζ
+kept, so §6.4's lead follows automatically) and a **target speed cap that has no §6
+counterpart at all**. Rung 1 is §6.2 and §6.3 exactly and is what a passing recording
+gets — two of the ten. The measurements, the derivation and the "this is a reading"
+note live in `cursor-follow.ts`'s `COMFORT_LADDER` docblock and in
+`dead-zone.ts`'s `maxTargetSpeedUvPerSec`; **if the captain rules the other way, the
+revert is that one constant.**
+
+## Sharp edges — the generators
+
+- **The budget is measured on the _visible_ centre, not the resolved one.**
+  `sourceSampleRect` clamps the sampled rect into the frame, so at `amount = 1` every
+  centre resolves to 0.5 and centre motion there is invisible. A `center`-only
+  cursor-follow track measured on its own is therefore a **fictional** camera —
+  `framingTrack()` is why `measureTrack` is not vacuous. `budget.ts` restates that
+  clamp rather than importing `compositor` (which already depends on `edl`), and
+  `packages/edl/test/budget.test.ts` pins the two against each other at every
+  magnification.
+- **A generated track has to survive `validateEditDocument`, not merely not throw.**
+  The hostile fixtures' bar is the whole postcondition — finite, strictly ordered keys
+  and a document that validates — because a `NaN` keyframe reaches `edit.json` and
+  leaves a recording that stops opening. That is what the §6.1 sanity pass is for, and
+  it is the _only_ place that decides what a usable sample is.
+- **A log whose origin was never subtracted is refused, never rebased.** `t` is
+  `(tUs − t0Us) / 1e6`; with `t0Us = 0` it carries machine uptime (2,678,930 s was
+  measured). `compileChannel` refuses a spring channel past `MAX_SPRING_TABLE_SEC`, so
+  a generator that emitted those keys would produce a track it could not then measure.
+  `MAX_SOURCE_TIME_SEC` drops them in the sanity pass instead; rebasing would silently
+  move every generated effect relative to the media.
+- **The cursor-follow track's `blendMs` is 0 and auto-zoom's is 250, deliberately.**
+  §3.5's crossfade is for a _handover_, and the bottom track of the stack spanning the
+  whole recording has only the first and last instants as edges. A crossfade there is
+  the camera sliding in from the frame centre over 250 ms — 0.25 UV in a quarter
+  second is **1.0 UV/s** against §6.6's 0.35, on every recording, for no reason.
+- **§6.5's `clusterBox` is a fraction of the frame.** Read against the _viewport_ as
+  §6.5's prose says, the constraint is unsatisfiable for any width-dominant cluster
+  (`targetFill ≤ clusterBox[0]`, i.e. `0.6 ≤ 0.5`). The constants settle it:
+  `clusterBox[0] = targetFill / amountRange[0]` exactly. `auto-zoom.ts` has the
+  arithmetic.
+- **§6.5's "four keyframes per segment" is three when the hold has no length.** A
+  cluster of one click has `holdStart === holdEnd`, and §2.6 forbids a repeated `t`.
+- **§6.7 is not here.** The cursor _sprite_'s own stiffer spring belongs to whatever
+  composites the sprite; `Track` already carries `smoothing` and `clickSpring` for it.
+- **The corpus driver warps, it does not post.** Measured on this machine with
+  `AXIsProcessTrusted() = false`: `CGWarpMouseCursorPosition` moves the pointer and
+  `CGEventPost(kCGEventMouseMoved)` does not — synthesizing an _event_ is gated by
+  Accessibility, moving the _pointer_ is not. That is why a corpus can be recorded on a
+  machine with no grant, and why clicks cannot be.
 
 ## Annotations, in one paragraph
 
@@ -580,14 +672,15 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward to phase 2: three closed, four still open, one phase 2 added
+## Carried forward: three closed, four still open, one from phase 2, one from phase 10
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
 bundle; four are not, and **phase 2's harness does not cover them** — its only audio
 check is `microphone-revocation`, which is about a grant being withdrawn rather than
-about any of these, and it has no camera checks at all. Phase 2 then left one of its
-own, recorded below as item 8.
+about any of these, and it has no camera checks at all. Phase 2 then left one
+of its own (item 8) and phase 10 one of its own (item 9); both are blocked on a grant
+this machine does not have, not on a design question.
 
 **Closed** (see the gate status below for the figures):
 
@@ -685,6 +778,25 @@ revocation), `apps/renderer/test/capture-session.test.ts` (the renderer names no
 cause), `test/hud-notice.test.ts` (the notice measured in pixels, with the same
 no-fit control §7.4's banner has) and two mutations in `npm run verify:mutation`.
 What none of them can establish is on hardware — see carried-forward item 8.
+
+**And one phase 10 tried to close and could not:**
+
+9. **Post-grant click rate and latency are still unmeasured.** The captain's
+   accessibility decision records them as unverified and says _"Validate during the
+   build"_; phase 2 confirmed the tap was live from a signed bundle but nobody clicked
+   during its window. Phase 10 built the instrument —
+   `scripts/record-cursor-corpus.mjs` posts clicks with `CGEventPost` stamped from
+   `CLOCK_UPTIME_RAW` and `loom-input-sampler.m` stamps every line it emits from the
+   same clock, so the difference is a latency rather than two numbers from two clocks,
+   and the result lands in `corpus/manifest.json` under `clickCapture` — but **this
+   machine has no Accessibility grant** (`./dist/native/loom-input-sampler probe`
+   reports `accessibility-denied`, and TCC cannot be granted without GUI interaction).
+   Both halves need it: an ungranted process cannot _post_ a synthetic click either
+   (measured — see the corpus-driver note above). The manifest therefore records
+   `measured: false` with the reason, `observedDowns: null` and `latencyMs: null` —
+   never a zero, which is the whole point. **To close it: grant Accessibility to
+   whatever runs the recorder and run `npm run record:cursor-corpus`; the reading is
+   taken automatically and no code changes.**
 
 ## Permissions and first run, in one paragraph
 

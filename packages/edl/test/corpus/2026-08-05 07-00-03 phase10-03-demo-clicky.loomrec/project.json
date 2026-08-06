@@ -1,0 +1,11 @@
+{
+  "schema": "loom.project/1",
+  "id": "01KZA68P4BD7EDX9CZTZ85MG2H",
+  "name": "phase10-03-demo-clicky",
+  "createdAt": "2026-08-05T12:00:03.000Z",
+  "modifiedAt": "2026-08-05T12:00:03.000Z",
+  "state": "recording",
+  "editRevision": 0,
+  "sizeBytes": 0,
+  "exports": []
+}

@@ -1,0 +1,16 @@
+{
+  "schema": "loom.edit/1",
+  "revision": 0,
+  "output": {
+    "size": [
+      1920,
+      1080
+    ],
+    "fps": 30,
+    "background": {
+      "kind": "none"
+    }
+  },
+  "clips": [],
+  "tracks": []
+}

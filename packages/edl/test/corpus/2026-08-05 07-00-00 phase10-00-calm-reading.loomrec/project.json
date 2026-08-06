@@ -1,0 +1,11 @@
+{
+  "schema": "loom.project/1",
+  "id": "01KZA66AR5A5AX4PX2GZTB54HW",
+  "name": "phase10-00-calm-reading",
+  "createdAt": "2026-08-05T12:00:00.000Z",
+  "modifiedAt": "2026-08-05T12:00:00.000Z",
+  "state": "recording",
+  "editRevision": 0,
+  "sizeBytes": 0,
+  "exports": []
+}

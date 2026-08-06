@@ -1,0 +1,259 @@
+{
+  "generatedAt": "2026-08-06T00:09:13.420Z",
+  "tool": "scripts/record-cursor-corpus.mjs",
+  "hand": "scripted",
+  "note": "Cursor moved by scripts/cursor-driver.m posting real CGEvents. Everything below CGEventPost is the shipping sampler path: the window server moved the real pointer, loom-input-sampler polled it at 120 Hz through the real API, and InputSampler wrote the log.",
+  "os": "darwin",
+  "recordings": [
+    {
+      "name": "phase10-00-calm-reading",
+      "bundle": "2026-08-05 07-00-00 phase10-00-calm-reading.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "calm-reading",
+        "pace": 0.45,
+        "clickRate": 0.2
+      },
+      "seconds": 25,
+      "durationSec": 25.235,
+      "cursorSamples": 3028,
+      "samplesPerSec": 119.99,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 5,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-01-calm-forms",
+      "bundle": "2026-08-05 07-00-01 phase10-01-calm-forms.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "calm-forms",
+        "pace": 0.55,
+        "clickRate": 0.8
+      },
+      "seconds": 25,
+      "durationSec": 25.009,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120.03,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 22,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-02-demo-walkthrough",
+      "bundle": "2026-08-05 07-00-02 phase10-02-demo-walkthrough.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "demo-walkthrough",
+        "pace": 0.75,
+        "clickRate": 0.5
+      },
+      "seconds": 25,
+      "durationSec": 25.017,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 23,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-03-demo-clicky",
+      "bundle": "2026-08-05 07-00-03 phase10-03-demo-clicky.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "demo-clicky",
+        "pace": 0.8,
+        "clickRate": 0.9
+      },
+      "seconds": 25,
+      "durationSec": 25.075,
+      "cursorSamples": 3010,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 27,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-04-ordinary-editing",
+      "bundle": "2026-08-05 07-00-04 phase10-04-ordinary-editing.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "ordinary-editing",
+        "pace": 1,
+        "clickRate": 0.45
+      },
+      "seconds": 25,
+      "durationSec": 25.017,
+      "cursorSamples": 3003,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 13,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-05-ordinary-browsing",
+      "bundle": "2026-08-05 07-00-05 phase10-05-ordinary-browsing.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "ordinary-browsing",
+        "pace": 1,
+        "clickRate": 0.7
+      },
+      "seconds": 25,
+      "durationSec": 25.009,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 16,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-06-brisk-navigation",
+      "bundle": "2026-08-05 07-00-06 phase10-06-brisk-navigation.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "brisk-navigation",
+        "pace": 1.3,
+        "clickRate": 0.35
+      },
+      "seconds": 25,
+      "durationSec": 25.017,
+      "cursorSamples": 3003,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 9,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-07-brisk-clicky",
+      "bundle": "2026-08-05 07-00-07 phase10-07-brisk-clicky.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "brisk-clicky",
+        "pace": 1.4,
+        "clickRate": 0.85
+      },
+      "seconds": 25,
+      "durationSec": 25.009,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 19,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-08-restless",
+      "bundle": "2026-08-05 07-00-08 phase10-08-restless.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "restless",
+        "pace": 1.7,
+        "clickRate": 0.25
+      },
+      "seconds": 25,
+      "durationSec": 25.009,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120.03,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 12,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    },
+    {
+      "name": "phase10-09-hurried",
+      "bundle": "2026-08-05 07-00-09 phase10-09-hurried.loomrec",
+      "hand": "scripted",
+      "profile": {
+        "name": "hurried",
+        "pace": 2,
+        "clickRate": 0.6
+      },
+      "seconds": 25,
+      "durationSec": 25.008,
+      "cursorSamples": 3002,
+      "samplesPerSec": 120.04,
+      "droppedLines": 0,
+      "clickCapture": {
+        "measured": false,
+        "reason": "accessibility-denied",
+        "axTrusted": false,
+        "tapEnabled": false,
+        "postedDowns": 20,
+        "observedDowns": null,
+        "deliveredFraction": null,
+        "latencyMs": null
+      }
+    }
+  ]
+}

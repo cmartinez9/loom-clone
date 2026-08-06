@@ -6,3 +6,8 @@ packages/design/fonts/
 packages/design/css/tokens.css
 packages/design/css/type.css
 package-lock.json
+
+# The phase-10 corpus: ten real recordings, written by the sampler and by
+# `createBundle`. Reformatting a recorded artifact would make it a different file
+# from the one the gate measured (scripts/record-cursor-corpus.mjs).
+packages/edl/test/corpus/

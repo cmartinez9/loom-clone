@@ -1,7 +1,7 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
  * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
- * model and phase 11's golden-frame gate over annotations.
+ * model, phase 10's generators and phase 11's golden-frame gate over annotations.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -48,6 +48,13 @@ const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
 const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
 const EDL_HISTORY = 'packages/edl/test/history.test.ts';
 const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
+/** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
+const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
+const EDL_CONDITIONING = 'packages/edl/test/conditioning.test.ts';
+const EDL_DEAD_ZONE = 'packages/edl/test/dead-zone.test.ts';
+const EDL_AUTO_ZOOM = 'packages/edl/test/auto-zoom.test.ts';
+const EDL_STACKING = 'packages/edl/test/generator-stacking.test.ts';
+const EDL_BUDGET = 'packages/edl/test/budget.test.ts';
 /** Phase 11's gate: the golden-frame test, extended to annotations. */
 const PHASE11 = 'test/phase11-golden.test.ts';
 const EDL_ANNOTATIONS = 'packages/edl/test/annotations.test.ts';
@@ -315,6 +322,152 @@ const MUTATIONS = [
     replace: '      removeTrackKeys(fields, undefined, op);',
     mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
   },
+  // ---- phase 10: the generators ------------------------------------------
+  {
+    name: 'dead-zone-removed',
+    breaks:
+      '§6.2, the anti-seasickness mechanism itself. A rest box of zero is the "pure ' +
+      'spring-to-cursor" §6.2 opens by rejecting: the frame is no longer still by ' +
+      'default, and every hover becomes a camera move.',
+    file: 'packages/edl/src/generators/dead-zone.ts',
+    find: 'export const DEFAULT_REST_BOX: readonly [number, number] = [0.35, 0.45];',
+    replace: 'export const DEFAULT_REST_BOX: readonly [number, number] = [0, 0];',
+    mustFail: [PHASE10, EDL_DEAD_ZONE],
+  },
+  {
+    name: 'rest-box-measured-against-the-frame',
+    breaks:
+      'the rest box being a fraction of the *visible zoomed viewport*. Measured ' +
+      'against the whole frame it is twice as large at 2x and four times at 4x, so ' +
+      'the camera stops following at exactly the magnification where following is ' +
+      'the point.',
+    file: 'packages/edl/src/generators/dead-zone.ts',
+    find: '    const halfBoxX = boxW * half;',
+    replace: '    const halfBoxX = boxW * 0.5;',
+    mustFail: [EDL_DEAD_ZONE],
+  },
+  {
+    name: 'frame-safe-clamp-removed',
+    breaks:
+      'the zoomed viewport staying inside the frame. Without the clamp a cursor in ' +
+      'a corner frames background, and §6.6 is then measured on a centre the ' +
+      'compositor would clamp away — a budget about a picture nobody sees.',
+    file: 'packages/edl/src/generators/dead-zone.ts',
+    find: '  return value < lo ? lo : value > hi ? hi : value;',
+    replace: '  return value;',
+    mustFail: [EDL_DEAD_ZONE],
+  },
+  {
+    name: 'phase-lead-not-applied',
+    breaks:
+      '§6.4. The spring trails a moving target by friction/tension seconds — 0.200 s ' +
+      "at §6.3's parameters, measured at 0.196 s — and reading the target that far " +
+      'ahead is what cancels it. Without the lead the frame visibly lags the pointer.',
+    file: 'packages/edl/src/generators/cursor-follow.ts',
+    find: '  return Math.max(0, friction / tension);',
+    replace: '  return 0;',
+    mustFail: [EDL_DEAD_ZONE],
+  },
+  {
+    name: 'seasickness-budget-always-passes',
+    breaks:
+      '§6.6 being a check at all. A verdict that is always `pass` means the retry ' +
+      'ladder never runs and the phase-10 control — a camera glued to the cursor — is ' +
+      'reported as comfortable.',
+    file: 'packages/edl/src/generators/budget.ts',
+    find: '    pass: failures.length === 0,',
+    replace: '    pass: true,',
+    mustFail: [PHASE10],
+  },
+  {
+    name: 'pan-speed-never-measured',
+    breaks:
+      "§6.6's first assertion. A speed that is always zero cannot exceed anything, so " +
+      'the budget stops seeing the one failure mode the dead zone and the spring exist ' +
+      'to prevent.',
+    file: 'packages/edl/src/generators/budget.ts',
+    find: '    const speed = step / dt;',
+    replace: '    const speed = 0;',
+    mustFail: [PHASE10, EDL_BUDGET],
+  },
+  {
+    name: 'budget-measured-on-the-raw-centre',
+    breaks:
+      'the budget being taken on what the viewer sees. `sourceSampleRect` clamps ' +
+      'the sampled rect into the frame, so a raw centre at amount 1 reports a pan ' +
+      'that does not exist — and a `center`-only track measured alone would report ' +
+      'a whole camera that is not there.',
+    file: 'packages/edl/src/generators/budget.ts',
+    find: '  return centre < lo ? lo : centre > hi ? hi : centre;',
+    replace: '  return centre;',
+    mustFail: [EDL_BUDGET],
+  },
+  {
+    name: 'shake-filter-passes-everything',
+    breaks:
+      "§6.1's shake filter. A direction reversal with two small legs inside 100 ms " +
+      'is a hand resting on a mouse, and keeping it puts that tremor into the ' +
+      'follow target.',
+    file: 'packages/edl/src/generators/conditioning.ts',
+    find: '    const reversal = ax * bx + ay * by < 0;',
+    replace: '    const reversal = false;',
+    mustFail: [EDL_CONDITIONING],
+  },
+  {
+    name: 'nan-samples-reach-the-keyframes',
+    breaks:
+      'the §6.1 sanity pass. A non-finite sample propagates into a spring table, ' +
+      'then into a keyframe, then into `edit.json`, where `validateEditDocument` ' +
+      'refuses it — a recording that stops opening because of one bad log line.',
+    file: 'packages/edl/src/generators/conditioning.ts',
+    find: '    if (!Number.isFinite(t) || !Number.isFinite(x) || !Number.isFinite(y)) {',
+    replace: '    if (false) {',
+    mustFail: [PHASE10, EDL_CONDITIONING],
+  },
+  {
+    name: 'auto-zoom-reads-a-dead-tap-as-no-clicks',
+    breaks:
+      'the one thing phase 5 exists to make impossible. Generating an empty track ' +
+      'instead of refusing turns "Accessibility was never granted" into "nobody ' +
+      'clicked", which is silent on every fresh install and unexplainable to a user.',
+    file: 'packages/edl/src/generators/auto-zoom.ts',
+    find: "  if (input.clicks.kind === 'unavailable') {",
+    replace: "  if (false && input.clicks.kind === 'unavailable') {",
+    mustFail: [EDL_AUTO_ZOOM],
+  },
+  {
+    name: 'auto-zoom-edge-snap-removed',
+    breaks:
+      '§6.5 step 3. A click near a corner then frames background, which is exactly ' +
+      'the sentence the step is written to prevent.',
+    file: 'packages/edl/src/generators/auto-zoom.ts',
+    find: '  if (value <= lo + snapWithin) return lo;',
+    replace: '  if (false) return lo;',
+    mustFail: [EDL_AUTO_ZOOM],
+  },
+  {
+    name: 'regeneration-appends-instead-of-replacing-in-place',
+    breaks:
+      'track order surviving a regeneration. §3.5 stacks in array order, so a ' +
+      "regenerated cursor-follow track that lands on top of the user's manual zoom " +
+      'silently takes over from it — a valid document and a wrong picture.',
+    file: 'packages/edl/src/generators/lifecycle.ts',
+    find: "    { op: 'track.add', track: replacement, at: options.at ?? existing },",
+    replace: "    { op: 'track.add', track: replacement },",
+    mustFail: [EDL_STACKING],
+  },
+  {
+    name: 'bake-leaves-the-generator-attached',
+    breaks:
+      "§3.5's bake being the escape hatch. A track that keeps its `generator` block " +
+      'is still offered a regeneration, and the next one overwrites the edits the ' +
+      'bake was performed to protect.',
+    file: 'packages/edl/src/generators/lifecycle.ts',
+    find: "      patch: { origin: 'manual', generatedFrom: spec, remove: ['generator'] },",
+    replace: "      patch: { origin: 'manual', generatedFrom: spec },",
+    mustFail: [EDL_STACKING],
+  },
+
   // ---- phase 11: annotations, and the golden-frame gate over them -----------
   //
   // The acceptance criterion is *"ship a control proving the extension would catch a
