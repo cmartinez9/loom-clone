@@ -199,9 +199,10 @@ unplugging it fires `ended`, which closes `webcam.000.mp4` with `endedEarly` and
 back opens `webcam.001.mp4` with a `startTimeSec` of its own (§7.4). The hole
 between them lives in `recording.json` and is never concatenated out of the media —
 §5.4 mechanism 5, applied to pictures. `apps/renderer/src/capture/webcam.ts` owns
-that loop and nothing in it can fail the recording: §7.3's rule for the microphone
-is §7.4's rule for the camera, and `session.ts` draws the same split — the screen is
-`REFERENCE_TRACK` and only its failures reach `failActive`.
+that loop and nothing in it can fail the recording: §7.3's rule for a microphone that
+_went away_ is §7.4's rule for the camera — a withdrawn grant is the one case that is
+not, and § A revoked Microphone is where it lives — and `session.ts` draws the same
+split: the screen is `REFERENCE_TRACK` and only its failures reach `failActive`.
 
 A part that closes **while the recording continues** is the `capture.partEnded`
 message; main finalizes that file and its sidecar immediately, so a later crash
@@ -264,7 +265,8 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
   script caught.
 - **An audio failure never fails a recording.** §7.3: a microphone that is refused,
   vanishes or cannot be encoded costs its own track and nothing else. The screen is
-  what the user pressed record for.
+  what the user pressed record for. The one exception is a grant the user _withdrew_
+  mid-recording, which stops it — see § A revoked Microphone.
 - **Bracket notation is deliberate.** `tsconfig.json` sets
   `noPropertyAccessFromIndexSignature`; `doc['schema']` is how this codebase says "this
   key may not be there".
@@ -500,9 +502,10 @@ journalled, revisioned and crash-safe on exactly the path the edit it reverses t
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
-bundle; four are not, and **phase 2's harness does not cover them** — it has no audio
-and no camera checks at all, so nothing here has looked at them. Phase 2 then left one
-of its own, recorded below as item 8.
+bundle; four are not, and **phase 2's harness does not cover them** — its only audio
+check is `microphone-revocation`, which is about a grant being withdrawn rather than
+about any of these, and it has no camera checks at all. Phase 2 then left one of its
+own, recorded below as item 8.
 
 **Closed** (see the gate status below for the figures):
 
