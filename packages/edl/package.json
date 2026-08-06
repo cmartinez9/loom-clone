@@ -12,5 +12,8 @@
   },
   "dependencies": {
     "@loom/format": "0.1.0"
+  },
+  "devDependencies": {
+    "@loom/compositor": "0.1.0"
   }
 }

@@ -21,6 +21,8 @@
  * - {@link compile} once per edit, {@link resolve} once per frame.
  * - {@link manualZoomTrack} builds decision 3's first consumer.
  * - {@link EditHistory} is §2.7's inverse-op stack.
+ * - {@link generateCursorFollow} and {@link generateAutoZoom} are §6, and
+ *   `src/generators/index.ts` is the three things a caller of them has to get right.
  */
 
 // ---- the model, compiled and resolved ---------------------------------------
@@ -131,6 +133,9 @@ export {
   type HistoryEntry,
   type HistoryResult,
 } from './history.ts';
+
+// ---- the generators (§6) -----------------------------------------------------
+export * from './generators/index.ts';
 
 // ---- track factories ---------------------------------------------------------
 export {

@@ -1,0 +1,53 @@
+{
+  "schema": "loom.recording/1",
+  "clock": {
+    "kind": "videoframe-timestamp-us",
+    "t0Us": 2729450168740
+  },
+  "display": {
+    "id": 1,
+    "name": "driven corpus display",
+    "logicalSize": [
+      1728,
+      1117
+    ],
+    "pixelSize": [
+      3456,
+      2234
+    ],
+    "scaleFactor": 2,
+    "colorSpace": "display-p3"
+  },
+  "tracks": {},
+  "events": {
+    "cursor": {
+      "file": "events/cursor.ndjson",
+      "hz": 120,
+      "sampleCount": 2997
+    },
+    "clicks": {
+      "file": "events/clicks.ndjson",
+      "available": true,
+      "source": "cgeventtap"
+    },
+    "cursorImages": "cursors/index.json"
+  },
+  "capture": {
+    "app": "loom-clone corpus recorder",
+    "os": "darwin 25.5.0",
+    "permissions": {
+      "screen": "not-determined",
+      "camera": "not-determined",
+      "microphone": "not-determined",
+      "accessibility": true
+    },
+    "requestedFps": 0,
+    "resolutionClamp": "none",
+    "droppedFrames": {}
+  },
+  "integrity": {
+    "finalizedAt": "2026-08-06T00:41:47.130Z",
+    "recoveredFromCrash": false,
+    "truncatedToSec": null
+  }
+}

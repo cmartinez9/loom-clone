@@ -21,6 +21,11 @@ compiling against it.
 | `~/firstmate/data/loom-design/`                | The approved "Pressroom" visual language, plus working mockups of every surface.                                                                     |
 | `~/firstmate/data/loom-scope/decision-*.md`    | Individual captain decisions with their reasoning.                                                                                                   |
 
+The architecture report carries a **Correction, 2026-08-05** at its end: §6 is internally
+inconsistent (§6.2/§6.3 cannot satisfy §6.6), and where §6 conflicts with that correction
+the correction governs. Read it before implementing anything against §6.2, §6.3, §6.5 or
+§6.6; the §6 text itself is deliberately preserved as designed.
+
 Section references in source comments (`§2.7`, `§7.1`) point at the architecture report.
 
 ## Commands
@@ -31,8 +36,8 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model and annotations 27 ways;
-                          #   each must fail a gate
+npm run verify:mutation   # break capture, the timeline model, the generators and
+                          # annotations 43 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -40,6 +45,9 @@ node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, 
 node scripts/make-sync-fixture.mjs               # regenerate the flash palette (needs ffmpeg)
 npm run package     # electron-builder, macOS only
 node scripts/seed-fixtures.mjs <root>            # example recordings to look at
+npm run record:cursor-corpus                     # re-record phase 10's ten real
+                                                 # recordings (drives the pointer for
+                                                 # ~5 min; --manual to move it yourself)
 node scripts/make-capture-fixture.mjs            # regenerate the encoded-frame fixture (needs ffmpeg)
 npm run build && node scripts/smoke-capture.mjs  # record the real screen once, end to end
 node scripts/smoke-capture.mjs --synthetic       # ...with a canvas and an oscillator instead
@@ -77,10 +85,12 @@ packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls, 
                    canvas.
 packages/edl/      the timeline model (report §3): tracks, channels, keyframes, the
                    two evaluators, `compile`/`resolve`, inverse ops and undo/redo,
-                   and what an annotation span's channels and style MEAN
-                   (`annotations.ts`). Owns the SEMANTICS; `@loom/format` owns the
-                   `EditDocument` types and their schema. `ResolvedState` lives here
-                   and the compositor imports it.
+                   `src/generators/` — report §6: cursor-follow, auto-zoom-on-click,
+                   the §6.6 comfort budget, and §3.5's regenerate and bake — and what
+                   an annotation span's channels and style MEAN (`annotations.ts`).
+                   Owns the SEMANTICS; `@loom/format` owns the `EditDocument` types
+                   and their schema. `ResolvedState` lives here and the compositor
+                   imports it. `test/corpus/` is phase 10's ten real recordings.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
@@ -241,6 +251,143 @@ the `CompiledTimeline`'s **own** state object, overwritten in place; keep one wi
 `cloneResolvedState`. Undo/redo is the inverse-op stack in the editor
 (`EditHistory`), over the same §2.7 op vocabulary that main journals — so an undo is
 journalled, revisioned and crash-safe on exactly the path the edit it reverses took.
+
+## The generators, in one paragraph
+
+Report §6, and `packages/edl/src/generators/` is all of it. **Cursor-follow** is §6.1
+conditioning (shake filter, decimation to 60 Hz, cursor-shape debounce) → §6.2's dead
+zone → keyframes shifted `friction/tension` seconds earlier for §6.4's phase lead →
+§6.3's spring, integrated by `precomputeSpring` at compile time and nowhere else. It
+emits a **`center`-only** zoom track and takes the magnification it is framed for as a
+parameter, because §6.2's rest box is a fraction of the _visible zoomed viewport_ and
+§3.5's stack is read per channel — so anything above it keeps its own `amount`.
+**Auto-zoom-on-click** is §6.5's five steps and emits `amount` + `center` with
+`activeRanges` set to its merged segments, so between clusters the follow underneath
+shows through. Both are ordinary `Track`s; `lifecycle.ts` is §3.5's other half —
+staleness against the `GeneratorSpec` fingerprint, regeneration as `track.remove` +
+`track.add` **at the same index**, and bake as one `track.patch` whose `remove`
+survives `JSON.stringify`. **Clicks are not a stream, they are a `ClickSource`**: a
+discriminated union, so "the tap was dead" and "nobody clicked" cannot arrive as the
+same empty array — the one failure `@loom/sampler`'s `count: number | null` exists to
+prevent, restated at the seam that consumes it.
+
+## §6.6's budget, the ten real recordings, and the one divergence
+
+`npm test` runs `packages/edl/test/phase10-gate.test.ts` over
+`packages/edl/test/corpus/` — **ten real `.loomrec` bundles**, recorded on this
+machine by `npm run record:cursor-corpus`. Everything below
+`CGWarpMouseCursorPosition` is the shipping path (real `loom-input-sampler` at 120 Hz,
+real `InputSampler`, real `createBundle`); the hand is a script by default and a
+person under `--manual`, and `corpus/manifest.json` says which. Two controls make the
+budget mean something: the same ten logs followed with §6.2 and §6.3 **removed** must
+fail it, and the same generator with the rest box set to nothing must leave the target
+still for less of the recording. Measured: 78–89% still with the box, 17–54% without.
+The corpus was recorded with Accessibility granted, so its `clicks.ndjson` are real and
+§6.5 is exercised against real `CGEventTap` output on all ten — the gate reads
+`manifest.json`'s `clickCapture` and **fails loudly** if a future corpus is recorded
+without the grant, rather than quietly becoming "auto-zoom declines politely ten
+times".
+
+**The comfort ladder is a settled divergence, not an open one.**
+`data/loom-scope/decision-comfort-ladder.md` records the captain's decision and the
+contradiction in §6 that forced it; the architecture report carries a matching
+**Correction, 2026-08-05** which _governs where §6 conflicts with it_. Read both before
+touching §6.2, §6.3, §6.5 or §6.6 — the §6 text is preserved as designed, so it still
+reads as though the ladder were unnecessary.
+
+What that settles, in one line each: `COMFORT_LADDER` in `cursor-follow.ts` tries
+**§6.2/§6.3 exactly as rung 1** and only then softens the spring (ω₀ scaled, ζ kept, so
+§6.4's lead follows) and caps the follow target's speed at 0.30 / 0.25 UV/s — a cap with
+**no §6 counterpart**, and the accepted divergence. §6.5's `preRollSec`, `amountRange`
+and `edgeSnap` are implicated by the same geometry and covered by the same acceptance.
+The rung values and what each was measured to buy are at `COMFORT_LADDER` itself; do not
+re-derive them here.
+
+## Sharp edges — the generators
+
+- **The budget is measured on the _visible_ centre, not the resolved one.**
+  `sourceSampleRect` clamps the sampled rect into the frame, so at `amount = 1` every
+  centre resolves to 0.5 and centre motion there is invisible. A `center`-only
+  cursor-follow track measured on its own is therefore a **fictional** camera —
+  `framingTrack()` is why `measureTrack` is not vacuous. `budget.ts` restates that
+  clamp rather than importing `compositor` (which already depends on `edl`), and
+  `packages/edl/test/budget.test.ts` pins the two against each other at every
+  magnification.
+- **A generated track has to survive `validateEditDocument`, not merely not throw.**
+  The hostile fixtures' bar is the whole postcondition — finite, strictly ordered keys
+  and a document that validates — because a `NaN` keyframe reaches `edit.json` and
+  leaves a recording that stops opening. That is what the §6.1 sanity pass is for, and
+  it is the _only_ place that decides what a usable sample is.
+- **A log whose origin was never subtracted is refused, never rebased.** `t` is
+  `(tUs − t0Us) / 1e6`; with `t0Us = 0` it carries machine uptime (2,678,930 s was
+  measured). `compileChannel` refuses a spring channel past `MAX_SPRING_TABLE_SEC`, so
+  a generator that emitted those keys would produce a track it could not then measure.
+  `MAX_SOURCE_TIME_SEC` drops them in the sanity pass instead; rebasing would silently
+  move every generated effect relative to the media.
+- **The cursor-follow track's `blendMs` is 0 and auto-zoom's is 250, deliberately.**
+  §3.5's crossfade is for a _handover_, and the bottom track of the stack spanning the
+  whole recording has only the first and last instants as edges. A crossfade there is
+  the camera sliding in from the frame centre over 250 ms — 0.25 UV in a quarter
+  second is **1.0 UV/s** against §6.6's 0.35, on every recording, for no reason.
+- **§6.5's `clusterBox` is a fraction of the frame.** Read against the _viewport_ as
+  §6.5's prose says, the constraint is unsatisfiable for any width-dominant cluster
+  (`targetFill ≤ clusterBox[0]`, i.e. `0.6 ≤ 0.5`). The constants settle it:
+  `clusterBox[0] = targetFill / amountRange[0]` exactly. `auto-zoom.ts` has the
+  arithmetic.
+- **§6.5 step 1 is spatial as written, and needs a time criterion; `clusterGapSec` is
+  derived, not chosen.** Clustering on the bounding box alone let one cluster span a
+  whole recording — measured on the ten real logs as a single segment spanning nearly
+  all of eight of them, with `mergeGapSec`, `minDurationSec` and the `activeRanges`
+  handover to cursor-follow all inert. A click joins the current cluster only if it is
+  under `clusterGapSec` after the **previous** click, and that is
+  `preRollSec + postRollSec + mergeGapSec` = 2.6 s exactly: the gap at which step 1 and
+  step 4 already agree, so a step-1 split below it is undone by step 4 and a join at or
+  above it contradicts it. It has to be that sum rather than `postRollSec` alone, because
+  a step-1 join is irreversible and re-derives `amount` from the joint bbox where step 4's
+  merge only takes `max(amount)`. `auto-zoom.ts`'s header has the derivation, the
+  argument that §6.5's own three parameters presuppose it, and the corpus numbers;
+  `packages/edl/test/phase10-gate.test.ts` asserts the segment count the constant
+  implies, on all ten.
+- **`minDurationSec: 1.0` cannot fire, and is left at §6.5's value anyway.** The shortest
+  segment §6.5 can produce is one click's `preRollSec + postRollSec` = 1.8 s, or 1.2 s
+  where the pre-roll clamps at `t = 0`. Step 4's drop is dominated by `postRollSec` and is
+  dead under §6.5's own numbers — a finding to record, not a number to tune.
+- **§6.5's "four keyframes per segment" is three when the hold has no length.** A
+  cluster of one click has `holdStart === holdEnd`, and §2.6 forbids a repeated `t`.
+- **An auto-zoom segment's `activeRanges` runs `4/(ζω₀)` past its last keyframe.**
+  §3.5's crossfade is only the no-op it is meant to be where the two sides _agree_ at
+  the edge, and at a segment `end` they do not: the last keys say identity but the
+  spring is still on its way there, so the window drags the difference to identity over
+  `blendMs` and turns a 1.2 s post-roll zoom-out into a 250 ms one. Measured on the ten
+  real recordings: with the tail removed the worst pan acceleration lands at a segment
+  `end` on most of them and is several times what the tail leaves, while pan speed is
+  the same either way — the crossfade was corrupting the acceleration, not the speed.
+  The figures are at `auto-zoom.ts`'s module header.
+- **Auto-zoom's own §6.6 figure is over budget, and it is geometry rather than a
+  defect.** The legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval
+  that _opens as the zoom tightens_, so a centre edge-snapped for the segment's full
+  `amount` slides outward while the pre-roll zooms in — and the deeper the segment
+  zooms, the longer that slide. It is reported on `AutoZoomResult.budget` and **not
+  gated**, because §6.6's remedy is a rest box and this generator has none. Slowing it
+  means changing `preRollSec`, `amountRange` or the edge snap, all §6.5's specified
+  numbers — covered by `data/loom-scope/decision-comfort-ladder.md`. The derivation and
+  the measured corpus figures are at `auto-zoom.ts`'s module header; do not re-derive
+  them here.
+- **`arrayClickStream`/`arrayCursorStream` sort with `(a, b) => a.t - b.t`, which is an
+  inconsistent comparator once a `t` is `NaN`** — the order is then
+  implementation-defined, so a test that pins exact survivor counts on a log containing
+  one is pinning V8's current sort. The generators are unaffected: both sanity passes
+  re-filter and refuse anything non-finite or not strictly later. Left as it is on
+  purpose — these are phase 7's shared stream contracts and phase 8 and phase 11 consume
+  them too, so tightening the comparator is a later phase's call, not phase 10's.
+  `packages/edl/test/auto-zoom.test.ts` states the order-independent invariant instead.
+- **§6.7 is not here.** The cursor _sprite_'s own stiffer spring belongs to whatever
+  composites the sprite; `Track` already carries `smoothing` and `clickSpring` for it.
+- **The corpus driver warps, it does not post.** Measured on this machine with
+  `AXIsProcessTrusted() = false`: `CGWarpMouseCursorPosition` moves the pointer and
+  `CGEventPost(kCGEventMouseMoved)` does not — synthesizing an _event_ is gated by
+  Accessibility, moving the _pointer_ is not. That is why a corpus can be recorded on a
+  machine with no grant, and why clicks cannot be.
 
 ## Annotations, in one paragraph
 
@@ -580,14 +727,15 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward to phase 2: three closed, four still open, one phase 2 added
+## Carried forward: four closed, four still open, one from phase 2 still open
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
 bundle; four are not, and **phase 2's harness does not cover them** — its only audio
 check is `microphone-revocation`, which is about a grant being withdrawn rather than
 about any of these, and it has no camera checks at all. Phase 2 then left one of its
-own, recorded below as item 8.
+own (item 8, still open) and phase 10 one of its own (item 9, now closed on real
+measurements — see the click-capture section below).
 
 **Closed** (see the gate status below for the figures):
 
@@ -686,6 +834,62 @@ cause), `test/hud-notice.test.ts` (the notice measured in pixels, with the same
 no-fit control §7.4's banner has) and two mutations in `npm run verify:mutation`.
 What none of them can establish is on hardware — see carried-forward item 8.
 
+**And one phase 10 opened and closed:**
+
+9. ~~**Post-grant click rate and latency are unmeasured.**~~ Closed. The captain's
+   accessibility decision recorded them as unverified and said _"Validate during the
+   build"_; phase 2 confirmed the tap was live from a signed bundle but nobody clicked
+   during its window. Phase 10 built the instrument — `scripts/record-cursor-corpus.mjs`
+   posts clicks with `CGEventPost` stamped from `CLOCK_UPTIME_RAW` and
+   `loom-input-sampler.m` stamps every line it emits from the same clock — and
+   **measured 2026-08-05 with the grant in place**, across the ten corpus recordings:
+   158/158 clicks delivered, latency min 0.177 ms, 0.389 ms as the mean of the
+   per-recording medians, 7.711 ms as the mean of their p95s, max 20.520 ms.
+   `packages/edl/test/corpus/manifest.json` carries the figures under `clickCapture`
+   with `measured: true`, and the phase-10 gate reads that field and fails loudly if a
+   future corpus is recorded without the grant. The reading, what the instrument refuses
+   to report and why, are in § Post-grant click rate and latency — measured, below.
+
+## Post-grant click rate and latency — measured, and the last open item closed
+
+The captain's accessibility decision closed with _"Post-grant event rate and latency
+are unmeasured. Validate during the build."_ Phase 2 confirmed the tap was live from a
+signed bundle but nobody clicked during its window. **Measured 2026-08-05**, with the
+grant in place, across the ten corpus recordings (250 s of wall clock):
+
+|                                        |                                                         |
+| -------------------------------------- | ------------------------------------------------------- |
+| Clicks posted / observed               | **158 / 158**                                           |
+| Delivered fraction                     | **1.0000** — no event was dropped by the tap            |
+| Observed rate                          | 0.63 Hz over the corpus; bursts of up to 6 inside 1.5 s |
+| Latency, min                           | **0.177 ms**                                            |
+| Latency, mean of per-recording medians | **0.389 ms**                                            |
+| Latency, mean of per-recording p95     | **7.711 ms**                                            |
+| Latency, max                           | **20.520 ms**                                           |
+
+Latency is `CGEventPost` → the tap callback emitting its line, **both stamped from
+`clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`** — the driver and `loom-input-sampler.m` use
+the same clock, so this is a duration rather than the difference of two clocks. The
+sub-millisecond median with a ~20 ms tail is the shape to expect: the tap is on the HID
+event stream and the tail is scheduler, not the tap. **For phase 10's consumer this is
+comfortably inside anything auto-zoom cares about** — §6.5's smallest interval is
+`preRollSec = 0.6 s`, three orders above the median and thirty times the worst sample.
+
+The figures are regenerated by `npm run record:cursor-corpus` and live in
+`packages/edl/test/corpus/manifest.json` under `clickCapture`.
+
+**The rule the instrument keeps.** Both the process that **posts** and the process that
+**observes** must report `AXIsProcessTrusted()` themselves — the poster on
+`cursor-driver.m`'s `hello` line with its own pid, the observer through the sampler's
+own capability — and `clickReading` refuses to report a latency unless both say yes,
+recording `measured: false` with a reason instead. Never a zero. That is not
+belt-and-braces: TCC keys a grant on the exact code identity of the responsible
+process, so "the sampler is trusted" does not establish that the driver is, and a grant
+that landed on the wrong binary is indistinguishable from no grant (§ Sharp edges —
+permissions: two rows with the same identifier already cost a full grant cycle here).
+`deliveredFraction` is what would have exposed a half-granted run: a poster that cannot
+post and an observer that can see would report 0 / N, not a latency.
+
 ## Permissions and first run, in one paragraph
 
 The four grants the app asks for — Screen Recording, Camera, Microphone,
@@ -727,7 +931,7 @@ about it.
 | `frame-authorisation`   | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                                                                 |
 | `screen-enumeration`    | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                                                                         |
 | `content-protection`    | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                            |
-| `accessibility-clicks`  | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in the window, so the rate is unmeasured. Rate and latency are deferred to phase 10 by captain decision — it consumes the log.                                           |
+| `accessibility-clicks`  | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in this run's window, so it measured no rate. Rate and latency were deferred to phase 10 by captain decision — measured there; see § Post-grant click rate and latency.  |
 | `microphone-revocation` | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from

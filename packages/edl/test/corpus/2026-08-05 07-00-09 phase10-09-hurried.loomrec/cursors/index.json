@@ -1,0 +1,21 @@
+{
+  "schema": "loom.cursors/1",
+  "images": {
+    "1456180c0d9b6d67eb11a39692b6ed01874295ebf0f67ed55521a0656a756c93": {
+      "file": "cursors/1456180c0d9b6d67eb11a39692b6ed01874295ebf0f67ed55521a0656a756c93.png",
+      "hotspot": [
+        50,
+        50
+      ],
+      "shape": "arrow"
+    },
+    "ce57f18ba0659febf22221a911465b7bc801ffc92878357cb30405c0925d1ade": {
+      "file": "cursors/ce57f18ba0659febf22221a911465b7bc801ffc92878357cb30405c0925d1ade.png",
+      "hotspot": [
+        120,
+        110
+      ],
+      "shape": "ibeam"
+    }
+  }
+}
