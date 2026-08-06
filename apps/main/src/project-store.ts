@@ -853,7 +853,13 @@ export class ProjectStore {
     };
   }
 
-  /** Replace `recording.json`. Written once, by the capture pipeline, at finalize. */
+  /**
+   * Replace `recording.json`. Whole-document, by the capture pipeline: the
+   * provisional write before the first frame, every amendment a live session makes to
+   * it — track announcements, the event logs the sampler declares — and finalize.
+   * `RecorderSession` serializes the amendments on its own chain, because they are
+   * read-modify-writes of one document and this queue only orders the writes.
+   */
   async writeRecordingDoc(id: RecordingId, recording: RecordingDoc): Promise<void> {
     const open = this.open.get(id);
     if (open === undefined) throw new UnknownRecordingError(id);

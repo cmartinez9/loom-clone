@@ -167,9 +167,12 @@ export interface StartInputSamplerOptions {
   /**
    * Whether to attempt click capture.
    *
-   * The caller passes `false` when the user declined Accessibility in first-run
-   * setup, which is the difference between the log saying `not-requested` and saying
-   * `accessibility-denied` — two different sentences to show a user.
+   * `false` means *this caller opted out*, and reads back as `not-requested` — a
+   * different sentence to show a user than the tap's own `accessibility-denied`.
+   * `RecorderSession` therefore always passes `true` and never conditions the request
+   * on `AXIsProcessTrusted()`: the app asked for Accessibility on the promise of this
+   * log, so a grant the user declined has to arrive as the denial it was. See
+   * `recorder/session.ts`'s sampling section.
    */
   clicks?: boolean;
   /** Where the helper lives. Defaults to `dist/native/loom-input-sampler`. */
@@ -180,9 +183,11 @@ export interface StartInputSamplerOptions {
 /**
  * Start sampling into a recording bundle.
  *
- * Resolves once click capability is known, so the caller can put the truth into
- * `recording.json`'s `capture.permissions.accessibility` before the first frame
- * rather than guessing at it afterwards.
+ * Resolves once click capability is known, so the caller has the tap's own answer to
+ * put into `recording.json`'s `events.clicks` rather than inferring one from whether
+ * a log file exists. It is not where `capture.permissions.accessibility` comes from:
+ * that is `readAxTrusted()` at the provisional write, before the first frame and
+ * before any sampler exists.
  *
  * **The project must already be open, and it must stay open until `sampler.stop()`
  * has resolved.** Sampling writes from timers, so a `store.close(id)` that lands

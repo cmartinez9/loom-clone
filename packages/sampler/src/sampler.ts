@@ -94,9 +94,11 @@ export interface InputSamplerOptions {
   /**
    * Whether to attempt click capture at all.
    *
-   * `false` is the honest setting when the user declined Accessibility: it produces
-   * `reason: 'not-requested'` rather than `accessibility-denied`, and those are
-   * different things to tell somebody.
+   * `false` says *this caller does not want clicks*, and reads back as
+   * `reason: 'not-requested'`. It is **not** the way to anticipate a missing grant: a
+   * caller that wants clicks asks for them whatever `AXIsProcessTrusted()` says, so a
+   * user who declined Accessibility gets `accessibility-denied` from the tap itself,
+   * and those are different things to tell somebody.
    */
   clicks?: boolean;
   hz?: number;

@@ -59,12 +59,16 @@ macOS itself delivers — and checking both parts' boundaries, with three contro
 must fail. What no dev run can exercise is a real camera or a real cable; `AGENTS.md`
 carries those forward.
 
-The native input sampler is complete alongside it. First run uses it to check that a
-real event tap can be built, because macOS answering "Accessibility is granted" is
-not evidence that clicks will arrive — the API succeeds either way. No recording the
-app itself makes samples the cursor into a log yet; the only bundles that carry one
-are phase 10's corpus, written outside the recorder by
-`npm run record:cursor-corpus`.
+The native input sampler is complete alongside it, and **every recording now uses
+it.** First run still checks that a real event tap can be built, because macOS
+answering "Accessibility is granted" is not evidence that clicks will arrive — the API
+succeeds either way. From the first frame onward the recorder samples where the
+pointer is into `events/cursor.ndjson`, which needs no permission at all and is
+therefore written on every machine, and records clicks into `events/clicks.ndjson`
+when Accessibility is granted. Without that grant there is no click file at all rather
+than an empty one, and the recording says both that clicks were unavailable and that
+macOS is why: "nobody clicked" and "we were never watching" are never written the same
+way. That log is what phase 10's cursor-follow and auto-zoom-on-click read.
 
 Phase 6's one decode path and WebGL2 compositor — the pair preview and export will
 share — are complete alongside it too, built ahead of the capture spine against
@@ -124,9 +128,9 @@ carries the readings an unpackaged dev run of the test it replaced produced, and
 plainly that they are not evidence the shipped check has reproduced them.
 
 `npm run verify:mutation` proves those gates are real by breaking capture, the
-timeline model, the generators, the annotation path and the drawing overlay one way at
-a time — editing the production source on disk — and requiring a test to fail each
-time. The one property it deliberately leaves uncovered, because no test in
+timeline model, the generators, the annotation path, the drawing overlay and the event
+logs one way at a time — editing the production source on disk — and requiring a test
+to fail each time. The one property it deliberately leaves uncovered, because no test in
 `npm test` can catch it, is named in `AGENTS.md` rather than papered over.
 
 ## Requirements
@@ -159,8 +163,9 @@ npm run build && node scripts/smoke-capture.mjs
 ```
 
 That needs Screen Recording granted to your terminal, and stops with instructions if
-it is missing. It prints what each audio device claimed, what it actually ran at, and
-where each track started relative to the first frame. Adding `--synthetic` puts a
+it is missing. It prints what each audio device claimed, what it actually ran at,
+where each track started relative to the first frame, and how many cursor samples the
+recording logged and whether the click tap was live. Adding `--synthetic` puts a
 canvas and an oscillator where the real sources would be and runs everything below
 them for real, so it works without the grant — at the cost of covering neither
 `desktopCapturer`, nor the `getDisplayMedia` authorisation, nor `setContentProtection`.

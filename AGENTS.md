@@ -36,8 +36,9 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model, the generators and
-                          # annotations 43 ways; each must fail a gate
+npm run verify:mutation   # break capture, the timeline model, the generators,
+                          # annotations, the drawing overlay and the event logs
+                          # 57 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
