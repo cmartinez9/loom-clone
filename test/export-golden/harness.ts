@@ -106,7 +106,16 @@ function log(message: string): void {
   window.exportGolden.log(message);
 }
 
-/** A lost context makes every reading below a fiction. See `test/gate/harness.ts`. */
+/**
+ * A lost context makes every reading below a fiction. See `test/gate/harness.ts`.
+ *
+ * On a virtualised runner it is a real event and not a hypothetical: Chromium's GPU
+ * process exits on a context loss and takes every context in it, so all four of this
+ * harness's contexts go at once. Every reader therefore checks *before* it reads —
+ * and "reads" includes the export pass, where the read is `new VideoFrame(canvas)`
+ * rather than a `readPixels`. A run that notices is a run that can say `contextLost`
+ * instead of stopping with nothing to report.
+ */
 const lost: { where: string | null } = { where: null };
 function checkContext(gl: WebGL2RenderingContext, where: string): void {
   if (lost.where === null && !gl.isContextLost()) return;
@@ -140,6 +149,13 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
     powerPreference: 'high-performance',
   });
   if (gl === null) throw new Error('no WebGL2 context');
+  // Recorded rather than prevented: the program, the textures and the render target
+  // all go with the context, so there is nothing to restore into. What matters is
+  // knowing, and knowing before the next thing reads. Same listener, same reason, as
+  // `test/gate/harness.ts`.
+  canvas.addEventListener('webglcontextlost', () => {
+    lost.where ??= 'the webglcontextlost event';
+  });
   const reader = await openVideoTrack({
     parts: [{ mediaUrl: url, indexUrl, startTimeSec: 0, durationSec }],
   });
@@ -335,6 +351,10 @@ async function run(): Promise<GoldenReport> {
   const preview = await openPath(mediaUrl, indexUrl, durationSec);
   const exporter = await openPath(mediaUrl, indexUrl, durationSec);
   const control = await openPath(mediaUrl, indexUrl, durationSec);
+  // Read now rather than at the end: a context that is lost mid-run answers `null` to
+  // every query, and this path is closed before the export pass in any case.
+  const glRenderer = describeContext(preview.gl);
+  log(`webgl2 renderer: ${glRenderer}`);
 
   const timeline = compile(zoomDocument(durationSec), EMPTY_COMPILE_CONTEXT);
   const frameCount = Math.max(1, Math.round(timeline.durationSec * FPS));
@@ -453,26 +473,35 @@ async function run(): Promise<GoldenReport> {
     );
   }
 
-  // ---- the end-to-end export --------------------------------------------------
-  const exported = await runEndToEnd(mediaUrl, indexUrl, durationSec, fixture.frameCount);
-
-  // ---- and a cancelled export leaves nothing ---------------------------------
-  const cancelLeftBehind = await window.exportGolden.cancelProbe();
-
+  // ---- everything the comparison needed is read; let it go ---------------------
+  // Before the export pass, not after it. These three readers hold a ring of twenty
+  // 1920x1080 frames each, and on a host with no hardware decoder those are CPU-backed
+  // copies uploaded into three live contexts. The export pass then opens a fourth
+  // context and a `VideoEncoder` on top of that, which is the peak this run reaches
+  // and exactly where CI's GPU process exited. Nothing below reads these paths.
   const liveBefore =
     preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
-  log(`live frames before teardown: ${liveBefore}`);
+  log(`live frames before the export pass: ${liveBefore}`);
   disposePath(preview);
   disposePath(exporter);
   disposePath(control);
-  const liveFramesAtEnd =
+  // §10.2 is asserted over every path this run opened, so each contributes what it
+  // still holds *after* being closed and the total must be zero.
+  let liveFramesAtEnd =
     preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
+
+  // ---- the end-to-end export --------------------------------------------------
+  const end = await runEndToEnd(mediaUrl, indexUrl, durationSec, fixture.frameCount);
+  liveFramesAtEnd += end.liveFramesAtEnd;
+
+  // ---- and a cancelled export leaves nothing ---------------------------------
+  const cancelLeftBehind = await window.exportGolden.cancelProbe();
 
   return {
     ok: true,
     contextLost: false,
     environment: {
-      glRenderer: describeContext(preview.gl),
+      glRenderer,
       electron: '',
       chrome: navigator.userAgent,
       hardwareEncode: fixture.hardwareAcceleration,
@@ -490,7 +519,7 @@ async function run(): Promise<GoldenReport> {
     identityMaxDelta,
     controls,
     liveFramesAtEnd,
-    exported,
+    exported: end.exported,
     cancelLeftBehind,
     logs,
   };
@@ -534,9 +563,11 @@ async function runControl(run: ControlRun): Promise<ControlOutcome> {
     await settle(run.preview.reader, sourceTime);
     run.previewLoop.seek(atSec);
     run.previewLoop.renderOnce();
+    checkContext(run.preview.gl, `${run.name} preview readback`);
     run.preview.compositor.readPixels(run.previewPixels);
 
     await loop.renderAt(atSec, index);
+    checkContext(run.path.gl, `${run.name} control readback`);
     run.path.compositor.readPixels(run.controlPixels);
     const diff = compare(run.previewPixels, run.controlPixels);
     if (diff.maxDelta > 0) differingSamples += 1;
@@ -559,7 +590,7 @@ async function runEndToEnd(
   indexUrl: string,
   durationSec: number,
   fixtureFrames: number,
-): Promise<GoldenReport['exported']> {
+): Promise<{ exported: GoldenReport['exported']; liveFramesAtEnd: number }> {
   const path = await openPath(mediaUrl, indexUrl, durationSec);
   const doc = newEditDocument();
   doc.output = { size: OUTPUT_SIZE, fps: FPS, background: { kind: 'none' } };
@@ -600,6 +631,10 @@ async function runEndToEnd(
     timeline,
     fps: FPS,
     onFrame: async (frame) => {
+      // The read that matters on this pass: `encode` snapshots the canvas into a
+      // `VideoFrame`, and a lost context makes that snapshot whatever was left in the
+      // drawing buffer. Checked before, exactly as a readback is.
+      checkContext(path.gl, 'the export encode');
       encoder.encode(path.canvas, frame.timestampUs, frame.isKey, Math.round(1e6 / FPS));
       await encoder.drain();
     },
@@ -619,14 +654,17 @@ async function runEndToEnd(
   disposePath(path);
 
   return {
-    bytes: finished.bytes,
-    durationSec: finished.durationSec,
-    expectedDurationSec: loop.durationSec,
-    videoSampleCount: finished.videoSampleCount,
-    audioSampleCount: finished.audioSampleCount,
-    verified: finished.verified,
-    verificationFailure: finished.verificationFailure,
-    decodedFrames,
+    exported: {
+      bytes: finished.bytes,
+      durationSec: finished.durationSec,
+      expectedDurationSec: loop.durationSec,
+      videoSampleCount: finished.videoSampleCount,
+      audioSampleCount: finished.audioSampleCount,
+      verified: finished.verified,
+      verificationFailure: finished.verificationFailure,
+      decodedFrames,
+    },
+    liveFramesAtEnd: path.reader.liveFrames,
   };
 }
 
@@ -697,6 +735,7 @@ async function readBackFrames(
       const last = frames[frames.length - 1];
       if (last === undefined) throw new Error(`no frame decoded at sample ${target}`);
       path.compositor.render({ screen: last }, state);
+      checkContext(path.gl, 'the decoded-file readback');
       path.compositor.readPixels(pixels);
     } finally {
       // Every frame closed, on every path (§10.2).

@@ -1,5 +1,5 @@
 /**
- * The gate may relaunch for exactly one reason, and this is the fence around it.
+ * A gate may relaunch for exactly one reason, and this is the fence around it.
  *
  * `GATE_ATTEMPTS = 2` exists because a lost WebGL context is not a measurement — see
  * `test/gate/relaunch.ts`. That is a narrow and defensible exception, and it stays
@@ -8,14 +8,23 @@
  * criterion behind it becomes advisory.
  *
  * So this file enumerates the ways a run can be *bad* and requires that none of them
- * earns a second launch. It is cheap and runs in Node; the gate it guards costs a 4K
- * encode and a real Electron launch.
+ * earns a second launch. It is cheap and runs in Node; the gates it guards cost a 4K
+ * encode and a real Electron launch each.
+ *
+ * **Two gates, two predicates, one rule.** Phase 8's golden-frame gate
+ * (`test/export-golden/relaunch.ts`) runs on the same virtualised runners and loses
+ * its contexts the same way — Chromium's GPU process exits on a context loss and
+ * takes all four of that harness's contexts with it. It gets its own predicate rather
+ * than sharing phase 6's, so a widening in one cannot silently apply to the other,
+ * and its own block of cases below.
  */
 
 import { describe, expect, it } from 'vitest';
 import { CONTROL_PERIOD_MS, CONTROL_TARGET_MS } from './gate/budget-control.ts';
 import { shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
+import { shouldRelaunchGolden } from './export-golden/relaunch.ts';
+import type { GoldenReport } from './export-golden/report.ts';
 
 const EMPTY_METRICS = {
   count: 0,
@@ -173,5 +182,126 @@ describe('the gate relaunches only for a lost context', () => {
     // The tempting widening — "it failed, try once more" — stated explicitly so
     // that making it true has to break this line.
     expect(shouldRelaunch(report({ ok: false, error: 'boom', liveFramesAtEnd: 9 }))).toBe(false);
+  });
+});
+
+/** A finished export that passed §7.5's five checks. */
+const CLEAN_EXPORT: NonNullable<GoldenReport['exported']> = {
+  bytes: 144_527,
+  durationSec: 5.6,
+  expectedDurationSec: 5.6,
+  videoSampleCount: 168,
+  audioSampleCount: 0,
+  verified: {
+    exists: true,
+    bytes: 144_527,
+    durationSec: 5.6,
+    lastFrameDecodable: true,
+    sha256: 'a'.repeat(64),
+  },
+  verificationFailure: null,
+  decodedFrames: [{ index: 0, atSec: 0, expectedFrame: 0, observedFrame: 0 }],
+};
+
+/** §4.5's 24 timestamps, all agreeing. */
+const CLEAN_SAMPLES: GoldenReport['samples'] = Array.from({ length: 24 }, (_unused, i) => ({
+  index: i,
+  atSec: i / 30,
+  maxDelta: 0,
+  atByte: 0,
+  differingBytes: 0,
+  zoomAmount: 1 + i / 24,
+  drawn: true,
+}));
+
+/** A clean phase-8 report; each case below spoils exactly one thing. */
+function golden(overrides: Partial<GoldenReport> = {}): GoldenReport {
+  return {
+    ok: true,
+    contextLost: false,
+    environment: {
+      glRenderer: 'ANGLE (Apple, ANGLE Metal Renderer)',
+      electron: '',
+      chrome: '',
+      hardwareEncode: 'prefer-hardware',
+    },
+    fixture: { width: 1920, height: 1080, frameCount: 90, durationSec: 5.6, longestHoldSec: 0.5 },
+    outputSize: [1280, 720],
+    fps: 30,
+    samples: CLEAN_SAMPLES,
+    identityMaxDelta: 0,
+    controls: [
+      { name: 'clock-skew', what: '', maxDelta: 255, differingSamples: 19 },
+      { name: 'frame-selection', what: '', maxDelta: 255, differingSamples: 14 },
+    ],
+    liveFramesAtEnd: 0,
+    exported: CLEAN_EXPORT,
+    cancelLeftBehind: [],
+    logs: [],
+    ...overrides,
+  };
+}
+
+describe('the golden-frame gate relaunches only for a lost context', () => {
+  it('relaunches when the context was lost', () => {
+    expect(shouldRelaunchGolden(golden({ contextLost: true }))).toBe(true);
+  });
+
+  it('does not relaunch a clean run', () => {
+    expect(shouldRelaunchGolden(golden())).toBe(false);
+  });
+
+  it.each([
+    // §4.5's per-pixel zero, missed. The whole point of the gate; one report, one read.
+    [
+      'showing a per-pixel difference between preview and export',
+      {
+        samples: CLEAN_SAMPLES.map((sample, i) =>
+          i === 3 ? { ...sample, maxDelta: 7, differingBytes: 912 } : sample,
+        ),
+      },
+    ],
+    ['a comparator that could not report zero', { identityMaxDelta: 4 }],
+    // A control that saw nothing means the zero above proves nothing — which is a
+    // finding about this build, not about the host.
+    [
+      'a divergence control that did not move a pixel',
+      {
+        controls: [
+          { name: 'clock-skew', what: '', maxDelta: 0, differingSamples: 0 },
+          { name: 'frame-selection', what: '', maxDelta: 255, differingSamples: 14 },
+        ],
+      },
+    ],
+    ['holding a leaked frame', { liveFramesAtEnd: 3 }],
+    ['an export that failed §7.5', { exported: null }],
+    [
+      'an export whose last frame would not decode',
+      {
+        exported: {
+          ...CLEAN_EXPORT,
+          verificationFailure: 'the last frame did not decode',
+          verified: { ...CLEAN_EXPORT.verified, lastFrameDecodable: false },
+        },
+      },
+    ],
+    ['a cancelled export that left a file behind', { cancelLeftBehind: ['Cancelled.mp4.partial'] }],
+    ['not ok', { ok: false }],
+    ['an error', { error: 'the export writer was never opened' }],
+    [
+      'a launch that produced nothing',
+      { ok: false, error: 'the gate did not finish within 480000ms', samples: [] },
+    ],
+  ] satisfies [string, Partial<GoldenReport>][])(
+    'does NOT relaunch a run that was %s',
+    (_label, overrides) => {
+      expect(shouldRelaunchGolden(golden(overrides))).toBe(false);
+    },
+  );
+
+  it('does not relaunch even when a bad run also failed outright', () => {
+    expect(shouldRelaunchGolden(golden({ ok: false, error: 'boom', liveFramesAtEnd: 9 }))).toBe(
+      false,
+    );
   });
 });

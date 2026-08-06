@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, the generators,
                           # annotations, the drawing overlay and the event logs
-                          # 70 ways; each must fail a gate
+                          # 71 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -784,6 +784,24 @@ was not a control.
   that outputs have landed forces a re-seek and a whole re-decoded GOP on the next
   frame of ordinary playback. `flush` is deliberately absent from `VideoDecoderLike`;
   `SourceReader` waits on the output callback instead.
+- **Waiting on a WebCodecs callback is only safe with a deadline on it, and both ends
+  of the export needed one.** §5.3's backpressure line waits on the _encoder's_ output
+  callback rather than on a clock, which is right — until the backend goes away.
+  Chromium exits the GPU process when a context is lost, and that takes VideoToolbox,
+  the queue and the `error` callback's pipe together: the encoder then calls neither
+  `output` nor `error`, and an unbounded `await` there is §10.2's named symptom
+  verbatim, _an export that hangs with no error_. It cost the phase-8 gate a 480 s CI
+  timeout that reported nothing at all, on a run whose 24 timestamps had already
+  compared at delta 0. `ENCODE_STALL_TIMEOUT_MS` bounds the drain and the `flush` —
+  the counterpart of `ExportRenderLoop`'s `STALL_TIMEOUT_MS` on the decode side — and
+  `apps/renderer/test/export-encode.test.ts` pins both halves with a working-encoder
+  control beside each, because a watchdog with no control is just a shorter export.
+  The gate then relaunches **once**, for a lost context and nothing else
+  (`test/export-golden/relaunch.ts`, fenced by `test/relaunch-policy.test.ts` exactly
+  as phase 6's is), and its harness closes the preview, export and control paths
+  _before_ the end-to-end pass rather than after it: three readers holding twenty
+  1080p frames each, live under a fourth context and a `VideoEncoder`, is the peak the
+  run reaches and is where CI's GPU process went.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the

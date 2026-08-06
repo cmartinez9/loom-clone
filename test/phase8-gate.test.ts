@@ -52,6 +52,14 @@
  *  - **the finished file**, verified by §7.5's five checks and then decoded back so
  *    the frame numbers painted into the fixture can be read out of it. The golden
  *    comparison reads the render target; the user gets the file.
+ *
+ * ## The one thing that is not a comparison
+ *
+ * A lost WebGL context is not a reading — Chromium exits the GPU process when one is
+ * lost and takes every context in it, so what a harness would report afterwards is
+ * whatever it was holding when the lights went out. That earns exactly one relaunch,
+ * through {@link shouldRelaunchGolden}, and nothing else does; `report.contextLost` is
+ * still asserted below, so a run that loses it twice fails here.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -63,14 +71,35 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { shouldRelaunchGolden } from './export-golden/relaunch.ts';
 import type { GoldenReport } from './export-golden/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const GATE = join(here, 'export-golden');
 
-const GATE_TIMEOUT_MS = 600_000;
+/**
+ * Room for {@link GATE_ATTEMPTS} launches, and nothing else.
+ *
+ * Deliberately not a tighter number that a slow host could trip: a virtualised runner
+ * has no hardware decoder, so every composite there carries a CPU-backed upload and
+ * the run is a different workload from the four seconds it costs on target hardware.
+ * Judging *that* is what the assertions below are for; this only has to be larger
+ * than two of {@link ATTEMPT_TIMEOUT_MS}.
+ */
+const GATE_TIMEOUT_MS = 1_020_000;
+/**
+ * The backstop on one launch, not a budget.
+ *
+ * Every wait inside the run is bounded on its own — the decode by
+ * `ExportRenderLoop`'s `STALL_TIMEOUT_MS`, the encode by `ENCODE_STALL_TIMEOUT_MS`,
+ * both of which name what stopped — so this fires only for a hang nothing else has a
+ * name for. Left where it was: shrinking it would trade a hang nobody has seen for a
+ * slow host nobody has measured.
+ */
 const ATTEMPT_TIMEOUT_MS = 480_000;
+/** One relaunch, for {@link shouldRelaunchGolden}'s single reason. */
+const GATE_ATTEMPTS = 2;
 
 /** §4.5's number. */
 const TIMESTAMP_COUNT = 24;
@@ -178,6 +207,32 @@ async function runGate(): Promise<{ report: GoldenReport; exitCode: number | nul
   }
 }
 
+/**
+ * Launch until the gate produces a comparison, or run out of attempts.
+ *
+ * The retry condition is {@link shouldRelaunchGolden} — a named predicate with a test
+ * of its own — and not a clause in this loop, for the reason phase 6's gate states:
+ * a retry around an acceptance gate is how a real defect gets to look like weather,
+ * and this one stays defensible only while it stays this narrow. The last report is
+ * returned either way, so the assertions below judge a real run, including one whose
+ * context was lost twice — which they fail on, at the first line.
+ */
+async function runGateUntilCompared(): Promise<{ report: GoldenReport; exitCode: number | null }> {
+  let result = await runGate();
+  for (
+    let attempt = 2;
+    attempt <= GATE_ATTEMPTS && shouldRelaunchGolden(result.report);
+    attempt++
+  ) {
+    console.log(
+      `the gate's WebGL context was lost (${result.report.error ?? 'no detail'}); ` +
+        `launch ${String(attempt)} of ${String(GATE_ATTEMPTS)}`,
+    );
+    result = await runGate();
+  }
+  return result;
+}
+
 function describeRun(report: GoldenReport): string {
   const worst = report.samples.reduce(
     (max, sample) => (sample.maxDelta > max.maxDelta ? sample : max),
@@ -223,7 +278,7 @@ describe('phase 8 gate: preview and export are pixel-identical', () => {
   it(
     'agrees at 24 timestamps, and can see it when they disagree',
     async () => {
-      const { report, exitCode } = await runGate();
+      const { report, exitCode } = await runGateUntilCompared();
       const detail = describeRun(report);
       // Printed unconditionally: a gate whose numbers appear only on a failure tells
       // you nothing about the margin you had while it passed.

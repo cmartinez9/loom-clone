@@ -24,8 +24,19 @@
  * §5.3: `while (encoder.encodeQueueSize > 8) await nextOutput()`. Without it the
  * composite loop runs ahead of a 14 ms-per-frame hardware encoder and the queue is
  * the whole recording in memory. {@link VideoExportEncoder.drain} is that line, and
- * it waits on the *output* callback rather than polling a clock, so a stalled
- * encoder is a `flush` that never resolves rather than a spin.
+ * it waits on the *output* callback rather than polling a clock.
+ *
+ * ## Every wait is bounded, for §10.2's reason
+ *
+ * Waiting on the output callback is only safe while something is guaranteed to call
+ * it. A platform encoder that stops without reporting an error calls neither — the
+ * GPU process dying takes VideoToolbox, the `error` callback's mojo pipe and the
+ * queue with it — and an unbounded `await` there is §10.2's named symptom exactly:
+ * *"an export that hangs at 40% with no error"*. So the backpressure wait and the
+ * `flush` both carry a deadline and turn a dead encoder into an
+ * {@link ExportEncodeStallError}, the counterpart of the decode side's
+ * `ExportStallError`. Nothing about the happy path changes: the bound is a watchdog
+ * on a wait for **one** output from a full queue, three orders above what that costs.
  */
 
 /** One encoded sample on its way to main. */
@@ -47,6 +58,71 @@ export interface EmittedDecoderConfig {
 
 /** §5.3's queue bound. */
 const MAX_QUEUE = 8;
+
+/**
+ * §10.2's watchdog, applied to the encoder — `ExportRenderLoop`'s `STALL_TIMEOUT_MS`
+ * for the other end of the pipe.
+ *
+ * It bounds a wait for **one** encoded chunk out of a queue that is already full, and
+ * the flush of at most {@link MAX_QUEUE} more. Software H.264 at 720p costs tens of
+ * milliseconds a frame on the slowest machine this runs on, so this is three orders
+ * of magnitude of slack: it can only be reached by an encoder that has stopped.
+ */
+export const ENCODE_STALL_TIMEOUT_MS = 30_000;
+
+/** A `VideoEncoder`/`AudioEncoder` that stopped without saying so. */
+export class ExportEncodeStallError extends Error {
+  constructor(what: string, forMs: number) {
+    super(
+      `the export waited ${Math.round(forMs)}ms for the ${what} encoder, which produced ` +
+        'neither a chunk nor an error. Encoding has stopped (architecture report §10.2).',
+    );
+    this.name = 'ExportEncodeStallError';
+  }
+}
+
+/**
+ * Wait for the next output callback, or give up loudly.
+ *
+ * The waiter is removed from the list on a timeout, so a `wake` that arrives after
+ * the deadline does not call a settled promise's resolver.
+ */
+function nextOutputWithin(waiters: (() => void)[], what: string): Promise<void> {
+  return new Promise((done, fail) => {
+    const waiter = (): void => {
+      clearTimeout(timer);
+      done();
+    };
+    const timer = setTimeout(() => {
+      const index = waiters.indexOf(waiter);
+      if (index >= 0) waiters.splice(index, 1);
+      fail(new ExportEncodeStallError(what, ENCODE_STALL_TIMEOUT_MS));
+    }, ENCODE_STALL_TIMEOUT_MS);
+    waiters.push(waiter);
+  });
+}
+
+/**
+ * `flush()`, bounded.
+ *
+ * The losing promise stays handled by the race, so an encoder that reports its
+ * failure late does not become an unhandled rejection minutes after the job ended.
+ */
+async function flushWithin(flush: Promise<void>, what: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      flush,
+      new Promise<never>((_done, fail) => {
+        timer = setTimeout(() => {
+          fail(new ExportEncodeStallError(what, ENCODE_STALL_TIMEOUT_MS));
+        }, ENCODE_STALL_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Codec strings tried in order, most capable first.
@@ -174,7 +250,9 @@ export class VideoExportEncoder {
   /** Flush the encoder and close it. Every queued frame comes out first. */
   async close(): Promise<void> {
     try {
-      if (this.#encoder.state === 'configured') await this.#encoder.flush();
+      if (this.#encoder.state === 'configured') {
+        await flushWithin(this.#encoder.flush(), 'video');
+      }
     } finally {
       if (this.#encoder.state !== 'closed') this.#encoder.close();
       this.#wake();
@@ -196,7 +274,7 @@ export class VideoExportEncoder {
   }
 
   #nextOutput(): Promise<void> {
-    return new Promise((done) => this.#waiters.push(done));
+    return nextOutputWithin(this.#waiters, 'video');
   }
 
   #wake(): void {
@@ -287,14 +365,16 @@ export class AudioExportEncoder {
   async drain(): Promise<void> {
     while (this.#encoder.encodeQueueSize > MAX_QUEUE) {
       this.#raise();
-      await new Promise<void>((done) => this.#waiters.push(done));
+      await nextOutputWithin(this.#waiters, 'audio');
     }
     this.#raise();
   }
 
   async close(): Promise<void> {
     try {
-      if (this.#encoder.state === 'configured') await this.#encoder.flush();
+      if (this.#encoder.state === 'configured') {
+        await flushWithin(this.#encoder.flush(), 'audio');
+      }
     } finally {
       if (this.#encoder.state !== 'closed') this.#encoder.close();
       this.#wake();

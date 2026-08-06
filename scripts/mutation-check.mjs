@@ -56,6 +56,7 @@ const EXPORT_MOVIE = 'packages/mux/test/export-movie.test.ts';
 const EXPORT_VERIFY = 'apps/main/test/export-verify.test.ts';
 const EXPORT_SESSION = 'apps/main/test/export-session.test.ts';
 const EXPORT_COPY = 'apps/main/test/export-stream-copy.test.ts';
+const EXPORT_ENCODE = 'apps/renderer/test/export-encode.test.ts';
 const EXPORT_AUDIO = 'apps/renderer/test/audio-source.test.ts';
 /** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
 const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
@@ -367,6 +368,23 @@ const MUTATIONS = [
     find: '    const expected = this.#screen.selectionMicros?.(sourceTime);',
     replace: '    const expected = undefined as number | undefined;',
     mustFail: [EXPORT_LOOP],
+  },
+  {
+    name: 'a-stalled-encoder-is-waited-on-forever',
+    breaks:
+      '§5.3’s backpressure wait is bounded. It waits on the encoder’s *output* ' +
+      'callback, which is right and is only safe while something is guaranteed to ' +
+      'call it: a platform encoder whose backend goes away — the GPU process dying ' +
+      'takes VideoToolbox, the queue and the error callback’s pipe together — calls ' +
+      'neither `output` nor `error`. Unbounded, that is §10.2’s named symptom, an ' +
+      'export that hangs with no error, and it cost the phase-8 gate a 480-second ' +
+      'CI timeout with nothing to read.',
+    file: 'apps/renderer/src/export/encode.ts',
+    find: '  return new Promise((done, fail) => {\n    const waiter = (): void => {',
+    replace:
+      '  return new Promise<void>((done) => {\n    waiters.push(done);\n  });\n' +
+      '  return new Promise((done, fail) => {\n    const waiter = (): void => {',
+    mustFail: [EXPORT_ENCODE],
   },
   {
     name: 'export-writer-registered-after-it-opens',

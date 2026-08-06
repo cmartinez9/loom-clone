@@ -52,6 +52,15 @@ function parseArgs(argv: string[]): Args {
 const args = parseArgs(process.argv.slice(1));
 const logs: string[] = [];
 let finished = false;
+/**
+ * Set when Chromium's GPU process dies, which takes every WebGL context with it.
+ *
+ * The harness notices that for itself and says so, and its answer is the one that
+ * counts. This flag is for the failures the harness cannot report — the watchdog
+ * firing, the renderer going — where the honest classification of a run that lost its
+ * GPU is *no reading*, not *phase 8 is broken*. Never true on a healthy run.
+ */
+let gpuGone = false;
 
 function note(message: string): void {
   logs.push(message);
@@ -73,7 +82,7 @@ function failureReport(error: string): GoldenReport {
   return {
     ok: false,
     error,
-    contextLost: false,
+    contextLost: gpuGone,
     environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },
     fixture: { width: 0, height: 0, frameCount: 0, durationSec: 0, longestHoldSec: 0 },
     outputSize: [0, 0],
@@ -380,6 +389,9 @@ app.on('window-all-closed', () => {
 
 app.on('child-process-gone', (_event, details) => {
   note(`${details.type} process gone: ${details.reason} (exit ${String(details.exitCode)})`);
+  // Chromium exits the GPU process on a context loss, so this is the loss itself
+  // arriving by another route — and unlike `webglcontextlost`, it names what died.
+  if (details.type === 'GPU') gpuGone = true;
 });
 
 process.on('uncaughtException', (error: Error) => {
