@@ -329,7 +329,7 @@ describe('requesting', () => {
 });
 
 describe('opening System Settings', () => {
-  it('opens the pane for the permission, and only ever one of four exact urls', () => {
+  it('opens the pane for the permission, and only ever one of four exact urls', async () => {
     const manager = makeManager();
     manager.openSettings('screen');
     manager.openSettings('accessibility');
@@ -337,6 +337,11 @@ describe('opening System Settings', () => {
       PERMISSIONS.screen.settingsUrl,
       PERMISSIONS.accessibility.settingsUrl,
     ]);
+    // The accessibility pane records the ask, and `openSettings` does not wait for
+    // that write. Leaving it in flight lets it land inside `scratch` while
+    // `afterEach` is removing the directory — an ENOTEMPTY from `rmdir`, in whichever
+    // test happens to be unlucky.
+    await manager.whenSettled();
   });
 
   it('drops a bad kind from a renderer rather than opening anything', () => {
