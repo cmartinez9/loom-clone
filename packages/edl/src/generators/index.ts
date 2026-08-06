@@ -83,6 +83,7 @@ export {
   generateAutoZoom,
   mergeSegments,
   segmentOf,
+  segmentSettleTailSec,
   DEFAULT_AUTO_ZOOM_PARAMS,
   DEFAULT_GENERATED_BLEND_MS,
   type AutoZoomInput,

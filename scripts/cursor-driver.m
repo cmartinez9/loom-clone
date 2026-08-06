@@ -42,6 +42,21 @@
  * sampler *polls* (§6.1): it reads the pointer's position rather than subscribing to
  * its motion, so what it records is the same whether a hand or a warp moved it.
  *
+ * ## It reports its own trust, and the recorder refuses to measure without it
+ *
+ * `AXIsProcessTrusted()` is read **here**, in the process that posts, and printed on
+ * the `hello` line. Reading it anywhere else would be an inference: TCC keys a grant on
+ * the exact code identity of the responsible process, so "the sampler is trusted"
+ * does not establish that this binary is, and a grant landing on the wrong binary looks
+ * exactly like no grant at all (`AGENTS.md` § Sharp edges — permissions: two System
+ * Settings rows with the same identifier already cost a full grant cycle here).
+ * `record-cursor-corpus.mjs` requires *both* sides to say yes before it reports a click
+ * latency, and records `measured: false` with the reason otherwise. Never a zero.
+ *
+ * `AXIsProcessTrusted()` and not `AXIsProcessTrustedWithOptions(prompt: true)`: the
+ * second turns a status check into a dialog, which is the thing `apps/main/src/
+ * permissions.ts` passes `false` to avoid.
+ *
  * ## Timestamps
  *
  * `tUs` is `clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000`, the same clock
@@ -68,6 +83,7 @@
 #import <Foundation/Foundation.h>
 #include <math.h>
 #include <signal.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,13 +201,17 @@ int main(int argc, const char *argv[]) {
     signal(SIGTERM, onSignal);
     atexit(restorePointer);
 
-    char hello[320];
+    // The posting process's own answer, from the posting process. See the header.
+    const bool axTrusted = AXIsProcessTrusted();
+
+    char hello[384];
     snprintf(hello, sizeof hello,
              "{\"k\":\"hello\",\"tUs\":%llu,\"display\":%u,\"bounds\":[%.1f,%.1f,%.1f,%.1f],"
-             "\"seconds\":%.3f,\"seed\":%.0f,\"pace\":%.3f,\"clickRate\":%.3f}",
+             "\"seconds\":%.3f,\"seed\":%.0f,\"pace\":%.3f,\"clickRate\":%.3f,"
+             "\"axTrusted\":%s,\"pid\":%d}",
              (unsigned long long)nowUptimeUs(), (unsigned)display, bounds.origin.x,
              bounds.origin.y, bounds.size.width, bounds.size.height, seconds, seed, pace,
-             clickRate);
+             clickRate, axTrusted ? "true" : "false", (int)getpid());
     emit(hello);
 
     // Stay off the very edges: the menu bar and the Dock are where a stray synthetic

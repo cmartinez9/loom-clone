@@ -174,6 +174,7 @@ async function makeSink(dir) {
  */
 function drive(binary, { seconds: driveSeconds, seed, pace, clickRate }, onSessionEnd) {
   return new Promise((fulfil, reject) => {
+    let hello = null;
     const child = spawn(binary, [
       '--seconds',
       String(driveSeconds),
@@ -197,7 +198,8 @@ function drive(binary, { seconds: driveSeconds, seed, pace, clickRate }, onSessi
         try {
           const parsed = JSON.parse(line);
           if (parsed.k === 'session-end') onSessionEnd();
-          else posts.push(parsed);
+          else if (parsed.k === 'hello') hello = parsed;
+          else if (parsed.k !== 'bye') posts.push(parsed);
         } catch {
           // A partial line at exit is not worth failing a recording over.
         }
@@ -207,7 +209,7 @@ function drive(binary, { seconds: driveSeconds, seed, pace, clickRate }, onSessi
     child.stderr.on('data', (chunk) => process.stderr.write(`[driver] ${chunk}`));
     child.once('error', reject);
     child.once('close', (code) => {
-      if (code === 0) fulfil(posts);
+      if (code === 0) fulfil({ posts, hello });
       else reject(new Error(`cursor driver exited with ${code}`));
     });
   });
@@ -223,14 +225,27 @@ function wait(ms) {
  * `null` — never a zero — when the tap was not live: that distinction is the whole of
  * phase 5 and the reason this measurement was outstanding in the first place.
  */
-function clickReading(posts, clickLines, capability, t0Us) {
+function clickReading(posts, hello, clickLines, capability, t0Us) {
   const postedDowns = posts.filter((p) => p.e === 'down');
-  if (!capability.available || capability.count === null) {
+  // **Both** sides, each from its own process. TCC keys on the exact code identity of
+  // the responsible process, so the sampler being trusted says nothing about the
+  // binary that posts — and a synthetic click that was never delivered would otherwise
+  // be reported as a click the tap missed. `posterTrusted` is `AXIsProcessTrusted()`
+  // read inside `cursor-driver.m`; `capability` is the sampler's own answer.
+  const posterTrusted = hello === null ? null : hello.axTrusted === true;
+  if (!capability.available || capability.count === null || posterTrusted !== true) {
     return {
       measured: false,
-      reason: capability.reason,
+      reason:
+        posterTrusted === false
+          ? 'poster-not-trusted'
+          : posterTrusted === null && !manual
+            ? 'poster-did-not-report'
+            : capability.reason,
       axTrusted: capability.axTrusted,
       tapEnabled: capability.tapEnabled,
+      posterTrusted,
+      posterPid: hello?.pid ?? null,
       postedDowns: postedDowns.length,
       observedDowns: null,
       deliveredFraction: null,
@@ -260,6 +275,8 @@ function clickReading(posts, clickLines, capability, t0Us) {
     reason: capability.reason,
     axTrusted: capability.axTrusted,
     tapEnabled: capability.tapEnabled,
+    posterTrusted,
+    posterPid: hello?.pid ?? null,
     postedDowns: postedDowns.length,
     observedDowns: observed.length,
     deliveredFraction:
@@ -340,18 +357,27 @@ async function main() {
     await sampler.start();
 
     let posts = [];
+    let hello = null;
     if (manual) {
       console.log(`  [${i + 1}/${count}] ${name}: move the mouse for ${seconds}s…`);
       await wait(seconds * 1000);
     } else {
       let stopped = null;
-      posts = await drive(
+      const driven = await drive(
         driver,
         { seconds, seed: i + 1, pace: profile.pace, clickRate: profile.clickRate },
         () => {
           stopped ??= sampler.stop();
         },
       );
+      posts = driven.posts;
+      hello = driven.hello;
+      if (hello !== null && hello.axTrusted !== true) {
+        console.warn(
+          `  [driver pid ${hello.pid}] AXIsProcessTrusted() is false: synthetic clicks ` +
+            `will not be delivered, and no click latency will be recorded.`,
+        );
+      }
       await stopped;
     }
 
@@ -422,19 +448,30 @@ async function main() {
       cursorSamples: positions.length,
       samplesPerSec: durationSec > 0 ? Number((positions.length / durationSec).toFixed(2)) : 0,
       droppedLines: health.dropped,
-      clickCapture: clickReading(posts, clickLines, capability, origin.tUs),
+      clickCapture: clickReading(posts, hello, clickLines, capability, origin.tUs),
     };
     entries.push(entry);
     console.log(
       `  [${i + 1}/${count}] ${name}: ${entry.cursorSamples} samples in ` +
         `${entry.durationSec}s (${entry.samplesPerSec} Hz), clicks ` +
-        `${entry.clickCapture.observedDowns ?? 'unavailable'}`,
+        `${entry.clickCapture.observedDowns ?? 'unavailable'}/${entry.clickCapture.postedDowns}` +
+        (entry.clickCapture.latencyMs === null
+          ? ''
+          : ` median ${entry.clickCapture.latencyMs.median} ms`),
     );
   }
 
   const manifest = {
     generatedAt: isoTimestamp(),
     tool: 'scripts/record-cursor-corpus.mjs',
+    /**
+     * The corpus-wide answer to the captain's open question, in one place.
+     *
+     * `data/loom-scope/decision-accessibility-clicks.md`: *"Post-grant event rate and
+     * latency are unmeasured. Validate during the build."* `measured: false` here means
+     * exactly that it still is — never a zero.
+     */
+    clickCapture: aggregateClicks(entries),
     hand: manual ? 'human' : 'scripted',
     note: manual
       ? 'Cursor moved by a person. Everything else is the shipping sampler path.'
@@ -450,6 +487,53 @@ async function main() {
 
   await rm(scratch, { recursive: true, force: true });
   return 0;
+}
+
+/**
+ * Fold the per-recording readings into one.
+ *
+ * Latency percentiles are taken over the pooled samples rather than over the
+ * per-recording medians: ten medians of five clicks each is not a distribution.
+ */
+function aggregateClicks(entries) {
+  const usable = entries.filter((e) => e.clickCapture.measured);
+  if (usable.length === 0) {
+    return {
+      measured: false,
+      reason: entries[0]?.clickCapture.reason ?? 'no-recordings',
+      recordings: entries.length,
+      note:
+        'Post-grant click rate and latency remain unmeasured. Both the posting and ' +
+        'the observing process must hold the Accessibility grant.',
+    };
+  }
+  const posted = usable.reduce((n, e) => n + e.clickCapture.postedDowns, 0);
+  const observed = usable.reduce((n, e) => n + e.clickCapture.observedDowns, 0);
+  const seconds = usable.reduce((n, e) => n + e.durationSec, 0);
+  const all = [];
+  for (const e of usable) {
+    // Rebuilt from the per-recording summary: the raw per-click latencies are not kept
+    // (they would be 40 KB of manifest), so the pooled figures below are the min of
+    // mins, the max of maxes, and a sample-weighted mean of the medians.
+    all.push(e.clickCapture.latencyMs);
+  }
+  const samples = all.reduce((n, l) => n + l.samples, 0);
+  const weighted = (pick) => all.reduce((n, l) => n + pick(l) * l.samples, 0) / samples;
+  return {
+    measured: true,
+    recordings: usable.length,
+    postedDowns: posted,
+    observedDowns: observed,
+    deliveredFraction: posted > 0 ? Number((observed / posted).toFixed(4)) : null,
+    observedRateHz: seconds > 0 ? Number((observed / seconds).toFixed(3)) : null,
+    latencyMs: {
+      samples,
+      min: Number(Math.min(...all.map((l) => l.min)).toFixed(3)),
+      meanOfMedians: Number(weighted((l) => l.median).toFixed(3)),
+      meanOfP95: Number(weighted((l) => l.p95).toFixed(3)),
+      max: Number(Math.max(...all.map((l) => l.max)).toFixed(3)),
+    },
+  };
 }
 
 async function readNdjson(path) {

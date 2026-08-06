@@ -1,6 +1,21 @@
 {
-  "generatedAt": "2026-08-06T00:09:13.420Z",
+  "generatedAt": "2026-08-06T00:42:38.416Z",
   "tool": "scripts/record-cursor-corpus.mjs",
+  "clickCapture": {
+    "measured": true,
+    "recordings": 10,
+    "postedDowns": 158,
+    "observedDowns": 158,
+    "deliveredFraction": 1,
+    "observedRateHz": 0.631,
+    "latencyMs": {
+      "samples": 158,
+      "min": 0.177,
+      "meanOfMedians": 0.389,
+      "meanOfP95": 7.711,
+      "max": 20.52
+    }
+  },
   "hand": "scripted",
   "note": "Cursor moved by scripts/cursor-driver.m posting real CGEvents. Everything below CGEventPost is the shipping sampler path: the window server moved the real pointer, loom-input-sampler polled it at 120 Hz through the real API, and InputSampler wrote the log.",
   "os": "darwin",
@@ -15,19 +30,27 @@
         "clickRate": 0.2
       },
       "seconds": 25,
-      "durationSec": 25.235,
-      "cursorSamples": 3028,
-      "samplesPerSec": 119.99,
+      "durationSec": 25.167,
+      "cursorSamples": 3021,
+      "samplesPerSec": 120.04,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 5,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 29457,
+        "postedDowns": 8,
+        "observedDowns": 8,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 8,
+          "min": 0.189,
+          "median": 0.45,
+          "p95": 16.74,
+          "max": 16.74
+        }
       }
     },
     {
@@ -45,14 +68,22 @@
       "samplesPerSec": 120.03,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 22,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 29740,
+        "postedDowns": 21,
+        "observedDowns": 21,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 21,
+          "min": 0.211,
+          "median": 0.277,
+          "p95": 0.566,
+          "max": 19.993
+        }
       }
     },
     {
@@ -65,19 +96,27 @@
         "clickRate": 0.5
       },
       "seconds": 25,
-      "durationSec": 25.017,
+      "durationSec": 25.01,
       "cursorSamples": 3002,
-      "samplesPerSec": 120,
+      "samplesPerSec": 120.03,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 23,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 31397,
+        "postedDowns": 9,
+        "observedDowns": 9,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 9,
+          "min": 0.205,
+          "median": 0.448,
+          "p95": 10.895,
+          "max": 10.895
+        }
       }
     },
     {
@@ -90,19 +129,27 @@
         "clickRate": 0.9
       },
       "seconds": 25,
-      "durationSec": 25.075,
-      "cursorSamples": 3010,
-      "samplesPerSec": 120.04,
+      "durationSec": 25.092,
+      "cursorSamples": 3011,
+      "samplesPerSec": 120,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 27,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 31886,
+        "postedDowns": 26,
+        "observedDowns": 26,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 26,
+          "min": 0.204,
+          "median": 0.345,
+          "p95": 0.95,
+          "max": 14.286
+        }
       }
     },
     {
@@ -115,19 +162,27 @@
         "clickRate": 0.45
       },
       "seconds": 25,
-      "durationSec": 25.017,
-      "cursorSamples": 3003,
-      "samplesPerSec": 120.04,
+      "durationSec": 25.051,
+      "cursorSamples": 3006,
+      "samplesPerSec": 119.99,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 13,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 32516,
+        "postedDowns": 8,
+        "observedDowns": 8,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 8,
+          "min": 0.254,
+          "median": 0.423,
+          "p95": 19.529,
+          "max": 19.529
+        }
       }
     },
     {
@@ -140,19 +195,27 @@
         "clickRate": 0.7
       },
       "seconds": 25,
-      "durationSec": 25.009,
-      "cursorSamples": 3002,
+      "durationSec": 25.017,
+      "cursorSamples": 3003,
       "samplesPerSec": 120.04,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 16,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 32674,
+        "postedDowns": 22,
+        "observedDowns": 22,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 22,
+          "min": 0.208,
+          "median": 0.366,
+          "p95": 1.336,
+          "max": 18.827
+        }
       }
     },
     {
@@ -165,19 +228,27 @@
         "clickRate": 0.35
       },
       "seconds": 25,
-      "durationSec": 25.017,
-      "cursorSamples": 3003,
-      "samplesPerSec": 120.04,
+      "durationSec": 25.009,
+      "cursorSamples": 3001,
+      "samplesPerSec": 120,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 32806,
         "postedDowns": 9,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "observedDowns": 9,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 9,
+          "min": 0.183,
+          "median": 0.272,
+          "p95": 19.529,
+          "max": 19.529
+        }
       }
     },
     {
@@ -190,19 +261,27 @@
         "clickRate": 0.85
       },
       "seconds": 25,
-      "durationSec": 25.009,
-      "cursorSamples": 3002,
-      "samplesPerSec": 120.04,
+      "durationSec": 25.018,
+      "cursorSamples": 2997,
+      "samplesPerSec": 119.79,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 19,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 33752,
+        "postedDowns": 24,
+        "observedDowns": 24,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 24,
+          "min": 0.242,
+          "median": 0.534,
+          "p95": 0.865,
+          "max": 12.453
+        }
       }
     },
     {
@@ -216,18 +295,26 @@
       },
       "seconds": 25,
       "durationSec": 25.009,
-      "cursorSamples": 3002,
-      "samplesPerSec": 120.03,
+      "cursorSamples": 3000,
+      "samplesPerSec": 119.95,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 34497,
         "postedDowns": 12,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "observedDowns": 12,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 12,
+          "min": 0.177,
+          "median": 0.497,
+          "p95": 20.52,
+          "max": 20.52
+        }
       }
     },
     {
@@ -240,19 +327,27 @@
         "clickRate": 0.6
       },
       "seconds": 25,
-      "durationSec": 25.008,
-      "cursorSamples": 3002,
-      "samplesPerSec": 120.04,
+      "durationSec": 25.018,
+      "cursorSamples": 3003,
+      "samplesPerSec": 120.03,
       "droppedLines": 0,
       "clickCapture": {
-        "measured": false,
-        "reason": "accessibility-denied",
-        "axTrusted": false,
-        "tapEnabled": false,
-        "postedDowns": 20,
-        "observedDowns": null,
-        "deliveredFraction": null,
-        "latencyMs": null
+        "measured": true,
+        "reason": null,
+        "axTrusted": true,
+        "tapEnabled": true,
+        "posterTrusted": true,
+        "posterPid": 35303,
+        "postedDowns": 19,
+        "observedDowns": 19,
+        "deliveredFraction": 1,
+        "latencyMs": {
+          "samples": 19,
+          "min": 0.21,
+          "median": 0.334,
+          "p95": 16.919,
+          "max": 16.919
+        }
       }
     }
   ]

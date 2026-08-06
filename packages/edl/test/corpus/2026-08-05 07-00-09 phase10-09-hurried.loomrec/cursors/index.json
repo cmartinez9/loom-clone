@@ -8,6 +8,14 @@
         50
       ],
       "shape": "arrow"
+    },
+    "ce57f18ba0659febf22221a911465b7bc801ffc92878357cb30405c0925d1ade": {
+      "file": "cursors/ce57f18ba0659febf22221a911465b7bc801ffc92878357cb30405c0925d1ade.png",
+      "hotspot": [
+        120,
+        110
+      ],
+      "shape": "ibeam"
     }
   }
 }

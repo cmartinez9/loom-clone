@@ -276,7 +276,12 @@ real `InputSampler`, real `createBundle`); the hand is a script by default and a
 person under `--manual`, and `corpus/manifest.json` says which. Two controls make the
 budget mean something: the same ten logs followed with §6.2 and §6.3 **removed** must
 fail it, and the same generator with the rest box set to nothing must leave the target
-still for less of the recording. Measured: 75–94% still with the box, 6–66% without.
+still for less of the recording. Measured: 78–89% still with the box, 17–54% without.
+The corpus was recorded with Accessibility granted, so its `clicks.ndjson` are real and
+§6.5 is exercised against real `CGEventTap` output on all ten — the gate reads
+`manifest.json`'s `clickCapture` and **fails loudly** if a future corpus is recorded
+without the grant, rather than quietly becoming "auto-zoom declines politely ten
+times".
 
 **The divergence, raised rather than taken.** §6.6's own remedy — _"widen the rest box
 by 20% … up to three attempts"_ — moves the failing metrics by under 5%, and 8 of the
@@ -326,6 +331,21 @@ revert is that one constant.**
   arithmetic.
 - **§6.5's "four keyframes per segment" is three when the hold has no length.** A
   cluster of one click has `holdStart === holdEnd`, and §2.6 forbids a repeated `t`.
+- **An auto-zoom segment's `activeRanges` runs `4/(ζω₀)` past its last keyframe.**
+  §3.5's crossfade is only the no-op it is meant to be where the two sides _agree_ at
+  the edge, and at a segment `end` they do not: the last keys say identity but the
+  spring is still on its way there, so the window drags the difference to identity over
+  `blendMs` and turns a 1.2 s post-roll zoom-out into a 250 ms one. Measured before the
+  tail: the worst pan acceleration in **nine of ten** real recordings fell within
+  0.25 s of a segment `end`, at 47–177 UV/s²; with it, 9–66.
+- **Auto-zoom's own §6.6 figure is over budget, and it is geometry rather than a
+  defect.** The legal centre at magnification `a` is `[0.5/a, 1 − 0.5/a]`, an interval
+  that _opens as the zoom tightens_, so a centre edge-snapped for the segment's full
+  `amount` slides outward while the pre-roll zooms in — a real picture, correctly
+  measured. Slowing it means changing `preRollSec`, `amountRange` or the edge snap, all
+  §6.5's specified numbers, so it is folded into the open §6.6-versus-§6 question above
+  rather than answered here. The budget is reported on `AutoZoomResult.budget` and not
+  gated, because §6.6's remedy is a rest box and this generator has none.
 - **§6.7 is not here.** The cursor _sprite_'s own stiffer spring belongs to whatever
   composites the sprite; `Track` already carries `smoothing` and `clickSpring` for it.
 - **The corpus driver warps, it does not post.** Measured on this machine with
@@ -672,15 +692,15 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
 
-## Carried forward: three closed, four still open, one from phase 2, one from phase 10
+## Carried forward: four closed, four still open, one from phase 2 still open
 
 Phases 1, 3 and 4 shipped seven things **unverified**, as obligations on phase 2's
 signed-bundle gate. Three are now closed on real measurements from a granted, signed
 bundle; four are not, and **phase 2's harness does not cover them** — its only audio
 check is `microphone-revocation`, which is about a grant being withdrawn rather than
-about any of these, and it has no camera checks at all. Phase 2 then left one
-of its own (item 8) and phase 10 one of its own (item 9); both are blocked on a grant
-this machine does not have, not on a design question.
+about any of these, and it has no camera checks at all. Phase 2 then left one of its
+own (item 8, still open) and phase 10 one of its own (item 9, now closed on real
+measurements — see the click-capture section below).
 
 **Closed** (see the gate status below for the figures):
 
@@ -797,6 +817,46 @@ What none of them can establish is on hardware — see carried-forward item 8.
    never a zero, which is the whole point. **To close it: grant Accessibility to
    whatever runs the recorder and run `npm run record:cursor-corpus`; the reading is
    taken automatically and no code changes.**
+
+## Post-grant click rate and latency — measured, and the last open item closed
+
+The captain's accessibility decision closed with _"Post-grant event rate and latency
+are unmeasured. Validate during the build."_ Phase 2 confirmed the tap was live from a
+signed bundle but nobody clicked during its window. **Measured 2026-08-05**, with the
+grant in place, across the ten corpus recordings (250 s of wall clock):
+
+|                                        |                                                         |
+| -------------------------------------- | ------------------------------------------------------- |
+| Clicks posted / observed               | **158 / 158**                                           |
+| Delivered fraction                     | **1.0000** — no event was dropped by the tap            |
+| Observed rate                          | 0.63 Hz over the corpus; bursts of up to 6 inside 1.5 s |
+| Latency, min                           | **0.177 ms**                                            |
+| Latency, mean of per-recording medians | **0.389 ms**                                            |
+| Latency, mean of per-recording p95     | **7.711 ms**                                            |
+| Latency, max                           | **20.520 ms**                                           |
+
+Latency is `CGEventPost` → the tap callback emitting its line, **both stamped from
+`clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`** — the driver and `loom-input-sampler.m` use
+the same clock, so this is a duration rather than the difference of two clocks. The
+sub-millisecond median with a ~20 ms tail is the shape to expect: the tap is on the HID
+event stream and the tail is scheduler, not the tap. **For phase 10's consumer this is
+comfortably inside anything auto-zoom cares about** — §6.5's smallest interval is
+`preRollSec = 0.6 s`, three orders above the median and thirty times the worst sample.
+
+The figures are regenerated by `npm run record:cursor-corpus` and live in
+`packages/edl/test/corpus/manifest.json` under `clickCapture`.
+
+**The rule the instrument keeps.** Both the process that **posts** and the process that
+**observes** must report `AXIsProcessTrusted()` themselves — the poster on
+`cursor-driver.m`'s `hello` line with its own pid, the observer through the sampler's
+own capability — and `clickReading` refuses to report a latency unless both say yes,
+recording `measured: false` with a reason instead. Never a zero. That is not
+belt-and-braces: TCC keys a grant on the exact code identity of the responsible
+process, so "the sampler is trusted" does not establish that the driver is, and a grant
+that landed on the wrong binary is indistinguishable from no grant (§ Sharp edges —
+permissions: two rows with the same identifier already cost a full grant cycle here).
+`deliveredFraction` is what would have exposed a half-granted run: a poster that cannot
+post and an observer that can see would report 0 / N, not a latency.
 
 ## Permissions and first run, in one paragraph
 

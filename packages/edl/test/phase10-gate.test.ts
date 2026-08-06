@@ -252,10 +252,13 @@ describe('phase 10 gate — the seasickness budget on ten real recordings', () =
     expect(springOnlyFailures).toBeGreaterThan(0);
   });
 
-  it('auto-zoom on the real corpus reports a budget, and says when clicks are absent', () => {
+  it('auto-zoom runs on the corpus’ real click logs', () => {
     const corpus = loadCorpus();
+    const lines: string[] = [];
     let generated = 0;
     let refused = 0;
+    let segments = 0;
+    let clicks = 0;
     for (const recording of corpus) {
       const source = clickSourceFrom(recording.recording, recording.clicks);
       const result = generateAutoZoom({
@@ -266,19 +269,41 @@ describe('phase 10 gate — the seasickness budget on ten real recordings', () =
       });
       if (result.ok) {
         generated++;
+        segments += result.segments.length;
+        clicks += result.clicks;
         expectWellFormed(result.track);
         expect(result.budget.sampleCount).toBeGreaterThan(0);
+        // `activeRanges` is the segment list, and between segments the track below
+        // shows through — the whole of §3.5's handover on real data.
+        expect(result.track.activeRanges).toHaveLength(result.segments.length);
+        lines.push(
+          `  ${recording.entry.name.padEnd(28)} ${String(result.clicks).padStart(3)} clicks → ` +
+            `${result.segments.length} segments  ${describeSeasickness(result.budget)}`,
+        );
       } else {
         refused++;
         // Never an empty track, and never a zero that could be read as "no clicks".
         expect(result.message.length).toBeGreaterThan(20);
         expect(['not-recorded', 'not-captured', 'log-unreadable']).toContain(result.reason);
+        lines.push(`  ${recording.entry.name.padEnd(28)} refused: ${result.reason}`);
       }
     }
-    console.log(
-      `\nauto-zoom on the corpus: ${generated} generated, ${refused} refused for want of clicks`,
-    );
+    console.log(`\nauto-zoom on the corpus (${generated} generated, ${refused} refused):`);
+    console.log(lines.join('\n'));
     expect(generated + refused).toBe(10);
+
+    // The corpus was recorded with Accessibility granted, so §6.5 is exercised against
+    // real `CGEventTap` output rather than only against the refusal path. If a future
+    // corpus is recorded without the grant this fails loudly and names why, instead of
+    // quietly reducing the gate to "auto-zoom declines politely ten times".
+    const measured = loadCorpusManifest().clickCapture;
+    if (measured.measured) {
+      expect(refused, 'the manifest says clicks were captured; auto-zoom refused anyway').toBe(0);
+      expect(clicks).toBeGreaterThan(50);
+      expect(segments).toBeGreaterThan(0);
+    } else {
+      expect(generated, 'the manifest says clicks were not captured').toBe(0);
+    }
   });
 });
 

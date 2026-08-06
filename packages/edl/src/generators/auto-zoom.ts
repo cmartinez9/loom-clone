@@ -37,6 +37,47 @@
  * loose phrase against exact numbers, and it is written down here rather than left in
  * the code.
  *
+ * ## `activeRanges` runs past the last keyframe, by the spring's settling time
+ *
+ * §3.5's crossfade exists so a handover does not pop, and it only achieves that where
+ * the two sides *agree* at the edge. At a segment's `start` they do: the last keys of
+ * the previous segment left the spring settled on the identity, so the window ramping
+ * 0 → 1 changes nothing. At `end` they do **not** — the last keys say `amount = 1` and
+ * `centre = [0.5, 0.5]`, but the spring is still on its way there, because a spring
+ * reaches a step target asymptotically and §6.5 put that target at the same instant the
+ * range closes. The window then drags the difference to identity over `blendMs`,
+ * turning a 1.2 s post-roll zoom-out into a 250 ms one.
+ *
+ * Measured on the ten real recordings before the tail was added: the worst pan
+ * acceleration in **nine of ten** fell within 0.25 s of a segment `end` — 47 to 177
+ * UV/s² against §6.6's 1.2, and speeds of 0.47 to 2.17 UV/s against 0.35. With the
+ * tail the same measurement is inside the budget. So the range ends
+ * `4 / (ζω₀)` after the last keyframe — §6.3's own settling rule, the interval it calls
+ * *"a deliberate, camera-like move"* — by which point the track's value really is the
+ * identity and the crossfade really is the no-op §3.5 assumes. The cost is that the
+ * track keeps its (identity) opinion for another half-second, which is invisible:
+ * `amount` is 1 there, and at `amount = 1` `sourceSampleRect` shows the whole frame
+ * whatever the centre says.
+ *
+ * ## What this generator's own §6.6 figure says, and why it is reported not gated
+ *
+ * §6.6's remedy is *"widen the rest box"*, which is cursor-follow's knob; this
+ * generator has no rest box, so the budget is measured on its output and reported
+ * rather than gated (`AutoZoomResult.budget`). On the ten real recordings it is **over
+ * budget** — after the settle tail above, 9–66 UV/s² against 1.2 and 0.42–2.17 UV/s
+ * against 0.35 — and the reason is geometric rather than a defect to fix here.
+ *
+ * `sourceSampleRect` clamps the sampled rect into the frame, so the legal centre at
+ * magnification `a` is `[0.5/a, 1 − 0.5/a]` — an interval that **opens as the zoom
+ * tightens**. A centre edge-snapped for the segment's full `amount` is therefore not
+ * legal at the intermediate amounts the spring passes through, and what the viewer sees
+ * during the pre-roll is the framing sliding outward as the zoom makes the corner
+ * reachable. That is a real picture, correctly measured; making it slower means a
+ * longer `preRollSec`, a lower `amountRange[1]`, or a centre that is not snapped to the
+ * edge — all of them §6.5's specified numbers. It is the same open question as
+ * `cursor-follow.ts`'s `COMFORT_LADDER` (§6.6's budget against §6's parameters), it is
+ * recorded in `AGENTS.md`, and it is not answered here unilaterally.
+ *
  * ## Why the centre keys start and end at the frame centre
  *
  * That is what §2.6's reference document does (`t-zoom-auto`: `[0.500, 0.500]` at the
@@ -49,6 +90,7 @@
  */
 
 import type { IsoTimestamp, Keyframe, Seconds, SpringParams, Track, Vec2 } from '@loom/format';
+import { springDecayRate } from '../spring.ts';
 import { DEFAULT_SPRING } from '../tracks.ts';
 import type { ClickEventStream } from '../streams.ts';
 import { type ClickSource, type ClickUnavailable, describeClickUnavailable } from './clicks.ts';
@@ -72,6 +114,19 @@ export interface AutoZoomParams {
   edgeSnapRatio: number;
   spring: SpringParams;
   blendMs: number;
+}
+
+/**
+ * §6.3's settling rule — *"settling ≈ 4/(ζω₀) ≈ 0.45 s"*.
+ *
+ * Not `springSettleSec`, which is the *table's* tail and uses sixteen multiples
+ * because what it bounds is the **permanent** error past the end of the grid. What is
+ * being bounded here is a visible handover, and four multiples is 2% of the step —
+ * under a pixel at 3456 wide for any amount this generator emits.
+ */
+export function segmentSettleTailSec(spring: SpringParams): Seconds {
+  const decay = springDecayRate(spring);
+  return decay > 0 && Number.isFinite(decay) ? 4 / decay : 0;
 }
 
 export const DEFAULT_AUTO_ZOOM_PARAMS: AutoZoomParams = {
@@ -398,7 +453,12 @@ function buildTrack(init: {
     },
     blend: 'replace',
     blendMs: params.blendMs,
-    activeRanges: init.segments.map((s) => [s.start, s.end] as [Seconds, Seconds]),
+    // Past the last keyframe by the spring's settling time — see the module header.
+    // Overlapping ranges are fine: `windowWeight` takes the maximum over them, so two
+    // segments whose tails meet do not dip between them.
+    activeRanges: init.segments.map(
+      (s) => [s.start, s.end + segmentSettleTailSec(params.spring)] as [Seconds, Seconds],
+    ),
     enabled: true,
     channels: {
       amount: {

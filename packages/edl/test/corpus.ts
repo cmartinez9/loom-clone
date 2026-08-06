@@ -52,9 +52,35 @@ export interface CorpusManifestEntry {
   };
 }
 
+/**
+ * The corpus-wide answer to the captain's open question about click capture.
+ *
+ * `measured: false` means post-grant rate and latency are still unmeasured — never
+ * that they were measured as zero. The phase-10 gate reads it to decide whether §6.5
+ * is being exercised against real `CGEventTap` output or only against its refusal path.
+ */
+export type CorpusClickCapture =
+  | { measured: false; reason: string; recordings: number; note: string }
+  | {
+      measured: true;
+      recordings: number;
+      postedDowns: number;
+      observedDowns: number;
+      deliveredFraction: number;
+      observedRateHz: number;
+      latencyMs: {
+        samples: number;
+        min: number;
+        meanOfMedians: number;
+        meanOfP95: number;
+        max: number;
+      };
+    };
+
 export interface CorpusManifest {
   generatedAt: string;
   tool: string;
+  clickCapture: CorpusClickCapture;
   hand: 'scripted' | 'human';
   note: string;
   os: string;

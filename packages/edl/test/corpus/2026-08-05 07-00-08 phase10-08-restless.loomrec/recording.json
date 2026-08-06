@@ -2,7 +2,7 @@
   "schema": "loom.recording/1",
   "clock": {
     "kind": "videoframe-timestamp-us",
-    "t0Us": 2727470856563
+    "t0Us": 2729475791330
   },
   "display": {
     "id": 1,
@@ -23,11 +23,11 @@
     "cursor": {
       "file": "events/cursor.ndjson",
       "hz": 120,
-      "sampleCount": 3002
+      "sampleCount": 3000
     },
     "clicks": {
       "file": "events/clicks.ndjson",
-      "available": false,
+      "available": true,
       "source": "cgeventtap"
     },
     "cursorImages": "cursors/index.json"
@@ -39,14 +39,14 @@
       "screen": "not-determined",
       "camera": "not-determined",
       "microphone": "not-determined",
-      "accessibility": false
+      "accessibility": true
     },
     "requestedFps": 0,
     "resolutionClamp": "none",
     "droppedFrames": {}
   },
   "integrity": {
-    "finalizedAt": "2026-08-06T00:08:47.796Z",
+    "finalizedAt": "2026-08-06T00:42:12.747Z",
     "recoveredFromCrash": false,
     "truncatedToSec": null
   }
