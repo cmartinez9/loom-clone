@@ -1115,8 +1115,12 @@ was not a control.
   argument rather than by the experiment. `test/budget-control.test.ts` reproduces both
   red runs as withheld and constructs the counter-case from them by substituting the
   control's _health_ only, each run keeping its own spin count; the over-budget share is
-  proved separately, against a reachable regression at a shape a real run produced, and
-  both doors carry a `verify:mutation` entry.
+  proved separately, against a reachable regression at a shape a real run produced. Both
+  properties are broken on disk by `npm run verify:mutation`:
+  `the-over-budget-share-is-never-compared` deletes the share comparison in
+  `expectTracksControl`, and `a-dead-control-withholds-the-verdict` widens
+  `instrumentOutOfCalibration`'s keying so a control that measured nothing withholds
+  instead of being judged.
   **A stalled control cannot be reproduced on this machine, so do not try to get there
   with load.** `scripts/gate-load.mjs` at 20 and at 64 spinners (load average 18.5 on 18
   cores) left the control at 8.40 ms both times, unchanged from quiet: macOS keeps
