@@ -409,6 +409,19 @@ function readScript(
     return { label: entry.label, mean, variance };
   });
   const trouble = document.getElementById('trouble');
+  // The standing Zoom panel, as a person reads it. By the term each value sits
+  // beside rather than by its position in the list, so a row inserted above one
+  // does not silently re-point this at a different number.
+  const zoomPanel = document.getElementById('zoom-panel');
+  const said = (term) => {
+    for (const group of zoomPanel.querySelectorAll('dl > div')) {
+      const dt = group.querySelector('dt');
+      if (dt !== null && (dt.textContent ?? '').trim() === term) {
+        return (group.querySelector('dd')?.textContent ?? '').trim();
+      }
+    }
+    return '';
+  };
   return {
     timelineSec: probe.timelineSec,
     sourceSec: probe.sourceSec,
@@ -420,6 +433,12 @@ function readScript(
     })),
     annotations: probe.annotations,
     picture: { hash: (hash >>> 0).toString(16), distinct: seen.size, coverage: (pixels - background) / pixels, boxes },
+    panel: {
+      atPlayhead: said('At playhead'),
+      centre: said('Centre'),
+      yours: said('Yours'),
+      buttons: [...zoomPanel.querySelectorAll('button')].map((b) => (b.textContent ?? '').trim()),
+    },
     trouble: trouble.hidden ? '' : (trouble.textContent ?? ''),
   };
 })()`;

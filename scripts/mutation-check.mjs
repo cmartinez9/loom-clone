@@ -1677,6 +1677,25 @@ export const MUTATIONS = [
     mustFail: [P15_GATE],
   },
   {
+    name: 'the-zoom-panel-does-not-follow-the-playhead',
+    breaks:
+      'the standing Zoom panel\'s per-frame half. Rebuilt on a document or selection ' +
+      'change alone, it describes whatever instant the last edit happened at: after ' +
+      'an ordinary scrub its readout is a magnification the picture no longer has, ' +
+      'and — the half that matters — *Take manual control* is withheld, because its ' +
+      'presence is computed from the same stale instant. That is the one capability ' +
+      'the captain named himself, missing on exactly the path a person uses to reach ' +
+      'it (scrub to the moment, then take control), so the feature reads as absent.\n' +
+      '   Nothing caught it for a whole phase: the document is right, `resolve` is ' +
+      'right and the picture is right, so every test passed and a person looking at ' +
+      'the `--shots` screenshots found it. The gate now reads the panel off the DOM ' +
+      'at both sides of a region boundary and compares it against the probe.',
+    file: 'apps/renderer/src/editor/main.ts',
+    find: '    if (sourceSec !== paintedPanelSourceSec) {',
+    replace: '    if (sourceSec === paintedPanelSourceSec) {',
+    mustFail: [P15_GATE],
+  },
+  {
     name: 'a-keyframe-drag-lands-on-its-neighbour',
     breaks:
       'the bound that keeps a dragged key clear of the ones beside it. `setKey` ' +
