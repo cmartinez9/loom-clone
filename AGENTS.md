@@ -851,9 +851,9 @@ was not a control.
   `prime(t, 0.5)` — and **§4.3 needs the correction the docblock in `preview-loop.ts`
   now carries**; it was written before §3.1 had a clip list to disagree with. Nothing
   catches this by accident: the two numbers are equal over an identity clip list, which
-  is every document this app produces until an editing UI exists, and both golden and
-  phase-6 gates stub the reader so the argument is discarded. The regression test that
-  does catch it is the `SOURCE time` describe in `apps/renderer/test/preview-loop.test.ts`
+  was every document this app produced until the editor shipped a trim, and both golden
+  and phase-6 gates stub the reader so the argument is discarded. The regression test
+  that does catch it is the `SOURCE time` describe in `apps/renderer/test/preview-loop.test.ts`
   — a real `compile` over a non-zero `sourceStart`, asserting the argument the reader
   was handed. Any new consumer of a `SourceReader` gets the same test or the same bug.
 - **Anchoring `prime`/`release` in source time makes their _windows_ source seconds too,
@@ -861,15 +861,16 @@ was not a control.
   `SourceReader.prime` covers `[t, t + aheadSec]` in source time
   (`packages/decode/src/source-reader.ts:254`), so the default `lookaheadSec: 0.5` buys
   0.25 s of playback ahead on a 2× clip — half of §4.2's target — and 1.0 s on a 0.5×
-  one; `retainBehindSec: 0.1` scales identically, keeping 0.05 s behind at 2×. If you
-  are on `fm/loom-p14-editor-shell`, this is live the moment your UI can set a speed:
-  nothing regresses today only because every document this app produces has an identity
-  clip list. **Do not compensate here.** §4.5 puts preview and export on the
-  must-be-identical list, so scaling the window in `PreviewLoop` alone manufactures
-  exactly the divergence phase 8's golden-frame gate exists to catch — a new defect, not
-  a partial fix. Any change is one decision for both §4.5 paths together, and it needs
-  `CompiledTimeline.clips.speeds`, which is `@internal` to `@loom/edl` — a cross-package
-  API call, not a local tweak.
+  one; `retainBehindSec: 0.1` scales identically, keeping 0.05 s behind at 2×. The
+  editor is the first UI that writes a clip list and it writes `speed: 1` only, with no
+  speed control — `apps/renderer/src/editor/trim.ts` records that as a scope statement
+  rather than a placeholder. That, and only that, is why nothing regresses today; the
+  first speed control makes it live. **Do not compensate here.** §4.5 puts preview and
+  export on the must-be-identical list, so scaling the window in `PreviewLoop` alone
+  manufactures exactly the divergence phase 8's golden-frame gate exists to catch — a
+  new defect, not a partial fix. Any change is one decision for both §4.5 paths
+  together, and it needs `CompiledTimeline.clips.speeds`, which is `@internal` to
+  `@loom/edl` — a cross-package API call, not a local tweak.
 - **`Compositor.render` does not clear when it is handed no frame — it returns.** §4.3's
   "a miss holds the previous frame" is kept by leaving the render target alone; a clear
   before the null check turns every backward scrub into a black flash. The loop cannot

@@ -1,9 +1,10 @@
 /**
  * The library window.
  *
- * Vanilla TypeScript and the design system, no framework. Phase 0's job is the
- * skeleton, and picking a UI framework for the editor is a decision phase 6/7 gets
- * to make with the compositor in front of them rather than one this file imposes.
+ * Vanilla TypeScript and the design system, no framework. Phase 0 deferred the
+ * framework question to whoever built the editor rather than imposing an answer from
+ * here; phase 14 took it, kept vanilla TypeScript, and wrote the reasoning down in
+ * `apps/renderer/src/editor/main.ts`'s header — which is where it lives now.
  *
  * Everything this window can do is `window.loom` — the preload surface. There is
  * no `fs`, no `require`, no network. That is the point (§0, rule 2).
