@@ -94,8 +94,10 @@ export interface GateFixture {
  * the branch condition — the other is {@link GateReport.gpuCost} beside
  * {@link GateEnvironment.hardwareDecode} — and §8's bound is the compositor's to meet
  * on any host that runs the product's workload *and* whose control clears it. Where
- * this control does not clear it, the shortfall is reported with the measured figure
- * and the compositor is held to the ceiling that control just demonstrated.
+ * this control does not clear it, the phase is not judged at all: the instrument was
+ * out of calibration in those same frames, so the run reports no verdict on §8 rather
+ * than a bound derived from the stalled figure. `instrumentOutOfCalibration` is that
+ * rule, and the ceiling the control demonstrated is reported rather than required.
  */
 export interface GateBudgetControl {
   /** Measured in the scrub phase's own frames. */

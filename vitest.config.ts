@@ -23,8 +23,10 @@ export default defineConfig({
     // own temp root — measurement is: three of these gates time the machine they are
     // running on. The phase-5 sampler asserts §6.1's 120 Hz, phase 6 judges a 16 ms
     // frame budget on the single worst frame — and measures the host beside it, so a
-    // gate sharing the box would defer that number rather than fail it — and phase 3's
-    // twenty-minute A/V sync gate saturates the box for the better part of a minute
+    // box busy enough to push that control past the whole budget withholds the verdict
+    // instead of failing on it, while a control merely stretched inside the budget
+    // leaves the frame judged exactly as §8 writes it — and phase 3's twenty-minute
+    // A/V sync gate saturates the box for the better part of a minute
     // encoding AAC and H.264. Two of those on a 3-vCPU CI runner measure each other,
     // and neither can tell that apart from the thing it exists to catch: CI failed the
     // sampler at 53 samples in a window it needed 60 in, on a commit that changed

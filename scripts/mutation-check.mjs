@@ -98,6 +98,15 @@ const OVERLAY = 'apps/main/test/overlay.test.ts';
 const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
 /** The event logs a recording writes, driven through `RecorderSession` itself. */
 const EVENTS = 'apps/main/test/recorder-events.test.ts';
+/**
+ * The phase-6 gate's own judgement policy: which host earns which bound, and when a
+ * phase is not judged at all.
+ *
+ * The source under test is `test/gate/budget-control.ts`, which is the gate's
+ * production code even though it lives under `test/` — the phase-6 gate is what
+ * consumes it, and a hole here is a run reported as a pass that nothing established.
+ */
+const BUDGET_POLICY = 'test/budget-control.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -1278,6 +1287,37 @@ const MUTATIONS = [
     find: '      if (outcome.failure !== null) {',
     replace: '      if (outcome.failure !== null && (false as boolean)) {',
     mustFail: [PHASE9, EXPORT_SESSION],
+  },
+
+  // ---- the phase-6 gate's own judgement policy ----------------------------
+  {
+    name: 'the-over-budget-share-is-never-compared',
+    breaks:
+      'the one bound the deferred branch carries on both of its doors. The tracking ' +
+      'ceiling is a multiple of a number a stalling host inflates, and the scaled ' +
+      'envelope grows ten times faster than a GPU-side regression lifts the frame it ' +
+      'judges — so a compositor missing the budget frame after frame is caught by *how ' +
+      'often* and, on those hosts, by nothing else. Deleting the comparison leaves a ' +
+      'deferred phase with no distributional check at all, and the gate reports it.',
+    file: 'test/gate/budget-control.ts',
+    find: '  if (frameShare >= resolution && frameShare > spinShare) {',
+    replace: '  if (false) {',
+    mustFail: [BUDGET_POLICY],
+  },
+  {
+    name: 'a-dead-control-withholds-the-verdict',
+    breaks:
+      "the rule that a withheld verdict keys on the control's own measured overrun and " +
+      'on nothing else. Withholding for a control that produced *nothing* makes "the ' +
+      'instrument stopped running" and "the gate has no opinion" the same event, ' +
+      'silently and forever: a control that dies takes §8 with it and the run reports ' +
+      'skipped rather than failing on its own sample-count floor.',
+    file: 'test/gate/budget-control.ts',
+    find: '  return !environmentSustainsBudget(evidence.control, evidence.budgetMs);',
+    replace:
+      '  return evidence.control.count === 0 || ' +
+      '!environmentSustainsBudget(evidence.control, evidence.budgetMs);',
+    mustFail: [BUDGET_POLICY],
   },
 ];
 

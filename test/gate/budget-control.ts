@@ -29,8 +29,13 @@
  * - **The control holds the budget** → this host can do this, so the bound is the
  *   compositor's and §8 is asserted exactly as it stands.
  * - **The control does not** — it stretched half a frame of arithmetic past a whole
- *   frame → the shortfall is *reported*, with the measured figure, rather than failed
- *   on.
+ *   frame → the instrument was out of calibration in the very windows the frames were
+ *   sampled from, so this phase yields **no verdict**: {@link instrumentOutOfCalibration}
+ *   and {@link withheldJudgement}, reported loudly and never as a pass. Not a widened
+ *   bound, not a tolerance, not a retry — nothing is compared against anything, because
+ *   there is no working stopwatch to compare with. The hazard that would make this
+ *   unsound, and the measurement that rules it out, are at
+ *   {@link instrumentOutOfCalibration}.
  *
  * ## The other half of the question: is this host running the product's workload?
  *
@@ -709,6 +714,113 @@ export function spinResolution(spins: number): number {
 }
 
 /**
+ * Whether this phase's *instrument* came back out of calibration — the control missed
+ * the budget it was measuring compliance with, so this phase's frames were not measured
+ * on a working stopwatch and yield **no verdict at all**.
+ *
+ * This is `!`{@link environmentSustainsBudget}, written out as a name because it is now
+ * a verdict rather than a branch selector, and because a reader has to be able to check
+ * in one place that it keys on *the control's own measured overrun and nothing else*.
+ * Not on CI, not on an environment variable, not on the renderer string, and — the one
+ * that would be circular — **not on the frame comparison having failed**. The instrument
+ * is judged before the thing it measures, and by itself.
+ *
+ * ## It takes the phase's whole {@link BudgetEvidence}, and reads two fields of it
+ *
+ * The shape is its siblings' — {@link assertsAbsoluteBudget}, {@link expectTracksControl},
+ * {@link withheldJudgement} — so one phase's evidence is the only thing any member of the
+ * family can be handed, and the branch that withholds a phase cannot be given a *different*
+ * phase's control by a copy-paste that type-checks. It could be: the scrub branch and the
+ * play branch each used to reach past their own evidence for a bare `ControlPhase`, and
+ * leaving `report.control.scrub` in the play branch compiled and decided the play phase's
+ * withholding on the scrub control's overrun — mis-routing exactly the decision this
+ * function exists to make.
+ *
+ * **Taking the whole object is not licence to consult the rest of it, and must never
+ * become one.** The body is `!environmentSustainsBudget(evidence.control,
+ * evidence.budgetMs)`; `host`, `measured` and `what` are not read here and may not be. That
+ * is the keying stated above, restated as a property of the code a reader can check by eye
+ * — and the reason it is spelled out is that widening the parameter is precisely the change
+ * a later reader could misread as permission to key on the host profile, the frame
+ * comparison or the renderer string. The whole verdict rests on it not being.
+ *
+ * **A control that produced nothing is not out of calibration.** `count === 0` sustains
+ * the budget by {@link environmentSustainsBudget}'s own rule, so it lands on the branch
+ * where §8 is asserted rather than on the one where nothing is: a dead instrument must
+ * never be able to withhold a verdict, which would make "the control stopped running"
+ * and "the gate has no opinion" the same event. The gate asserts the spin count
+ * separately and a dead control fails there, loudly, with its own count in the message.
+ *
+ * ## Why an out-of-calibration control invalidates the reading rather than lowering it
+ *
+ * {@link burn} is a fixed span of floating-point arithmetic with none of the
+ * compositor's, the decoder's or WebGL's code in it, given {@link CONTROL_PERIOD_MS} of
+ * free clock after every spin. When *that* cannot finish {@link CONTROL_TARGET_MS} of
+ * work inside one 60 Hz refresh, the host was not scheduling the process — and a frame
+ * time sampled from the same windows is scheduler noise carrying a number, not a
+ * measurement of the compositor. There is nothing to compare it against, in either
+ * direction: the ceiling this branch used to fall to is a multiple of a number the same
+ * stall inflates, and the share beside it is counted over windows the same stall lands
+ * in. So the honest output is a withheld verdict, which is what {@link withheldJudgement}
+ * says out loud.
+ *
+ * Measured, and this is the whole case for it. GitHub's macos-14 runners pre-empt this
+ * control while it is doing 8.33 ms of arithmetic with 33.33 ms of clock free after each
+ * spin: 22.60 ms on CI run 31074994194 (`main`), 26.00 ms on 31075861127, 26.20 ms on
+ * 31070075031 — each with spins actually over the budget. Run 31075861127 rules out the
+ * obvious confounder: the repository's other macOS job was skipped and started only
+ * after that run's `verify` job had finished, so the host had no self-inflicted
+ * contention at all and the control was still pre-empted to 26.00 ms.
+ *
+ * ## The hazard this would be unsound without, and why it is ruled out
+ *
+ * This is only honest while **a slow compositor cannot itself push the control over its
+ * budget** — otherwise a real regression could starve the instrument, reach this branch
+ * and convert its own failure into a withheld verdict, which would be far worse than
+ * the flakiness it fixes.
+ *
+ * It cannot, and the reason is structural rather than statistical. The spin does not run
+ * *beside* the measured frame; it runs strictly **after** it, in the same synchronous
+ * scheduler dispatch on the one renderer thread — `callback(nowMs); afterFrame();` in
+ * `harness.ts`'s `counting()`, where `callback` is `PreviewLoop`'s frame (which "does not
+ * await", and whose `metrics.record` closes the measured span before it returns) and
+ * `afterFrame` is `control.tick()`. {@link burn} then reads `performance.now()` for
+ * itself, so the interval it measures *begins* after the compositor's work has finished.
+ * A compositor that takes longer delays the spin; it cannot lengthen it.
+ *
+ * And the harness measures exactly that claim on every run, which is what makes it
+ * evidence rather than an argument. The slow-compositor phase burns
+ * {@link SLOW_COMPOSITE_MS} — four whole budgets — inside `render` on every one of its
+ * frames, with this control spinning beside it in those same frames. Across six
+ * consecutive CI runs on the paravirtual runner, the control beside that phase read
+ * 8.40, 8.50, 8.40, 8.40, 8.50 and 22.90 ms against its 8.33 ms target, while the
+ * control beside the *unmodified* compositor in the same runs read 8.60, 26.20, 10.70,
+ * 9.90, 22.60 and 26.00 ms. A compositor two hundred times slower than the real one
+ * left the instrument at target; the host is what moved it, and on run 31070075031 it
+ * moved it to 26.20 ms in the play phase and back to 8.50 ms in the slowed phase
+ * moments later. `test/phase6-gate.test.ts` requires that slowed path to fail §8's own
+ * number on every host and both branches, so the case this withholding could have
+ * hidden is the one case still proved in-run.
+ *
+ * **What that in-run experiment covers, scoped rather than overstated.** The slowed
+ * phase's source is a stub with `frameAt: () => null` (`test/gate/harness.ts`), so
+ * `Compositor.render` returns before any texture upload, draw or timer query: what runs
+ * inside that frame body is {@link burn} and the composite's early return, with no GL
+ * traffic and no `VideoFrame` churn beside it. So the readings above are evidence about
+ * **synchronous CPU cost specifically** — which is the shape this gate's own documented
+ * regression takes, 20 ms burned on one composite in thirty. The paths they do not
+ * exercise are the ones where a regression's cost is *deferred* past the frame body: a GC
+ * pause earned by frame churn, or driver-side backpressure, landing inside a later
+ * {@link burn} window. Those are carried by the structural argument above rather than by
+ * the experiment — the spin's interval begins after the frame body returned, so the
+ * compositor's own work is never inside it — and that is the honest division of the two
+ * halves rather than one claim doing the work of both.
+ */
+export function instrumentOutOfCalibration(evidence: BudgetEvidence): boolean {
+  return !environmentSustainsBudget(evidence.control, evidence.budgetMs);
+}
+
+/**
  * The branch where the host, not the compositor, missed §8's number.
  *
  * Returns the line the caller should report. **Throws — the gate fails — whenever the
@@ -738,6 +850,18 @@ export function spinResolution(spins: number): number {
  * one of its spins was over it and `spinShare >= 1/count`, which is the floor itself — so
  * any share large enough to beat `spinShare` has already cleared it. It can only ever
  * change a verdict on the door where the control was healthy and `spinShare` is zero.
+ *
+ * ## Who still reaches the ceiling's door
+ *
+ * {@link instrumentOutOfCalibration} took the phase-6 gate's two judged phases off it:
+ * a phase whose own control missed the budget is now withheld rather than judged, and
+ * `test/phase6-gate.test.ts` calls this only on the door where the control was healthy.
+ * The ceiling below is still reached, and still tested, on two paths that are not
+ * verdicts on the compositor — {@link deferredBoundsOutcome}, which reports what these
+ * bounds *would* have said without failing on it, and `test/budget-control.test.ts`,
+ * which pins the policy directly. It is deliberately left intact rather than deleted:
+ * what it says about a run is still worth printing, and it is the thing a future reader
+ * has to be able to see was withheld rather than quietly removed.
  */
 export function expectTracksControl(evidence: BudgetEvidence): string {
   const { what, budgetMs, measured, control } = evidence;
@@ -788,6 +912,62 @@ export function expectTracksControl(evidence: BudgetEvidence): string {
     `the host's own ${pct(spinShare)})${verdict(frameShare, resolution, control.count)}. ` +
     `See test/gate/budget-control.ts; §8's number is asserted exactly as written on any host ` +
     `that runs the product's own workload and whose control clears it.`
+  );
+}
+
+/**
+ * What {@link expectTracksControl}'s bounds made of a phase, as a line rather than as a
+ * verdict — the same evaluation, with the throw turned back into text.
+ *
+ * For the two places that want to *print* that judgement without it deciding anything:
+ * the slow-compositor phase, whose own control may have stalled beside it, and
+ * {@link withheldJudgement}, where naming what the withheld bounds would have said is
+ * the difference between a deferral a reader can check and one they have to re-derive.
+ */
+export function deferredBoundsOutcome(evidence: BudgetEvidence): string {
+  try {
+    return `those bounds did not reach it: ${expectTracksControl(evidence)}`;
+  } catch (error) {
+    return `they caught it anyway: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * The line a phase reports when its own instrument was out of calibration: **no
+ * verdict**, said in terms that cannot be read as a pass.
+ *
+ * Three things it has to carry, and the first is the point. It names **the control's own
+ * measured overrun** — the number this withholding keys on — so the reason is a figure
+ * rather than an assertion. It names what the frames measured, because the reader has to
+ * be able to see what was *not* judged. And it names what the deferred branch's bounds
+ * would have made of it ({@link deferredBoundsOutcome}), so a compositor that really was
+ * slow on a stalled host still leaves its evidence in the log even though nothing failed
+ * on it — the strongest thing available once the stopwatch is known to be wrong.
+ */
+export function withheldJudgement(evidence: BudgetEvidence): string {
+  const { what, budgetMs, measured, control } = evidence;
+  const frameShare = overBudgetRate(measured.overBudget, measured.count);
+  return (
+    `${what}: NOT JUDGED — no verdict on §8's frame budget, and this is not a pass. The ` +
+    `instrument was out of calibration in these very frames: ${figures(control, budgetMs)}. ` +
+    `A fixed span of arithmetic with none of the compositor's code in it, given ` +
+    `${fmt(control.periodMs)} ms of free clock after every spin, could not finish ` +
+    `${fmt(control.targetMs)} ms of work inside the ${fmt(budgetMs)} ms it is judging the ` +
+    `compositor against — so this host was not scheduling the process, and a frame time ` +
+    `sampled from the same windows is scheduler noise carrying a number rather than a ` +
+    `measurement of the compositor. Nothing is inferred from it in either direction. ` +
+    `Unjudged, for the record: worst frame ${fmt(measured.maxMs)} ms at frame ` +
+    `${measured.maxAt}, ${measured.overBudget} of ${measured.count} over the ` +
+    `${fmt(budgetMs)} ms budget (${pct(frameShare)}); ${describeHost(evidence.host)}. What ` +
+    `the deferred bounds would have said, reported and not acted on — ` +
+    deferredBoundsOutcome(evidence) +
+    // Last as well as first, because the borrowed line above ends in the deferred
+    // branch's own vocabulary — including, where those bounds happened to clear, a
+    // sentence that reads like a verdict. Nothing in it is one. A reader who skims to
+    // the end of this line has to arrive at the same place a reader who skims the
+    // start of it does.
+    ` — END OF WITHHELD PHASE ${what}: none of the above is a verdict. This phase was ` +
+    `NOT JUDGED against §8's frame budget, and this run is not a pass on it.`
   );
 }
 

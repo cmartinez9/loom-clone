@@ -37,8 +37,10 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
-                          # generators, annotations, the drawing overlay and the event
-                          # logs 91 ways; each must fail a gate
+                          # generators, annotations, the drawing overlay, the event logs
+                          # and the phase-6 gate's judgement policy; one way per entry in
+                          # scripts/mutation-check.mjs's MUTATIONS registry, which is
+                          # where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -981,10 +983,17 @@ was not a control.
   `CONTEXT_LOST_WEBGL` each) when it exited on two consecutive runs. `disposePath`
   hands each one back with `WEBGL_lose_context`, and a release the harness asked for is
   kept out of `contextLost` by name rather than by inference.
-- **The phase-8 golden harness died on CI four times in five, and what closed it was
-  asking the GPU for less — not tuning a switch.** Always the same instant, within a
-  second of `export writer open`: `Failed to allocate texture` inside
-  `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error`.
+- **The phase-8 golden harness dies on CI when the GPU process cannot allocate. Asking
+  the GPU for less thinned it out; tuning a switch did nothing; and it is still not
+  closed.** Always the same instant, within a second of `export writer open`: an
+  allocation the GPU process cannot satisfy, then
+  `Restarting GPU process due to unrecoverable error` and `abnormal-exit (exit 8704)`.
+  **Which allocator reports it is not part of the signature.** Some runs say
+  `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane`
+  (`dawn_context_provider.cc:120`); others say `Failed to allocate host memory` out of
+  ANGLE-Metal's `mtl_resources.mm`, as a `GL_OUT_OF_MEMORY`. What runs out is **host**
+  memory, so the site named is whichever allocation happened to be next rather than the
+  one that is too large.
   Two things were tried first and neither closed it, both worth knowing because both
   _sound_ decisive. **One:** `--force-gpu-mem-available-mb` overrides Skia's GPU
   resource-cache budget, so phase 6's `2048` tells the driver it may hold two gigabytes
@@ -1008,6 +1017,36 @@ was not a control.
   one assertion moved. The knob on a virtualised runner is the GPU bytes a frame of the
   export pass moves — **source area, output area, and the number of live contexts** —
   not the cache budget.
+  **Two turns of that knob did not close it, and there is no third.** Measured on
+  `fm/loom-gate-instrument-validity`, at 1024x576 into 768x432: three of seven CI runs
+  died the same way — `31094399329`, `31100718641` and `31102224786`, each within a
+  second of `export writer open` and each exhausting **both** launches
+  `shouldRelaunchGolden` allows, so the gate reported a phase-8 failure about a run that
+  produced no reading. The first two reported `Failed to allocate texture` inside
+  `Skia_Wrapped_YUVPlane`; the third reported `Failed to allocate host memory` out of
+  ANGLE-Metal and carried no Skia line at all, which is the measurement behind the
+  sentence above that the allocator is not the signature. A third turn — 768x432 into
+  512x288, 44% of the area — was applied as a CI auto-fix on `0e2c49e` and **reverted**
+  on `8a421b4`. Read _"Not one assertion moved"_ two paragraphs up in that light, because
+  it is the sentence every reduction is defended with: a fixture size is a **constant, not
+  an assertion**, so shrinking one survives a zero-deleted-`expect` audit while making a
+  gate whose whole job is per-pixel identity materially worse at it. It is a weaker
+  guarantee than it reads as. Turning this knob again is a change to what phase 8
+  establishes and needs the same scrutiny as deleting one of its checks.
+  **What closes it is the third outcome, one gate over.** A run whose every launch lost
+  the context measured nothing, and a gate that calls that a failure is reporting a
+  verdict it never reached — exactly what `instrumentOutOfCalibration` answers for phase
+  6's frame budget. The same remedy for phase 8 — withhold the verdict when every launch
+  lost the GPU context — is in flight as its own task and is **not** phase 6's branch to
+  land. Until it does, a red `test/phase8-gate.test.ts` whose log carries
+  `GPU process gone: abnormal-exit (exit 8704)` within a second of `export writer open`
+  on **both** launches is this known crash rather than a regression to chase, and the
+  answer is neither a smaller fixture nor a third launch. **Match on that pair and not
+  on the allocator**: this rule used to read `Failed to allocate texture`, which run
+  `31102224786` — the first run after the revert, and the one that turned this branch red
+  — does not contain anywhere in its log. A recognition rule that fails to recognise the
+  run it was written for sends the next reader chasing a regression, which is the one
+  thing this entry exists to prevent.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
@@ -1081,9 +1120,9 @@ was not a control.
   often it trips 16.67 ms says nothing about the compositor.
   **`FRAME_BUDGET_MS` and §8's four assertions are untouched, and strict on any host that
   can represent the product** — which is every machine a contributor runs `npm test` on. A
-  phase is refused them only where the host structurally cannot: no hardware-backed decode
-  **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch is not
-  a pass. It detects regressions by **rate** — the compositor may miss the budget no
+  phase is deferred instead only where the host structurally cannot: no hardware-backed
+  decode **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch
+  is not a pass. It detects regressions by **rate** — the compositor may miss the budget no
   oftener than the host missed it in the same frames — and bounds single frames only by
   §8's frame scaled by the per-frame work this host was measured doing.
   **The derivations are not repeated here.** `test/gate/budget-control.ts`'s module
@@ -1094,6 +1133,73 @@ was not a control.
   threshold tuned to a run. Read it before touching any of them;
   `test/budget-control.test.ts` pins the policy — including that a real regression fails on
   both branches — and `test/phase6-gate.test.ts` judges the run.
+  **A control that missed its own budget yields no verdict at all**, which is a third
+  outcome beside strict and deferred rather than a widening of either:
+  `instrumentOutOfCalibration` keys it on the control's own measured overrun and on
+  nothing else, the phase is reported through `withheldJudgement`, and the gate reports
+  **skipped** — never passed, because this test's name is a claim and a green tick beside
+  it asserts what a broken stopwatch did not establish. Its load-bearing assumption is
+  that a slow compositor cannot cause it: the spin runs _after_ the measured frame body in
+  the same synchronous scheduler dispatch (`counting()` in `harness.ts` —
+  `callback(nowMs); afterFrame();`) on the one renderer thread, and `burn` reads its own
+  clock, so a slower compositor delays the spin and cannot lengthen it. The harness
+  measures that on every run — the slow-compositor phase burns four whole budgets inside
+  `render` beside this same control — and the readings are at
+  `instrumentOutOfCalibration`, along with the scope of what they cover: that phase's
+  source is `frameAt: () => null`, so its frames carry `burn` and no GL traffic, and the
+  readings are evidence about synchronous cost specifically. Deferred cost — a GC pause,
+  driver-side backpressure landing inside a later spin — is carried by the serialisation
+  argument rather than by the experiment. `test/budget-control.test.ts` reproduces both
+  red runs as withheld and constructs the counter-case from them by substituting the
+  control's _health_ only, each run keeping its own spin count; the over-budget share is
+  proved separately, against a reachable regression at a shape a real run produced. Both
+  properties are broken on disk by `npm run verify:mutation`:
+  `the-over-budget-share-is-never-compared` deletes the share comparison in
+  `expectTracksControl`, and `a-dead-control-withholds-the-verdict` widens
+  `instrumentOutOfCalibration`'s keying so a control that measured nothing withholds
+  instead of being judged.
+  **A stalled control cannot be reproduced on this machine, so do not try to get there
+  with load.** `scripts/gate-load.mjs` at 20 and at 64 spinners (load average 18.5 on 18
+  cores) left the control at 8.40 ms both times, unchanged from quiet: macOS keeps
+  scheduling the Electron renderer whatever else is asked of the box, which is precisely
+  why the paravirtual runner's 22–26 ms spins are a statement about that host. To exercise
+  the withheld branch end to end, widen the control's own target for one run
+  (`new EnvironmentControl(FRAME_BUDGET_MS * 1.5, CONTROL_PERIOD_MS)` in `harness.ts`) and
+  revert it — the same shape as overriding `gpuCost` for the deferred branch below.
+  **That recipe silently disarms one assertion, so a widened run is not a run of
+  everything.** The gate constructs **one** `EnvironmentControl` and re-arms it for scrub,
+  play _and_ the slow-compositor phase, so widening its target widens that phase's control
+  too. `environmentSustainsBudget(slow.control, FRAME_BUDGET_MS)` is then deterministically
+  false, `test/phase6-gate.test.ts` takes the else branch, and the slowed path's
+  control-of-the-control — `expect(() => expectTracksControl(slowEvidence)).toThrow(…)` —
+  is **reported as a shortfall rather than required**. §8's own absolute pair against the
+  slowed path (`slow.frames.overBudget > 0`, `slow.frames.maxMs > FRAME_BUDGET_MS`) runs
+  unconditionally either way, so nothing goes unmeasured — but on an **ordinary,
+  unwidened** run on this machine that control reads 8.40 ms,
+  `environmentSustainsBudget` is true and the required throw does fire. A widened run and
+  an ordinary run **together** cover both branches, and neither alone does. The shape that
+  would cover both in one run is giving the slow-compositor phase an `EnvironmentControl`
+  of its own; it is **not attempted** — that is a code change to a sensitive harness, what
+  was found was this record overclaiming rather than the harness being wrong, and this is a
+  documentation commit — and is written down so the coupling is inherited rather than
+  rediscovered.
+  **That has been run, on `e7f06a3`**, and the head is named because it is what makes this
+  falsifiable later: a reader on a diverged head can see the observation may no longer
+  apply, where an undated "it works" cannot go stale visibly. Observed — the banner
+  printed; both phases reported `NOT JUDGED`, scrub over 20 spins and play over 125, each
+  naming the control's own overrun; and vitest reported `1 skipped` with the reason
+  `§8's frame budget was NOT JUDGED and this is not a pass…`, not a pass. Every non-timing
+  assertion ran and held first, which is what the `skip()` being last is for — with the one
+  exception the coupling above forces: in that run the slowed path's own
+  control-of-the-control was reported as a shortfall rather than required, while §8's
+  absolute pair against the slowed path held.
+  **What it establishes and what it does not**, because the difference is the whole value
+  of the record: it exercises the _reporting_ path — `withheldJudgement`, the banner and
+  the `skip()` — against a control that genuinely exceeded the budget, so
+  `instrumentOutOfCalibration` fired for its real reason. It does **not** reproduce a
+  stalled host: the spin was long because it was asked for more work, not because the
+  scheduler took the thread away. Everything downstream of `control.maxMs` is identical on
+  both, and nothing upstream of it is exercised here.
   **Two facts no file owns.** The deferred branch **cannot be exercised end to end on
   Apple Silicon**: `--disable-accelerated-video-decode` flips the decode probe, but
   ANGLE-Metal binds decoded frames as IOSurfaces whatever the decode preference, and four
@@ -1177,6 +1283,16 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   `child-process-gone` so a context that goes anyway names what died. The gate prints
   its own log on a bad run for the same reason: how far it got is the difference
   between a host that took the instrument away and a defect that always will.
+  **That note has since earned its keep, and it moved `GATE_ATTEMPTS` from two to
+  three.** The mechanism it named — `abnormal-exit (exit 8704)`, Chromium's GPU process
+  _exiting_ on a context loss rather than the watchdog killing it — makes a launch that
+  starts seconds after it a second reading of one host in one state rather than the
+  independent sample "a second loss in a row" was read as. The count lives beside the
+  predicate in `test/gate/relaunch.ts`, whose docblock owns the derivation and the
+  measurement it rests on, and `test/relaunch-policy.test.ts` pins the value — so raising
+  it again fails a test and costs a measured demonstration of the same kind rather than a
+  nudge in a gate file. The predicate did not move and must not: `shouldRelaunch` is
+  `report.contextLost` and nothing else, and three consecutive losses still fail the gate.
 - **A pre-empted renderer is not a slow frame, and the instrument cannot tell them
   apart.** The frame budget is `performance.now()` around the frame body, so anything
   the OS scheduler takes away lands on whichever frame it interrupted. Chromium
