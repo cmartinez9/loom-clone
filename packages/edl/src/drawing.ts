@@ -76,6 +76,24 @@ export const DRAWING_BLEND_MS = 80;
 /** A highlighter's ink is translucent; a pen's is not. §2.6's colours are hex. */
 const HIGHLIGHTER_ALPHA = 0.35;
 
+/**
+ * The shortest span an imported stroke may occupy, in source seconds.
+ *
+ * A stroke whose `t` lands **at or past** `durationSec` is not hypothetical:
+ * `RecorderSession.sourceTimeNowSec()` interpolates past the last frame on purpose,
+ * and on an idle desktop where ScreenCaptureKit emits 1.4 fps that is most of a
+ * second beyond the media extent `durationSec` is read from. Ending such a span at
+ * `durationSec` makes it empty, and an empty span is one the import used to drop —
+ * silently losing ink the user actually drew, which is the worst of the available
+ * outcomes.
+ *
+ * A thirtieth of a second rather than an epsilon, because `resolve` reads a span
+ * with `t < start || t > end` (§3.6): a span shorter than one frame of the lowest
+ * frame rate this composites at can fall between two sampled timestamps and never be
+ * evaluated at all, which would leave the stroke in `edit.json` and still invisible.
+ */
+const MIN_SPAN_SEC = 1 / 30;
+
 export interface DrawingImportOptions {
   /**
    * Where the recording ends, in **source** seconds.
@@ -283,8 +301,12 @@ function strokeSpan(
     points.push(((stroke.p[i * 2] ?? 0) - cx) / hx, ((stroke.p[i * 2 + 1] ?? 0) - cy) / hy);
   }
 
-  const end = strokeEndSec(stroke, events, durationSec);
-  if (!(end > stroke.t)) return null;
+  // Never shorter than {@link MIN_SPAN_SEC}, and the clamp is the *only* thing that
+  // stands between a stroke drawn in the last instant of a recording and being
+  // dropped without a word. `null` above is still the answer for a stroke with no
+  // drawable geometry — that is a stroke there is nothing to show — where this is a
+  // stroke there is something to show and nowhere to put it.
+  const end = Math.max(strokeEndSec(stroke, events, durationSec), stroke.t + MIN_SPAN_SEC);
 
   const hold = (v: number | number[]): { keys: Keyframe[] } => ({
     keys: [{ t: stroke.t, v, ease: { kind: 'hold' } }],

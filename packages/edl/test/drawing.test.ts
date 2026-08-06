@@ -264,6 +264,37 @@ describe('the document it produces', () => {
       result.ok ? '' : result.issues.map((i) => `${i.path}: ${i.message}`).join('\n'),
     ).toBe(true);
   });
+
+  it('keeps a stroke drawn in the last instant of the recording, rather than dropping it', () => {
+    // Reachable, not theoretical: `RecorderSession.sourceTimeNowSec()` interpolates
+    // past the last frame on purpose — the HUD's timer must stall when the capture
+    // stalls, but a stroke stamped at the last frame's time would be most of a
+    // second early on an idle desktop where ScreenCaptureKit emits 1.4 fps. So a
+    // stroke lands *at* or *after* `durationSec`, its span comes out empty, and the
+    // import used to drop it with no diagnostic. The user drew that stroke.
+    const track = importOf(
+      log(stroke('at-the-end', 60, 60, [0.5, 0.5]), stroke('past', 60.4, 60.9, L)),
+      60,
+    );
+    expect(track.spans).toHaveLength(2);
+    for (const span of track.spans ?? []) {
+      expect(span.end, `${span.id} came out as an empty span`).toBeGreaterThan(span.start);
+    }
+  });
+
+  it('and the document those spans are in still validates', () => {
+    // The whole postcondition, not merely "it did not throw": a span the validator
+    // refuses leaves a recording that stops opening, which is a worse outcome than
+    // the silent drop this replaced.
+    const doc = documentWith(
+      importOf(log(stroke('at-the-end', 60, 60, [0.5, 0.5]), stroke('past', 60.4, 60.9, L)), 60),
+    );
+    const result = validateEditDocument(doc);
+    expect(
+      result.ok,
+      result.ok ? '' : result.issues.map((i) => `${i.path}: ${i.message}`).join('\n'),
+    ).toBe(true);
+  });
 });
 
 describe('deletable in the editor — §8’s third sentence', () => {

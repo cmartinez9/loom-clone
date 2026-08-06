@@ -381,6 +381,7 @@ async function run(): Promise<GoldenReport> {
     privacyFallbacks: compositor.annotations.privacyFallbacks,
     textTruncations: compositor.annotations.textTruncations,
     textSpansWithoutAtlas: compositor.annotations.textSpansWithoutAtlas,
+    strokesWithoutScratch: compositor.annotations.strokesWithoutScratch,
     atlasGlyphs: raster.glyphs.size,
     logs,
   };
@@ -606,6 +607,7 @@ void (async () => {
       privacyFallbacks: 0,
       textTruncations: 0,
       textSpansWithoutAtlas: 0,
+      strokesWithoutScratch: 0,
       atlasGlyphs: 0,
       logs,
     });

@@ -139,5 +139,16 @@ export interface OverlayReport {
   drawingLog: string;
   /** What `recording.json`'s `events.drawing` would say, from `OverlayController`. */
   drawingSummary: { file: string; strokeCount: number } | null;
+  /**
+   * Whether the shipping overlay window was gone after `OverlayController.finish()`.
+   *
+   * The recording ending is the third way out of the overlay — the palette's Done
+   * button and the HUD's Draw toggle are the other two — and it is the only one no
+   * user action can substitute for. A full-screen always-on-top window still taking
+   * the display's clicks after Stop is the intrusive-accessory failure the brief's
+   * fourth constraint names, so the gate reads it from the **registry** rather than
+   * from a call log: the question is whether the window is there.
+   */
+  overlayClosedByFinish: boolean;
   logs: string[];
 }

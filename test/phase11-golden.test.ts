@@ -447,6 +447,19 @@ describe('text', () => {
   );
 
   it(
+    'no stroke was lost to a scratch target the compositor could not allocate',
+    async () => {
+      // The stroke pass's counterpart to the count above, and the other condition
+      // the annotation surface degrades through rather than refusing. Nothing in
+      // this run deliberately trips it, so any reading at all is ink that silently
+      // did not draw on a frame the gate then compared byte for byte.
+      const { report } = await gate();
+      expect(report.strokesWithoutScratch).toBe(0);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
     'CONTROL: the atlas rasterised real ink from the shipped face',
     async () => {
       const { report } = await gate();

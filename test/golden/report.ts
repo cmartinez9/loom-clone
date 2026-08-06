@@ -113,6 +113,12 @@ export interface GoldenReport {
    * exercises it deliberately should ever raise this.
    */
   textSpansWithoutAtlas: number;
+  /**
+   * Strokes skipped because the coverage pass could not allocate its scratch target
+   * — the other condition the annotation surface degrades through rather than
+   * refusing. Any run with ink in it that reports one drew less than it composited.
+   */
+  strokesWithoutScratch: number;
   /** Glyphs the atlas rasterised, so an empty atlas cannot pass as a text pass. */
   atlasGlyphs: number;
   logs: string[];

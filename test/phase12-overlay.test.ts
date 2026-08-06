@@ -453,6 +453,24 @@ describe('phase 12 gate: the live drawing overlay', () => {
   );
 
   it(
+    'is dismissed when the recording ends, which is the fourth constraint’s other half',
+    async () => {
+      // "Must be dismissible" is not only about the Done button. A full-screen,
+      // always-on-top, non-activating window that outlived the recording would keep
+      // taking every click on the display with nothing recording — and the harness
+      // reads the registry after `finish()` rather than a call log, because the
+      // question is whether the window is still there.
+      const report = await gate();
+      const detail = describeRun(report);
+      expect(
+        report.overlayClosedByFinish,
+        `${detail}\nthe overlay survived the recording it belonged to`,
+      ).toBe(true);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
     'imports that log as a generated annotation track the editor can delete',
     async () => {
       // The other end of `packages/edl/test/drawing.test.ts`: the same importer, over

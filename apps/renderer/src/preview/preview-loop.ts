@@ -89,15 +89,44 @@ export interface PreviewCompositor {
   render(frames: CompositorFrames, state: ResolvedState): void;
   present(): void;
   /**
-   * Phase 11's diagnostics, read after `render`.
+   * The annotation passes' diagnostics, read after `render`.
    *
-   * `@loom/compositor` is pure and has no way to report anything itself, so a
-   * condition it can only degrade through — a `text` span with no atlas — is left on
-   * the pass as a monotonic count and the loop turns it into an `onError`. Optional
-   * because it is a diagnostic: a loop wired to something that does not keep one
-   * still renders.
+   * `@loom/compositor` is pure and has no way to report anything itself, so every
+   * condition it can only **degrade** through is left on the pass as a monotonic
+   * count and the loop turns it into an `onError`. Optional because it is a
+   * diagnostic: a loop wired to something that does not keep one still renders.
    */
-  readonly annotations?: { readonly textSpansWithoutAtlas: number };
+  readonly annotations?: AnnotationDegradations;
+}
+
+/**
+ * The counts of what the annotation passes drew nothing for.
+ *
+ * Two of them, and they are one interface rather than two because they are one shape
+ * of failure: visible, cosmetic, and counted rather than thrown on. `blur` and `mask`
+ * are the opposite — they refuse the frame — and are therefore not here.
+ */
+export interface AnnotationDegradations {
+  /** `text` spans skipped for want of a glyph atlas (phase 11). */
+  readonly textSpansWithoutAtlas: number;
+  /** Strokes skipped because the coverage pass got no scratch target (phase 12). */
+  readonly strokesWithoutScratch: number;
+}
+
+/**
+ * One degrade-and-count condition, as the loop watches it.
+ *
+ * A table rather than a pair of near-identical methods, so that "the same latching
+ * `textSpansWithoutAtlas` uses" is literally the same code and cannot drift. Built
+ * once per loop and mutated in place: this is read every frame.
+ */
+interface Degradation {
+  readonly read: (counts: AnnotationDegradations | undefined) => number;
+  readonly message: string;
+  /** The count as of the previous frame. */
+  seen: number;
+  /** Latched, in the shape {@link PreviewLoop} already uses for the stall. */
+  reported: boolean;
 }
 
 /**
@@ -226,17 +255,41 @@ export class PreviewLoop {
   #stallReported = false;
   #peakLiveFrames = 0;
   /**
-   * Latches, in the shape {@link PreviewLoop.#stallReported} already uses: set on the
+   * A latch, in the shape {@link PreviewLoop.#stallReported} already uses: set on the
    * first report of a run of the condition, cleared when the condition goes away.
    *
-   * Both of these are properties of the *document*, so an unlatched report would fire
-   * on every frame for as long as the document says so — sixty errors a second, which
-   * is a worse defect than the one being reported.
+   * A refused frame is a property of the *document*, so an unlatched report would
+   * fire on every frame for as long as the document says so — sixty errors a second,
+   * which is a worse defect than the one being reported. The same argument holds for
+   * every entry in {@link PreviewLoop.#degradations}, which is why they latch too.
    */
   #refusalReported = false;
-  #atlasReported = false;
-  /** `annotations.textSpansWithoutAtlas` as of the previous frame. */
-  #textSpansWithoutAtlas = 0;
+  /**
+   * Everything the annotation passes can quietly draw nothing for, and the state that
+   * makes each of them a report per *run* rather than per frame.
+   */
+  readonly #degradations: readonly Degradation[] = [
+    {
+      read: (counts) => counts?.textSpansWithoutAtlas ?? 0,
+      message:
+        'a text annotation was resolved but the preview has no glyph atlas, so it was not ' +
+        'drawn. Build one with `rasterizeGlyphs` + `uploadTextAtlas` from ' +
+        '`@loom/compositor/raster` and pass it as `textAtlas`; the export path has to be ' +
+        'handed the same object',
+      seen: 0,
+      reported: false,
+    },
+    {
+      read: (counts) => counts?.strokesWithoutScratch ?? 0,
+      message:
+        'a hand-drawn stroke was resolved but the compositor could not allocate the scratch ' +
+        'target its coverage pass accumulates into, so the ink was not drawn. The strokes are ' +
+        'still in the document; this is GL memory pressure, and the frame it happened on is ' +
+        'missing ink the editor believes it is showing',
+      seen: 0,
+      reported: false,
+    },
+  ];
 
   constructor(options: PreviewLoopOptions) {
     this.#compositor = options.compositor;
@@ -461,7 +514,7 @@ export class PreviewLoop {
     // reason `#prime` states: a handler of theirs must not be charged to a frame the
     // phase-6 gate judges on the single worst one, with no allowance.
     this.#watchStall(frame !== null, sourceTime, t, started);
-    this.#watchTextAtlas(drew);
+    this.#watchAnnotations(drew);
 
     // Off the critical path, after the budget has been measured (§4.3).
     this.#prime(sourceTime);
@@ -502,36 +555,33 @@ export class PreviewLoop {
   }
 
   /**
-   * A `text` span the compositor could not draw, because no atlas was supplied.
+   * What the annotation passes drew nothing for — a `text` span with no atlas, a
+   * stroke with no scratch target.
    *
-   * Not a refusal — text failing to render is cosmetic and visible, where a redaction
-   * failing is invisible and publishes a secret — but not silent either: a caption
-   * the user believes is in their video and is not is exactly the bug report this
-   * count exists to pre-empt.
+   * Neither is a refusal: they are cosmetic and *visible*, where a redaction failing
+   * is invisible and publishes a secret. Neither is silent either — a caption or a
+   * line the user believes is in their video and is not is exactly the bug report
+   * these counts exist to pre-empt, and a count nobody reads buys none of that.
    *
    * A rising count is evidence wherever it comes from — a frame that refused still
    * skipped its text on the way to refusing — so `drew` gates only the *clear*. A
-   * §4.3 hold ran no pass, so it cannot raise the count and must not be read as the
+   * §4.3 hold ran no pass, so it cannot raise a count and must not be read as the
    * condition having gone away.
    */
-  #watchTextAtlas(drew: boolean): void {
-    const count = this.#compositor.annotations?.textSpansWithoutAtlas ?? 0;
-    const skipped = count > this.#textSpansWithoutAtlas;
-    this.#textSpansWithoutAtlas = count;
-    if (!skipped) {
-      if (drew) this.#atlasReported = false;
-      return;
+  #watchAnnotations(drew: boolean): void {
+    const counts = this.#compositor.annotations;
+    for (const condition of this.#degradations) {
+      const count = condition.read(counts);
+      const skipped = count > condition.seen;
+      condition.seen = count;
+      if (!skipped) {
+        if (drew) condition.reported = false;
+        continue;
+      }
+      if (condition.reported) continue;
+      condition.reported = true;
+      this.#onError(new Error(condition.message));
     }
-    if (this.#atlasReported) return;
-    this.#atlasReported = true;
-    this.#onError(
-      new Error(
-        'a text annotation was resolved but the preview has no glyph atlas, so it was not ' +
-          'drawn. Build one with `rasterizeGlyphs` + `uploadTextAtlas` from ' +
-          '`@loom/compositor/raster` and pass it as `textAtlas`; the export path has to be ' +
-          'handed the same object',
-      ),
-    );
   }
 
   /**

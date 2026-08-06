@@ -138,6 +138,7 @@ let report: OverlayReport = {
   },
   drawingLog: '',
   drawingSummary: null,
+  overlayClosedByFinish: false,
   logs,
 };
 
@@ -410,18 +411,13 @@ void app.whenReady().then(async () => {
     const inked = await probeInk(window, 'pen down');
     if (inked.inkedPixels > 0) note('the pen drew, live, on the overlay’s own canvas');
 
-    // Let the stroke reach main and the disk before it is read back.
-    report.drawingSummary = await overlay.finish();
-    const bundle = (await store.list()).find((s) => s.id === created.id);
-    if (bundle !== undefined) {
-      report.drawingLog = await readFile(join(bundle.path, BUNDLE.drawingLog), 'utf8').catch(
-        () => '',
-      );
-    }
-    await store.close(created.id);
-    recordingId = null;
-
     // ---- 3. absent from the raw capture ---------------------------------------
+    // Before `overlay.finish()`, deliberately: the recording ending is one of the
+    // three ways out of the overlay, so `finish()` closes the window. Every reading
+    // below has to be taken against the **shipping** window — the one
+    // `OverlayController.setOpen` created through `WindowRegistry` — and a
+    // hand-built stand-in for it would be measuring this file's idea of the overlay
+    // rather than the app's.
     report.contentProtection.screenAccess = systemPreferences.getMediaAccessStatus('screen');
 
     control = makeControl();
@@ -543,6 +539,25 @@ void app.whenReady().then(async () => {
           `${(report.contentProtection.backdropThroughOverlay.fraction * 100).toFixed(1)}%`,
       );
     }
+
+    // ---- 4. the recording ends, which closes the overlay -----------------------
+    // `finish()` drains the write chain and then dismisses the window through the
+    // same `setOpen(false)` the palette's Done button and the HUD's Draw toggle use.
+    // Read back afterwards, because the log is what a real pen wrote through real
+    // IPC and the summary is what `recording.json` would carry.
+    report.drawingSummary = await overlay.finish();
+    report.overlayClosedByFinish = windows.get('drawing-overlay') === undefined;
+    if (!report.overlayClosedByFinish) {
+      note('the overlay outlived the recording — it should have been dismissed by finish()');
+    }
+    const bundle = (await store.list()).find((s) => s.id === created.id);
+    if (bundle !== undefined) {
+      report.drawingLog = await readFile(join(bundle.path, BUNDLE.drawingLog), 'utf8').catch(
+        () => '',
+      );
+    }
+    await store.close(created.id);
+    recordingId = null;
 
     await finish(true, '');
   } catch (error) {

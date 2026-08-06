@@ -255,6 +255,14 @@ export class OverlayController implements DrawingSink {
     this.#logCreated = false;
     this.#strokeCount = 0;
     this.#error = null;
+    // The pen out *before* record was pressed is the ordinary order — a presenter
+    // sets their tools up and then starts — and §2.5's three states have to survive
+    // it. Without this the log is absent, which says "there was never an overlay",
+    // and "the user had the pen and drew nothing" becomes unrepresentable in the one
+    // ordering people actually use. Same note `setOpen` makes, from the other side.
+    if (this.#options.windows.get('drawing-overlay') !== undefined) {
+      this.#noteOverlayOpenedDuringRecording();
+    }
     this.#publish();
   }
 
@@ -268,19 +276,25 @@ export class OverlayController implements DrawingSink {
    * recording, so "present and empty" means the pen was out and unused.
    */
   async finish(): Promise<{ file: string; strokeCount: number } | null> {
-    // Awaited **before** either is read. Everything queued must land first, or
-    // `recording.json` describes a file that is still being written — and the two
-    // facts are both set inside the chain, so reading them first reports a log that
-    // does not exist yet and a count of the strokes that happened to have finished.
+    // Closed to new ink **before** the await, and not after it. Everything already
+    // queued still lands — that is what the await is for — but a stroke that arrives
+    // during it would otherwise be counted into a log this call has already
+    // described, and queued onto a chain nobody is waiting on.
+    this.#recordingId = null;
     await this.#chain.catch(() => undefined);
     const created = this.#logCreated;
     const strokeCount = this.#strokeCount;
-    this.#recordingId = null;
     this.#logCreated = false;
     this.#strokeCount = 0;
-    // The window survives the recording on purpose: a user who stops, looks, and
-    // records again should find the pen where they left it.
-    this.#publish();
+    // The recording ending is the third way out of the overlay, beside the palette's
+    // Done button and the HUD's Draw toggle. A full-screen always-on-top window that
+    // outlived what it was for would go on taking the display's clicks with nothing
+    // recording. It goes through `setOpen(false)` rather than around it so there is
+    // one close path — which is also what leaves the overlay **disarmed**, so a later
+    // open cannot come back holding this session's mouse capture — and `setOpen`
+    // catches its own failures, so a window that will not close costs the window and
+    // never the recording finalizing around it.
+    this.setOpen(false);
     return created ? { file: BUNDLE.drawingLog, strokeCount } : null;
   }
 
@@ -302,8 +316,13 @@ export class OverlayController implements DrawingSink {
       w: message.width,
       p: message.points.map(round),
     };
-    this.#strokeCount += 1;
-    this.#append(event);
+    // Counted when the line is on disk, never when the message arrived: this number
+    // goes into `recording.json` as `events.drawing.strokeCount`, and a count that
+    // included the strokes a full disk refused would describe a log that does not
+    // hold them.
+    this.#append(event, () => {
+      this.#strokeCount += 1;
+    });
   }
 
   #onErase(raw: unknown): void {
@@ -317,8 +336,12 @@ export class OverlayController implements DrawingSink {
 
   #onClear(raw: unknown): void {
     if (typeof raw !== 'object' || raw === null) return;
-    const atMsAgo = (raw as Record<string, unknown>)['atMsAgo'];
-    const at = this.#clockFor(typeof atMsAgo === 'number' ? atMsAgo : 0);
+    // Through {@link age}, exactly as a stroke and an erase are. `typeof NaN` is
+    // `'number'`, so an inline check of the type alone lets a `NaN` through, and a
+    // `NaN` `t` is written by `JSON.stringify` as `null` — a line the importer
+    // refuses, which leaves every stroke the user cleared composited over the rest
+    // of the video.
+    const at = this.#clockFor(age((raw as Record<string, unknown>)['atMsAgo']));
     if (at === null) return;
     const event: DrawingClearEvent = { e: 'clear', t: round(at) };
     this.#append(event);
@@ -350,8 +373,14 @@ export class OverlayController implements DrawingSink {
    * sized for a 120 Hz cursor log, and this file gets a line every second or two at
    * the very most. One `fsync` per stroke costs nothing and removes the window in
    * which a crash loses ink that is already on the wire.
+   *
+   * `onWritten` runs inside the chain, after the `fsync`, so anything a caller counts
+   * is something the log holds rather than something it was asked for.
    */
-  #append(event: DrawingStrokeEvent | DrawingEraseEvent | DrawingClearEvent): void {
+  #append(
+    event: DrawingStrokeEvent | DrawingEraseEvent | DrawingClearEvent,
+    onWritten?: () => void,
+  ): void {
     const id = this.#recordingId;
     if (id === null) return;
     const line = `${JSON.stringify(event)}\n`;
@@ -364,6 +393,7 @@ export class OverlayController implements DrawingSink {
         }
         await store.appendEventLog(id, 'drawing', line);
         await store.syncEventLog(id, 'drawing');
+        onWritten?.();
       },
       () => undefined,
     );

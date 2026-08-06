@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHANNEL } from '@loom/ipc';
 import { BUNDLE, type RecordingId } from '@loom/format';
+import { parseDrawingLog, strokeEndSec } from '@loom/edl';
 import { ProjectStore } from '../src/project-store.ts';
 import { OverlayController, type RecordingClock } from '../src/overlay.ts';
 import type { WindowRegistry, WindowRole } from '../src/windows.ts';
@@ -256,6 +257,33 @@ describe('the window policy', () => {
       'ignoreMouse:true:true',
     ]);
   });
+
+  it('is dismissed by the recording ending, disarmed as well as closed', async () => {
+    // The third way out, beside the palette's Done button and the HUD's Draw toggle.
+    // A full-screen always-on-top window that outlived the recording would go on
+    // taking every click on the display with nothing recording, and the user would
+    // have to find Done to get their machine back.
+    const id = await startRecording();
+    overlay.setOpen(true);
+    overlay.setArmed(true);
+    // The control. Without it this passes just as well against a controller that
+    // never opened the overlay at all.
+    expect(overlay.status()).toMatchObject({ open: true, armed: true });
+
+    await overlay.finish();
+
+    expect(overlay.status()).toMatchObject({ open: false, armed: false });
+    expect(windows.get('drawing-overlay')).toBeUndefined();
+
+    // And it closed through `setOpen(false)` rather than round it, so the next open
+    // does not inherit the last recording's mouse capture.
+    overlay.setOpen(true);
+    expect(overlay.status().armed).toBe(false);
+    expect(overlayWindow().calls.filter((c) => c.startsWith('ignoreMouse'))).toEqual([
+      'ignoreMouse:true:true',
+    ]);
+    await store.close(id);
+  });
 });
 
 describe('who may say what', () => {
@@ -336,6 +364,19 @@ describe('the log’s three states (§2.5)', () => {
     await store.close(id);
   });
 
+  it('is created empty when the pen was out before record was pressed', async () => {
+    // The other ordering, and the one people actually use: pick the pen up, then
+    // press record. §2.5's three states have to survive it too — without this the
+    // log is absent, which says "there was never an overlay", and the state the
+    // *previous* test names becomes unreachable in the natural order.
+    overlay.setOpen(true);
+    const id = await startRecording();
+    await settle();
+    expect(await readLog(id)).toBe('');
+    expect(await overlay.finish()).toEqual({ file: BUNDLE.drawingLog, strokeCount: 0 });
+    await store.close(id);
+  });
+
   it('is absent, and reported as nothing, when the overlay never opened', async () => {
     const id = await startRecording();
     await settle();
@@ -378,6 +419,77 @@ describe('the log’s three states (§2.5)', () => {
     expect((await readLog(id)).trim().split('\n')).toHaveLength(5);
     await store.close(id);
   });
+
+  it('counts the writes that landed, not the strokes that were attempted', async () => {
+    // `events.drawing.strokeCount` goes into `recording.json`, where it describes
+    // this log. A count taken when the message arrived rather than when the line was
+    // fsynced claims strokes a full disk refused — a recording that says it holds
+    // five and holds one.
+    const id = await startRecording();
+    overlay.setOpen(true);
+    const contents = overlayWindow().webContents;
+
+    emit(CHANNEL.overlayStroke, contents, { ...STROKE, id: 'kept' });
+    await settle();
+    const failing = vi
+      .spyOn(store, 'appendEventLog')
+      .mockRejectedValue(new Error('no space left on device'));
+    emit(CHANNEL.overlayStroke, contents, { ...STROKE, id: 'lost' });
+    await settle();
+    failing.mockRestore();
+
+    const onDisk = (await readLog(id)).trim().split('\n').filter(Boolean);
+    const finished = await overlay.finish();
+    expect(onDisk).toHaveLength(1);
+    expect(finished?.strokeCount).toBe(onDisk.length);
+    await store.close(id);
+  });
+});
+
+describe('an age the renderer got wrong', () => {
+  /**
+   * Every one of these is a `number` as far as `typeof` is concerned, which is what
+   * an inline type check lets through. `age()` is the clamp that does not.
+   */
+  const HOSTILE: { name: string; atMsAgo: unknown }[] = [
+    { name: 'NaN', atMsAgo: Number.NaN },
+    { name: 'a negative age, which would stamp it in the future', atMsAgo: -5000 },
+    { name: 'an age longer than any recording', atMsAgo: 1e18 },
+  ];
+
+  for (const { name, atMsAgo } of HOSTILE) {
+    it(`writes a clear the importer still accepts when atMsAgo is ${name}`, async () => {
+      // The failure this pins is not a wrong number, it is a *dropped line*: a `NaN`
+      // `t` reaches the log as `{"e":"clear","t":null}`, which the importer refuses,
+      // and every stroke the presenter cleared then runs to the end of the recording
+      // and is composited over the rest of the video. So the assertion is the
+      // consequence — where the stroke ends — and not just the timestamp.
+      const id = await startRecording();
+      overlay.setOpen(true);
+      const contents = overlayWindow().webContents;
+      clock.nowSec = 5;
+      emit(CHANNEL.overlayStroke, contents, STROKE);
+      clock.nowSec = 4000;
+      emit(CHANNEL.overlayClear, contents, { atMsAgo });
+      await settle();
+
+      const events = parseDrawingLog(await readLog(id));
+      const clear = events.find((e) => e.e === 'clear');
+      if (clear === undefined)
+        throw new Error('the clear never reached the log the importer reads');
+      expect(Number.isFinite(clear.t)).toBe(true);
+      expect(clear.t).toBeGreaterThanOrEqual(0);
+      // Never ahead of the clock the message landed on, which a negative age would
+      // put it — `Math.max(0, …)` hides an age that is too large and does nothing
+      // about one that is negative.
+      expect(clear.t).toBeLessThanOrEqual(4000);
+
+      const drawn = events.find((e) => e.e === 'stroke');
+      if (drawn?.e !== 'stroke') throw new Error('the stroke never reached the log');
+      expect(strokeEndSec(drawn, events, 5000)).toBe(clear.t);
+      await store.close(id);
+    });
+  }
 });
 
 describe('untrusted input', () => {

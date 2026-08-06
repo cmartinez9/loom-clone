@@ -864,6 +864,12 @@ export class AnnotationPass {
     // A tap of the pen is one point and no segments. It is still ink — a round dot
     // of the stroke's own width — so it is emitted as a zero-length capsule, which
     // is the case `sdSegment`'s `max(dot(ba, ba), 1e-6)` already answers correctly.
+    //
+    // This branch is also the whole of a dot's reveal, and it deliberately never
+    // consults `drawn`: a single point has no arc length, so `drawn` is 0 for it at
+    // every `progress` and a truncation measured against it would draw nothing at
+    // all, forever. `#drawStroke`'s `progress > 0` is the only gate a dot gets, which
+    // is the right one — a dot is either not yet drawn or complete.
     if (segments < 1) {
       this.#appendStrokeQuad(
         vertices,
@@ -1097,8 +1103,5 @@ function cumulativeLengths(points: Float32Array): Float32Array {
     total += Math.hypot(dx, dy);
     out[i] = total;
   }
-  // A single point is a dot: it has no length, and a reveal that divided by zero
-  // would draw nothing at all. One box unit of "length" makes `progress` reach it.
-  if (count === 1) out[0] = 0;
   return out;
 }

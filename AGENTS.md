@@ -496,7 +496,10 @@ hand. And it never activates: `focusable: false` on the role, `showInactive()` i
 role declared itself non-focusable. The cost is that a non-activating window on macOS
 receives mouse events and **not** keystrokes, which is why nothing here is dismissed
 with a key — the palette's Done button, the HUD's Draw toggle and the recording ending
-are the three ways out.
+are the three ways out. The third is `OverlayController.finish()`, and it goes through
+the same `setOpen(false)` the other two do rather than round it: one close path, which
+is also the one that clears `#armed`, so the overlay cannot come back from a later open
+still holding the last recording's mouse capture.
 
 **A stroke's `t` is the recording clock minus an age, never a renderer's timestamp.**
 The two processes share no time origin — a renderer's `performance.now()` starts when
