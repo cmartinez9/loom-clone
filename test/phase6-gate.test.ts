@@ -103,11 +103,29 @@ const ATTEMPT_TIMEOUT_MS = 120_000;
  * holding when the lights went out. Observed once on a GitHub macOS runner (an
  * "Apple Paravirtual device"), on a commit whose other run of the same SHA passed.
  *
- * Two launches rather than one because a second loss in a row is no longer a shared
- * host having a moment; two rather than five because retrying is how a real defect
- * gets to look like weather.
+ * More than one launch because a single loss is a shared host having a moment; not
+ * many, because retrying is how a real defect gets to look like weather. What decides
+ * the number is how many launches it takes for two of them to be two *samples*, and
+ * two is not enough — measured, on CI run 31084636446. Both launches lost the context
+ * at the same place (the first scrub readback, 18 s and 16 s in) on one runner inside
+ * 35 s, and `child-process-gone` named the mechanism that the previous occurrence
+ * could only guess at: `GPU process gone: abnormal-exit (exit 8704)`. Not a watchdog
+ * kill — that lever is already pulled, in `test/gate/main.ts` — but Chromium's GPU
+ * process *exiting* on a context loss, taking the harness's one context with it, the
+ * same way it takes all four of phase 8's (`test/relaunch-policy.test.ts`). A launch
+ * that starts seconds after that exit, on that runner, against the GPU process
+ * restarted in its place, is a second reading of the same host in the same state
+ * rather than the independent one "a second loss in a row" was read as. Three is the
+ * smallest number that gives the gate a launch which is not that.
+ *
+ * Nothing else moves with it, and this is the whole of why it is allowed to move at
+ * all: the *predicate* is untouched — {@link shouldRelaunch} is `report.contextLost`
+ * and nothing else, fenced by `test/relaunch-policy.test.ts`, which enumerates every
+ * bad-run shape and requires that none of them earns a launch. A run that measured is
+ * still reported exactly once, over budget or not, on the first launch. Three
+ * consecutive losses still fail this gate, on the assertion below.
  */
-const GATE_ATTEMPTS = 2;
+const GATE_ATTEMPTS = 3;
 
 /**
  * How few frames a phase may measure and still be a measurement rather than an anecdote.
@@ -294,7 +312,7 @@ async function runGate(): Promise<RunResult> {
  * loop — a retry around an acceptance gate is how a real defect gets to look like
  * weather, and this one stays defensible only while it stays narrow. The last report
  * is returned either way, so the assertions below judge a real run, including one
- * whose context was lost twice, which they fail on.
+ * whose context was lost on every launch, which they fail on.
  */
 async function runGateUntilMeasured(): Promise<RunResult> {
   let result = await runGate();
@@ -442,7 +460,7 @@ describe('phase 6 gate: 4K scrub and play', () => {
       console.log(detail);
 
       // First, because it is the one thing that makes every number below a fiction
-      // rather than a reading — and by here it has already happened twice.
+      // rather than a reading — and by here it has already happened on every launch.
       expect(report.contextLost, detail).toBe(false);
       expect(report.error ?? '', detail).toBe('');
       expect(report.ok, detail).toBe(true);

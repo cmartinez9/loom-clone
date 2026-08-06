@@ -1,11 +1,13 @@
 /**
  * A gate may relaunch for exactly one reason, and this is the fence around it.
  *
- * `GATE_ATTEMPTS = 2` exists because a lost WebGL context is not a measurement — see
- * `test/gate/relaunch.ts`. That is a narrow and defensible exception, and it stays
- * defensible only while it stays narrow: the moment the trigger admits "the run
- * failed", the phase 6 gate becomes a coin flipped twice, and every acceptance
- * criterion behind it becomes advisory.
+ * `GATE_ATTEMPTS` exists because a lost WebGL context is not a measurement — see
+ * `test/gate/relaunch.ts`. That is a narrow and defensible exception, and what keeps
+ * it narrow is the *trigger*, not the count: the moment it admits "the run failed",
+ * the phase 6 gate becomes a coin flipped until it lands, and every acceptance
+ * criterion behind it becomes advisory. So the count is allowed to answer to what a
+ * lost context costs on these runners, and this file is the fence that does not move
+ * with it.
  *
  * So this file enumerates the ways a run can be *bad* and requires that none of them
  * earns a second launch. It is cheap and runs in Node; the gates it guards cost a 4K
