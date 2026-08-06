@@ -951,6 +951,33 @@ was not a control.
   restore puts back the bytes it read at the start, silently reverting anything you
   changed in between. It handles `SIGINT`/`SIGTERM` and restores in a `finally`, so
   killing it is safe — but a concurrent edit is not. Run it, or edit; not both.
+  **And the same window will put a mutation into a commit.** `git add` taken while it is
+  going stages whichever source it has broken at that instant, and the restore afterwards
+  cannot un-commit it. That is not hypothetical: `2b658e3` on
+  `fm/loom-gate8-instrument-validity` committed and **pushed**
+  `audio-gaps-closed-instead-of-reproduced` into `packages/format/src/sync/align.ts` —
+  verbatim its registry `find` → `replace` — and CI run 31101555081 caught it at the
+  phase-3 A/V sync gate reading **-500.5 ms** against a ±20 ms budget. So: never commit
+  from a tree while a mutation run owns it, and if a commit's diff touches a production
+  file the change had no business in, check it against the registry before anything else.
+  A `find` string missing from a source file is the signature.
+- **The mutation proof has three outcomes, and its old two over-claimed.** A gate that
+  withholds its verdict exits 0 exactly as one that ran and noticed nothing does, so
+  `runTests` reads vitest's per-test statuses rather than the exit code alone: a guard
+  where **every** test withheld is `NO VERDICT`, which is neither proof nor hole and does
+  not fail the run. The half worth remembering is what the _previous_ two outcomes did —
+  everything that was not a clean pass counted as `caught`, so a gate that died of a lost
+  GPU context was credited as detection. **An "all N caught" recorded before that third
+  outcome may include false catches and is not evidence the gates in it measure anything;
+  those counts have not been re-audited.** Quote a run, not a number. The script's own
+  header carries the measurement that established it.
+  **`WITHHOLDABLE_GUARDS` is the structural half**: a mutation guarded _only_ by a gate
+  that can withhold is unproven rather than caught whenever that host's instrument fails,
+  and no single run looks wrong when that repeats — so it is printed on **every** run
+  straight off the registry, deterministic and identical on every host, rather than
+  counted over time. One mutation is on that list today
+  (`export-writer-registered-after-it-opens`, guarded only by the phase-8 gate) and the
+  fix for it is a second guard that cannot withhold, never a retry.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.

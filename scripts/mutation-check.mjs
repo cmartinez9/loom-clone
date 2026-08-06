@@ -23,6 +23,25 @@
  * let it through. {@link runTests} is where that is read, and it is not a hole — see the
  * docblock there for what it costs to call it one.
  *
+ * ## A caveat on this script's own history, and it runs the dangerous way
+ *
+ * Before that third outcome existed, this script had **two** and mapped everything that
+ * was not a clean pass onto `caught`. So a gate that died of a lost GPU context, or
+ * failed to launch at all, was credited as *detection*: the mutation was scored caught by
+ * a crash rather than by the gate noticing anything. Measured on CI —
+ * `export-writer-registered-after-it-opens` was reported `caught by test/phase8-gate.test.ts`
+ * in **7.3 s and 8.6 s** on runs 31078536064 and 31087889901, where a phase-8 launch on
+ * those hosts takes ~42 s and the defect it plants only surfaces at the very end of one.
+ * Nothing was detected in either.
+ *
+ * That error ran in the **over-claiming** direction, in the one tool whose whole job is
+ * to prove the gates can detect things. So: **an "all N caught" result recorded before
+ * this third outcome landed may include false catches, and is not evidence that the
+ * gates named in it measure what they claim.** Those historical counts have not been
+ * re-audited — that is a deliberate deferral, not an oversight. Re-run
+ * `npm run verify:mutation` if you need a count you can stand behind, and quote the run
+ * rather than the number.
+ *
  * This is not part of `npm test`: it takes minutes and it deliberately breaks the
  * working tree while it runs. It is `npm run verify:mutation`, and its output
  * belongs in the phase's evidence.
@@ -122,6 +141,29 @@ const BUDGET_POLICY = 'test/budget-control.test.ts';
  * gate that quietly declines to report a pixel divergence.
  */
 const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
+
+/**
+ * Guards that can come back with **no verdict** rather than a pass or a fail.
+ *
+ * A gate that measures the machine can find its instrument gone: `test/phase8-gate.test.ts`
+ * reports *skipped* when every launch lost its WebGL context, because §4.5's per-pixel
+ * zero was then neither met nor missed (`test/export-golden/verdict.ts`). That is the
+ * honest outcome for the gate and it leaves this script with nothing to conclude.
+ *
+ * Declared rather than detected, and the list is the point. A mutation whose `mustFail`
+ * lies **entirely** inside this set has no guard that is certain to answer on any given
+ * run, so it can go unproven repeatedly without one run ever looking wrong — a coverage
+ * hole that hides in the gaps between runs. {@link warnSolelyWithholdable} prints those
+ * on **every** run, passing or not, straight off the registry: deterministic, identical
+ * on every host, and impossible to mistake for weather. That is the non-flaky half of
+ * "a persistently unproven mutation must be impossible to overlook" — the flaky half
+ * would be counting withheld runs over time, which would make the warning itself depend
+ * on the hosts that caused it.
+ *
+ * The fix for anything listed is a **second guard that cannot withhold**, not a change
+ * to the gate and not a retry.
+ */
+const WITHHOLDABLE_GUARDS = new Set([PHASE8]);
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -1512,10 +1554,34 @@ try {
   rmSync(reportDir, { recursive: true, force: true });
 }
 
+/**
+ * Name every mutation whose only guards can withhold — on every run, from the registry
+ * alone, whatever this run happened to measure. See {@link WITHHOLDABLE_GUARDS}.
+ *
+ * Deliberately **not** conditioned on anything this run observed. A mutation that goes
+ * unproven on a Tuesday and again on a Thursday leaves no single run looking wrong, so
+ * the exposure has to be visible from the registry rather than from the outcomes.
+ */
+function warnSolelyWithholdable(mutations) {
+  const exposed = mutations.filter(
+    (m) => m.mustFail.length > 0 && m.mustFail.every((file) => WITHHOLDABLE_GUARDS.has(file)),
+  );
+  if (exposed.length === 0) return;
+  console.log(
+    `\n── coverage exposure (structural, not a result of this run)\n` +
+      `   ${String(exposed.length)} mutation(s) are guarded ONLY by a gate that can ` +
+      `withhold its verdict.\n   On a host whose instrument fails they are unproven ` +
+      `rather than caught, and no single\n   run looks wrong when that repeats. Each ` +
+      `wants a second guard that cannot withhold:\n` +
+      exposed.map((m) => `     ${m.name}  [${m.mustFail.join(', ')}]`).join('\n'),
+  );
+}
+
 console.log('\n── summary');
 for (const result of results) {
   console.log(`   ${result.verdict.padEnd(10)} ${result.name}`);
 }
+warnSolelyWithholdable(selected);
 
 const holes = results.filter((r) => r.verdict === 'survived' || r.verdict === 'stale');
 const withheld = results.filter((r) => r.verdict === 'no verdict');
