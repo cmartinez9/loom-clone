@@ -23,6 +23,27 @@ export interface Picture {
   boxes: { label: string; mean: [number, number, number]; variance: number }[];
 }
 
+/**
+ * What the standing *Zoom* panel is saying, read off the DOM.
+ *
+ * Off the DOM and not off the probe, deliberately: the probe reports what the model
+ * computed and this reports what a person can **see**, and the defect this exists for
+ * lived entirely in the gap between them — the picture was right, `resolve` was right,
+ * and the panel beside them was describing a moment that had passed, with the one
+ * button the captain asked for withheld because its presence was computed from the
+ * same stale instant.
+ */
+export interface ZoomPanel {
+  /** The *At playhead* value, verbatim. */
+  atPlayhead: string;
+  /** The *Centre* value, verbatim. */
+  centre: string;
+  /** The *Yours* value — whether a zoom of the user's own covers this instant. */
+  yours: string;
+  /** Every button the panel offers, by its visible text. */
+  buttons: string[];
+}
+
 /** One reading taken inside the editor window. */
 export interface Reading {
   label: string;
@@ -44,6 +65,8 @@ export interface Reading {
   regions: { index: number; startSec: number; endSec: number; amount: number }[];
   annotations: { id: string; kind: string; startSec: number; endSec: number }[];
   picture: Picture;
+  /** The standing Zoom panel at this instant, as rendered. */
+  panel: ZoomPanel;
   trouble: string;
 }
 

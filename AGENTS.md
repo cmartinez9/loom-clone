@@ -688,7 +688,10 @@ write, and §4.3's first rule is that nothing allocates in the loop. **Phase 15 
 it**, on the condition its header names: the rail, the overlay and the three inspector
 panels rebuild on a _document_ or _selection_ change, which is a person's rate, and no
 control reads another control's value. Re-taking the choice is a decision to write
-down, not one to drift into.
+down, not one to drift into. The one panel that also follows the **playhead** is the
+standing _Zoom_ one, and it does so the way the transport does — guarded text writes
+per frame, a rebuild only when the shape of what it says changes — which is that
+condition kept rather than an exception to it (§ Sharp edges — the editor).
 
 **The timeline is drawn in _source_ time**, and that is the load-bearing layout
 decision (`timeline-geometry.ts` argues it). Its full width is the recording as
@@ -821,7 +824,7 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Fourteen entries in `npm run verify:mutation`
+committed. Fifteen entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the one worth
 knowing is `an-annotation-is-placed-in-output-space`, whose guard is deliberately the
 unit test and **not** this gate, which was tried and measured surviving it (the gate
@@ -966,8 +969,36 @@ flag that writes a PNG beside each reading — the way to _look_ at this window,
   selection panel titles itself after what is selected and the standing one is _Zoom_;
   the first version rendered _Zoom_ twice, one above the other. Nothing in `npm test`
   can see that — this is the third defect in this window found by looking at it, after
-  the circular stage fit and the missing `[hidden]` rule, and `--shots` exists so the
-  fourth is cheap to find.
+  the circular stage fit and the missing `[hidden]` rule. `--shots` exists so the
+  fourth is cheap to find, and the entry below **is** the fourth.
+- **The standing Zoom panel is split like the transport, and that is the
+  no-per-frame-rebuild rule rather than an exception to it.** That panel describes _the
+  playhead_, and a playhead moves at a frame's rate — but it was rebuilt only on a
+  document or a selection change, so it went on describing whatever instant the last
+  edit happened at. The readout going stale after an ordinary scrub is the visible
+  half; the half that matters is that **_Take manual control_ was withheld**, because
+  `#renderZoom` computes the button's presence from that same stale instant. That is
+  the one capability the captain named himself (`decision-editor-scope.md`, _"Manual
+  option too."_), missing on exactly the path a person uses to reach it — scrub to the
+  moment you want to change, then take control — so it read as the feature being
+  absent rather than as a panel being behind. **The fix is `paintPlayhead`'s own split
+  applied one panel over**, not a second mechanism beside it: the _numbers_ are text
+  writes guarded on the values changing (`Inspector.paintZoom`), and a _rebuild_
+  happens only when the **shape** of the answer changes — which region covers the
+  playhead, and whether the button can be offered at all. The rule `main.ts`'s header
+  states was never about avoiding text writes; it is about not tearing down DOM
+  structure on a timer, and this does not. Nothing on that path allocates at rest: it
+  is guarded on the playhead's own source instant, `zoomRegionIndexAt` is the one
+  predicate both the rebuild and the per-frame half ask, and the selection and
+  generator panels are untouched by it. **It survived a green suite and a completed
+  review, and a person looking at the `--shots` screenshots found it** — the document
+  was right, `resolve` was right and the picture was right, so the defect lived
+  entirely in the gap between what the model computed and what could be read on the
+  screen, which is the class of thing no assertion about a document can reach. The
+  gate now reads that panel **off the DOM** at both sides of a region boundary and
+  compares it against the probe, in both directions, because a panel that never
+  offered the button would otherwise pass half of it;
+  `the-zoom-panel-does-not-follow-the-playhead` is the mutation.
 
 ## Annotations, in one paragraph
 

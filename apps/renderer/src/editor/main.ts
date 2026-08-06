@@ -869,18 +869,45 @@ async function start(): Promise<void> {
     el.tlZoom.textContent = `${String(Math.round(view.zoom * 100))}%`;
   }
 
+  /**
+   * The manual zoom regions the panels were last built from.
+   *
+   * Refreshed by {@link renderControls}, which is called on every document change, so
+   * {@link zoomRegionIndexAt} can answer on the playhead's own frame without walking
+   * the document. It is a cache of a derivation, not of a decision: `edit.json` is
+   * still the authority and nothing reads this that a rebuild has not just written.
+   */
+  let zoomRegions: ZoomRegion[] = [];
+
+  /**
+   * Which manual region covers a source instant, by `ZoomRegion.index`, or `-1`.
+   *
+   * The one predicate, asked by the rebuild and by the per-frame half alike. Written
+   * as an indexed loop rather than a `find` because the second caller runs on the
+   * playhead's frame and must not allocate.
+   */
+  function zoomRegionIndexAt(sourceSec: Seconds): number {
+    for (let i = 0; i < zoomRegions.length; i++) {
+      const region = zoomRegions[i];
+      if (region === undefined) continue;
+      if (sourceSec >= region.startSec && sourceSec <= region.windowEndSec) return region.index;
+    }
+    return -1;
+  }
+
   /** The three inspector panels, rebuilt from the document and the selection. */
   function renderControls(): void {
     const doc = project.document;
     const sourceSec = sourceTimeFor(host.loop.time);
     const state = resolve(project.compiled, host.loop.time);
+    zoomRegions = zoomRegionsOf(doc);
     inspector.render({
       selection,
-      regions: zoomRegionsOf(doc),
+      regions: zoomRegions,
       keys: zoomKeysOf(doc),
       annotations: annotationsOf(doc),
       generators: generatorStates(doc, logs ?? EMPTY_LOGS),
-      playheadSourceSec: sourceSec,
+      regionIndexAtPlayhead: zoomRegionIndexAt(sourceSec),
       // Cloned, because `resolve` hands back the compiled timeline's **own** state
       // object and overwrites it in place — a panel that kept the reference would be
       // describing next frame's zoom.
@@ -925,6 +952,8 @@ async function start(): Promise<void> {
   let paintedPlaying: boolean | null = null;
   /** `[amount, cx, cy]` the overlay's handles were last placed for. */
   let paintedZoom: [number, number, number] = [Number.NaN, Number.NaN, Number.NaN];
+  /** The source instant the standing Zoom panel was last read at. */
+  let paintedPanelSourceSec = Number.NaN;
 
   /**
    * The cheap per-frame half: one style write, and text only when it changed.
@@ -940,7 +969,17 @@ async function start(): Promise<void> {
    */
   function paintPlayhead(): void {
     const timelineSec = host.loop.time;
-    timeline.setPlayhead(view, sourceTimeFor(timelineSec));
+    // One `resolve` for the whole frame — where the playhead is in *source* time and
+    // what the zoom is under it are two readings of one state object (0.08 µs, §3.6).
+    // The numbers are copied out rather than held by reference because that object is
+    // the compiled timeline's own and the next `resolve` — `renderStage`'s, below —
+    // overwrites it in place.
+    const state = resolve(project.compiled, timelineSec);
+    const sourceSec = state.sourceTime;
+    const amount = state.zoom.amount;
+    const centerX = state.zoom.center[0];
+    const centerY = state.zoom.center[1];
+    timeline.setPlayhead(view, sourceSec);
 
     const durationSec = project.compiled.durationSec;
     if (timelineSec !== paintedTimelineSec || durationSec !== paintedDurationSec) {
@@ -966,16 +1005,38 @@ async function start(): Promise<void> {
     // selection or tool change; scrubbing into a 2.2× segment and then dragging a blur
     // wrote the redaction at the coordinates it would have had at 1×, which is the
     // privacy defect `annotations.ts` anchors geometry in source space to prevent. The
-    // per-frame cost is unchanged in shape: `resolve` is 0.08 µs and three number
-    // comparisons guard the only thing that allocates.
-    const zoom = resolve(project.compiled, timelineSec).zoom;
-    if (
-      zoom.amount !== paintedZoom[0] ||
-      zoom.center[0] !== paintedZoom[1] ||
-      zoom.center[1] !== paintedZoom[2]
-    ) {
-      paintedZoom = [zoom.amount, zoom.center[0], zoom.center[1]];
+    // per-frame cost is unchanged in shape: three number comparisons guard the only
+    // thing that allocates.
+    if (amount !== paintedZoom[0] || centerX !== paintedZoom[1] || centerY !== paintedZoom[2]) {
+      paintedZoom = [amount, centerX, centerY];
       renderStage();
+    }
+
+    // And the standing Zoom panel, split the same way rather than exempted from the
+    // rule: `Inspector.paintZoom` writes the two numbers when they change and answers
+    // `true` only when the *shape* of what that panel says has changed — which region
+    // covers the playhead, and whether *Take manual control* can be offered here.
+    //
+    // Guarded on the playhead's **source** instant, because that is what the shape is
+    // a function of: at rest nothing below this line runs, so nothing here allocates
+    // in the loop. A document change reaches the panel through `renderControls`'s own
+    // five call sites, as it always did.
+    //
+    // Without this the panel described whatever moment the last edit happened at. The
+    // readout went stale after an ordinary scrub, and — worse — the button was
+    // withheld on exactly the path a person takes to reach it: scrub to the moment you
+    // want to change, then take control. A capability that is not offered where it is
+    // wanted reads as one that does not exist.
+    if (sourceSec !== paintedPanelSourceSec) {
+      paintedPanelSourceSec = sourceSec;
+      const rebuild = inspector.paintZoom({
+        regionIndex: zoomRegionIndexAt(sourceSec),
+        generated: generatedZoomAt(sourceSec) !== null,
+        amount,
+        centerX,
+        centerY,
+      });
+      if (rebuild) renderControls();
     }
   }
 

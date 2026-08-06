@@ -25,6 +25,22 @@
  * controls here are deliberately flat: each reads one number out of the document and
  * sends one op, and none of them reads another control.
  *
+ * ## The one panel that is split, and why that is the same rule rather than an exception
+ *
+ * The standing *Zoom* panel describes **the playhead**, and a playhead moves at a
+ * frame's rate. Rebuilding it on a document change alone left it describing whatever
+ * instant the last edit happened at: after an ordinary scrub its readout was a
+ * magnification the picture no longer had, and *Take manual control* — the one
+ * capability the captain named himself — was withheld on exactly the path a person
+ * takes to reach it (scrub to the moment, then take control), so the feature read as
+ * absent. {@link Inspector.paintZoom} is the per-frame half, and it is
+ * `main.ts`'s `paintPlayhead` split applied one panel over: the **numbers** are text
+ * writes guarded on the values changing, and a **rebuild** happens only when the
+ * *shape* of the answer does — which region covers the playhead, and whether a
+ * generated zoom under it makes *Take manual control* a thing that can be offered.
+ * The rule the header states was never about avoiding text writes; it is about not
+ * tearing down DOM structure on a timer, and this does not.
+ *
  * The one thing that is *not* rebuilt is a field the person is typing in. Replacing a
  * focused `<input>` moves the caret to the end and drops the selection, and this
  * panel's inputs commit on `change` — so a rebuild triggered by somebody else's edit
@@ -67,8 +83,15 @@ export interface InspectorState {
   keys: KeyView[];
   annotations: AnnotationView[];
   generators: GeneratorState[];
-  /** Where the playhead is, in source seconds — what "at the playhead" means. */
-  playheadSourceSec: Seconds;
+  /**
+   * The manual region covering the playhead, by `ZoomRegion.index`, or `-1`.
+   *
+   * The index rather than the instant, because {@link Inspector.paintZoom} asks the
+   * same question sixty times a second and two implementations of *"which region is
+   * the playhead in"* is one predicate with a second answer beside it waiting to
+   * drift. `main.ts` owns it, and both paths call the one function.
+   */
+  regionIndexAtPlayhead: number;
   /** The zoom `resolve` reports under the playhead, whatever produced it. */
   resolvedZoom: { amount: number; center: readonly [number, number] };
   /** The generated zoom track covering the playhead, if any — what *override* acts on. */
@@ -85,6 +108,26 @@ export interface InspectorState {
  * it would be a second interaction model.
  */
 export type ControlPhase = 'move' | 'end';
+
+/**
+ * What the standing *Zoom* panel reads on the playhead's own frame.
+ *
+ * Everything in it is a number the caller already has: `main.ts`'s `paintPlayhead`
+ * resolves once per frame for the timeline and the stage, and this is that same
+ * reading handed on rather than a second one. The centre arrives as two numbers
+ * because `resolve` returns the compiled timeline's **own** state object and
+ * overwrites it in place — a tuple here would either be that object's or a fresh
+ * allocation on a path that must not have one.
+ */
+export interface ZoomReadout {
+  /** The manual region covering the playhead, by `ZoomRegion.index`, or `-1`. */
+  regionIndex: number;
+  /** Whether a generated zoom track covers the playhead — what *override* acts on. */
+  generated: boolean;
+  amount: number;
+  centerX: number;
+  centerY: number;
+}
 
 /** Everything the panels do. One callback per edit; none of them applies one itself. */
 export interface InspectorCallbacks {
@@ -121,10 +164,60 @@ export class Inspector {
    * `change` alone, so it is never holding an element a rebuild would take away.
    */
   #gesture: string | null = null;
+  /**
+   * The two `<dd>`s the standing Zoom panel's per-frame half writes.
+   *
+   * Held from the rebuild that made them rather than found again by position: a
+   * position in a list is not identity, and `zoom.ts`'s `regionCenter` is what
+   * forgetting that costs.
+   */
+  #zoomAmountValue: HTMLElement | null = null;
+  #zoomCenterValue: HTMLElement | null = null;
+  /** The shape {@link Inspector.#renderZoom} last built for. `NaN` until it has. */
+  #zoomRegionIndex = Number.NaN;
+  #zoomGenerated: boolean | null = null;
+  /** The numbers those two `<dd>`s last said, so that only changes are written. */
+  #zoomAmount = Number.NaN;
+  #zoomCenterX = Number.NaN;
+  #zoomCenterY = Number.NaN;
 
   constructor(elements: InspectorElements, callbacks: InspectorCallbacks) {
     this.#elements = elements;
     this.#callbacks = callbacks;
+  }
+
+  /**
+   * The standing Zoom panel's per-frame half. Returns `true` when it needs rebuilding.
+   *
+   * The split is `paintPlayhead`'s, deliberately, because a second interaction model
+   * for the same kind of thing is a second thing to keep right: the **numbers** are
+   * text writes guarded on the values changing, and the *shape* of the answer — which
+   * region covers the playhead, and whether *Take manual control* can be offered at
+   * all — is a two-field comparison whose only outcome is asking the caller for the
+   * rebuild it already knows how to do. Nothing here allocates.
+   *
+   * A control that is mid-gesture owns this panel, exactly as in {@link
+   * Inspector.render}: asking for a rebuild that is deliberately ignored, sixty times
+   * a second, is worse than being one gesture behind.
+   */
+  paintZoom(readout: ZoomReadout): boolean {
+    if (this.#gesture !== null) return false;
+    if (readout.regionIndex !== this.#zoomRegionIndex || readout.generated !== this.#zoomGenerated)
+      return true;
+    if (
+      readout.amount !== this.#zoomAmount ||
+      readout.centerX !== this.#zoomCenterX ||
+      readout.centerY !== this.#zoomCenterY
+    ) {
+      this.#zoomAmount = readout.amount;
+      this.#zoomCenterX = readout.centerX;
+      this.#zoomCenterY = readout.centerY;
+      if (this.#zoomAmountValue !== null)
+        this.#zoomAmountValue.textContent = amountText(readout.amount);
+      if (this.#zoomCenterValue !== null)
+        this.#zoomCenterValue.textContent = centreText(readout.centerX, readout.centerY);
+    }
+    return false;
   }
 
   render(state: InspectorState): void {
@@ -479,21 +572,30 @@ export class Inspector {
   // ------------------------------------------------------------------ zoom
 
   #renderZoom(state: InspectorState): void {
-    const inside = state.regions.find(
-      (region) =>
-        state.playheadSourceSec >= region.startSec &&
-        state.playheadSourceSec <= region.windowEndSec,
-    );
+    const inside = state.regionIndexAtPlayhead >= 0;
     const nodes: HTMLElement[] = [];
 
+    // The two numbers this panel says about the playhead are written again by
+    // {@link Inspector.paintZoom} as it moves, so the `<dd>`s are kept and the
+    // formatting lives in one function each. The "Yours" row is not one of them: it
+    // is *shape*, and a change to it arrives here as a rebuild.
+    const amountValue = factValue(amountText(state.resolvedZoom.amount));
+    const centerValue = factValue(
+      centreText(state.resolvedZoom.center[0] ?? 0.5, state.resolvedZoom.center[1] ?? 0.5),
+    );
+    this.#zoomAmountValue = amountValue;
+    this.#zoomCenterValue = centerValue;
+    this.#zoomAmount = state.resolvedZoom.amount;
+    this.#zoomCenterX = state.resolvedZoom.center[0] ?? 0.5;
+    this.#zoomCenterY = state.resolvedZoom.center[1] ?? 0.5;
+    this.#zoomRegionIndex = state.regionIndexAtPlayhead;
+    this.#zoomGenerated = state.generatedAt !== null;
+
     nodes.push(
-      facts([
-        ['At playhead', `${state.resolvedZoom.amount.toFixed(2)}×`],
-        [
-          'Centre',
-          `${(state.resolvedZoom.center[0] ?? 0.5).toFixed(3)}, ${(state.resolvedZoom.center[1] ?? 0.5).toFixed(3)}`,
-        ],
-        ['Yours', inside === undefined ? 'no' : 'yes'],
+      factList([
+        ['At playhead', amountValue],
+        ['Centre', centerValue],
+        ['Yours', factValue(inside ? 'yes' : 'no')],
       ]),
     );
 
@@ -501,7 +603,7 @@ export class Inspector {
     // whenever a generated zoom track covers the playhead and the user has not
     // already taken control of that moment — which is exactly when "override what the
     // generator produced" means something.
-    if (inside === undefined && state.generatedAt !== null) {
+    if (!inside && state.generatedAt !== null) {
       nodes.push(
         actions(
           primary('Take manual control', 'keyframe', () => {
@@ -513,7 +615,7 @@ export class Inspector {
             'the stretch it covers, and it survives a regenerate.',
         ),
       );
-    } else if (inside === undefined) {
+    } else if (!inside) {
       nodes.push(
         actions(
           primary('Zoom here', 'zoomIn', () => {
@@ -642,18 +744,43 @@ function body(...children: HTMLElement[]): HTMLElement {
 }
 
 function facts(entries: readonly (readonly [string, string])[]): HTMLElement {
+  return factList(entries.map(([term, said]) => [term, factValue(said)]));
+}
+
+/** One fact's `<dd>`, handed back so a per-frame writer can hold the node it owns. */
+function factValue(said: string): HTMLElement {
+  const dd = document.createElement('dd');
+  dd.textContent = said;
+  return dd;
+}
+
+/** The list {@link facts} builds, from `<dd>`s the caller made. */
+function factList(entries: readonly (readonly [string, HTMLElement])[]): HTMLElement {
   const list_ = document.createElement('dl');
   list_.className = 'insp-facts insp-facts-tight';
-  for (const [term, value] of entries) {
+  for (const [term, dd] of entries) {
     const group = document.createElement('div');
     const dt = document.createElement('dt');
     dt.textContent = term;
-    const dd = document.createElement('dd');
-    dd.textContent = value;
     group.append(dt, dd);
     list_.append(group);
   }
   return list_;
+}
+
+/**
+ * The two numbers the standing Zoom panel says, each in one function.
+ *
+ * One place each, because they are written twice — once by the rebuild and once per
+ * frame as the playhead moves — and a panel that formatted the same number two ways
+ * would read as changing when nothing had.
+ */
+function amountText(amount: number): string {
+  return `${amount.toFixed(2)}×`;
+}
+
+function centreText(x: number, y: number): string {
+  return `${x.toFixed(3)}, ${y.toFixed(3)}`;
 }
 
 function field(label: string, control: HTMLElement): HTMLElement {

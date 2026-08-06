@@ -177,6 +177,8 @@ function describeRun(report: ControlsReport): string {
         `  ${r.label.padEnd(30)} t=${r.timelineSec.toFixed(2)} zoom=${r.zoom.amount.toFixed(3)} ` +
         `pic=${r.picture.hash} mask(mean=${r.picture.boxes[0]?.mean.map((v) => v.toFixed(0)).join('/') ?? '-'} ` +
         `var=${(r.picture.boxes[0]?.variance ?? 0).toFixed(1)}) ` +
+        `panel(${r.panel.atPlayhead} @ ${r.panel.centre} yours=${r.panel.yours}` +
+        `${offersManualControl(r) ? ' +take-control' : ''}) ` +
         `tracks=${r.tracks.map((t) => `${t.id}${t.generated ? '*' : ''}${t.baked ? '^' : ''}`).join(',')}` +
         (r.trouble === '' ? '' : ` TROUBLE "${r.trouble}"`),
     ),
@@ -208,6 +210,16 @@ function describeRun(report: ControlsReport): string {
         ]),
     '',
   ].join('\n');
+}
+
+/**
+ * Is the captain's own row of the capability table on offer at this reading?
+ *
+ * By the button's visible text, because that is the claim: a person looking at this
+ * panel can either take manual control from it or they cannot.
+ */
+function offersManualControl(reading: Reading): boolean {
+  return reading.panel.buttons.some((label) => label.includes('Take manual control'));
 }
 
 function readingAt(report: ControlsReport, label: string): Reading {
@@ -384,6 +396,46 @@ describe('the editor’s controls', () => {
       expect(after.zoom.amount, detail).toBeCloseTo(before.zoom.amount, 6);
       expect(after.zoom.center[0], detail).toBeCloseTo(before.zoom.center[0], 6);
       expect(after.picture.hash, detail).toBe(before.picture.hash);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
+    'and the panel follows the playhead across the boundary — the numbers AND the button',
+    async () => {
+      const report = await gate();
+      const detail = describeRun(report);
+      // The same two readings the two tests above judge, either side of the manual
+      // region's window: the second is reached from the first by an ordinary scrub,
+      // which is the crossing and the path a person actually takes.
+      const inside = readingAt(report, 'manual, inside');
+      const outside = readingAt(report, 'manual, outside');
+
+      // What a person can **see**, against what the model computed at that instant.
+      // Read off the DOM and compared against the probe, because the defect this
+      // covers lived exactly in the gap: the picture was right, `resolve` was right,
+      // and the panel beside them was describing the moment of the last edit.
+      for (const reading of [inside, outside]) {
+        expect(reading.panel.atPlayhead, detail).toBe(`${reading.zoom.amount.toFixed(2)}×`);
+        expect(reading.panel.centre, detail).toBe(
+          `${reading.zoom.center[0].toFixed(3)}, ${reading.zoom.center[1].toFixed(3)}`,
+        );
+      }
+
+      // Non-vacuous, and it has to be said: the two instants resolve to different
+      // magnifications, so a panel frozen on either one fails the pair above. Without
+      // this the agreement is satisfiable by a recording where both happen to match.
+      expect(inside.panel.atPlayhead, detail).not.toBe(outside.panel.atPlayhead);
+
+      // And the *shape* follows, in both directions — a panel that never offered the
+      // button would otherwise pass half of this. Inside the user's own window there
+      // is nothing left to take control of; outside it the generator is driving, which
+      // is precisely when the captain's *"Manual option too."* means something, and it
+      // is the instant a scrub arrives at.
+      expect(inside.panel.yours, detail).toBe('yes');
+      expect(offersManualControl(inside), detail).toBe(false);
+      expect(outside.panel.yours, detail).toBe('no');
+      expect(offersManualControl(outside), detail).toBe(true);
     },
     GATE_TIMEOUT_MS,
   );
