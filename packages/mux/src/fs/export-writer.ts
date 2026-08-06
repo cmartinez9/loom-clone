@@ -140,6 +140,8 @@ export class ExportMp4Writer {
   /** Serializes appends, so bytes reach a scratch stream in the order produced. */
   #chain: Promise<void> = Promise.resolve();
   #closed = false;
+  /** Set the instant the `rename(2)` lands. See {@link renamed}. */
+  #renamed = false;
 
   private constructor(options: ExportMp4WriterOptions) {
     this.#options = options;
@@ -183,6 +185,21 @@ export class ExportMp4Writer {
 
   get outputPath(): string {
     return this.#options.outputPath;
+  }
+
+  /**
+   * Whether the finished bytes reached {@link outputPath} under their real name.
+   *
+   * Exposed because {@link finalize} can throw **after** the `rename(2)`: the
+   * directory `fsync` that follows it is inside the same `try`, and an EIO there — or
+   * a directory removed under the export — leaves the file in place and reports a
+   * failure. A caller that inferred "renamed" from `finalize` having returned would
+   * skip its cleanup and leave an unverified export sitting under the finished name,
+   * which is the one artifact §7.5's rename-then-verify order exists to be able to
+   * remove.
+   */
+  get renamed(): boolean {
+    return this.#renamed;
   }
 
   get videoSampleCount(): number {
@@ -271,7 +288,6 @@ export class ExportMp4Writer {
     this.#assertStreamsMatch(plan);
 
     this.#closed = true;
-    let renamed = false;
     try {
       for (const stream of this.#streams.values()) await stream.handle.sync();
 
@@ -285,7 +301,9 @@ export class ExportMp4Writer {
       }
 
       await rename(this.#partialPath, this.#options.outputPath);
-      renamed = true;
+      // Set here, not once `finalize` returns: everything below this line can throw
+      // with the file already in place. See {@link renamed}.
+      this.#renamed = true;
 
       const dir = await open(dirname(this.#options.outputPath), 'r');
       try {
@@ -295,7 +313,7 @@ export class ExportMp4Writer {
       }
     } finally {
       await this.#closeStreams();
-      if (!renamed) await unlink(this.#partialPath).catch(() => undefined);
+      if (!this.#renamed) await unlink(this.#partialPath).catch(() => undefined);
       await this.#removeScratch();
     }
 

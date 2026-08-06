@@ -219,6 +219,14 @@ function golden(overrides: Partial<GoldenReport> = {}): GoldenReport {
   return {
     ok: true,
     contextLost: false,
+    coverage: {
+      exercised: ['frame selection', 'zoom state'],
+      notExercised: [
+        { row: 'the webcam bubble', why: 'no webcam pass on main' },
+        { row: 'the cursor', why: 'no cursor pass on main' },
+      ],
+      tripwire: { webcamPassStillAbsent: true, cursorPassStillAbsent: true, detail: '' },
+    },
     environment: {
       glRenderer: 'ANGLE (Apple, ANGLE Metal Renderer)',
       electron: '',
@@ -286,6 +294,23 @@ describe('the golden-frame gate relaunches only for a lost context', () => {
       },
     ],
     ['a cancelled export that left a file behind', { cancelLeftBehind: ['Cancelled.mp4.partial'] }],
+    // A tripped §4.5 coverage tripwire is a finding about the *code* — somebody built
+    // the bubble or the cursor pass and the gate's coverage list is now wrong — so it
+    // is reported once and never re-rolled.
+    [
+      'a §4.5 coverage tripwire that went off',
+      {
+        coverage: {
+          exercised: ['frame selection', 'zoom state'],
+          notExercised: [{ row: 'the cursor', why: 'no cursor pass on main' }],
+          tripwire: {
+            webcamPassStillAbsent: false,
+            cursorPassStillAbsent: true,
+            detail: 'webcam: render() accepted it',
+          },
+        },
+      },
+    ],
     ['not ok', { ok: false }],
     ['an error', { error: 'the export writer was never opened' }],
     [

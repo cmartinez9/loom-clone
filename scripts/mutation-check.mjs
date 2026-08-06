@@ -460,6 +460,104 @@ const MUTATIONS = [
     mustFail: [EXPORT_SESSION],
   },
   {
+    name: 'export-duration-checked-against-the-writer',
+    breaks:
+      '§7.5’s fourth check being answered against the *edit*. `FastStartWriter.plan()`’s ' +
+      'tally is the number `mvhd.duration` was written from, so handing it back as the ' +
+      'expectation makes the check compare the writer with itself: it can then only fail ' +
+      'on header bytes the parse above it has already rejected, and an export that is ' +
+      'not as long as the timeline asked for — a truncated encode, a clip list the ' +
+      'exporter ignored — passes all five checks and is recorded verified-good. Phase 9 ' +
+      'deletes the user’s only copy of the sources on the strength of that record.',
+    file: 'apps/main/src/export/session.ts',
+    find:
+      '      const outcome = await verifyExport(job.outputPath, job.expectedDurationSec, ' +
+      'this.#io(job));',
+    replace:
+      '      const outcome = await verifyExport(job.outputPath, finished.durationSec, ' +
+      'this.#io(job));',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'export-destination-comes-from-the-renderer',
+    breaks:
+      'main owning where an export goes. `ExportSession.start` composes ' +
+      '`<exportRoot>/<name>.mp4`, `beginExport` mkdir -p’s that directory, `finalize` ' +
+      'renames over the output and a failed verification removes it — so a renderer that ' +
+      'could name the directory could make main create directories anywhere on the ' +
+      'volume and replace or delete any .mp4 on it. §0 rule 1 read backwards: a ' +
+      'sandboxed renderer has no filesystem precisely so that it cannot.',
+    file: 'apps/main/src/export/session.ts',
+    find: "    if ('outputDir' in overrides) {",
+    replace: '    if (false as boolean) {',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'a-job-that-never-renamed-can-discard',
+    breaks:
+      'the gate on the one `rm` that points outside a bundle, at a directory the user ' +
+      'chose. The ledger `discardExport` reads is written only when the writer says the ' +
+      'rename actually happened; record it unconditionally and a job whose finalize ' +
+      'threw *before* the rename claims the path anyway — and deletes the user’s ' +
+      'earlier, good export sitting there under the same name.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      if (writer.renamed) this.renamedExports.set(jobId, writer.outputPath);',
+    replace: '      this.renamedExports.set(jobId, writer.outputPath);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'export-holds-the-bundle-lock-for-ever',
+    breaks:
+      'an export handing back the bundle lock and the JournalWriter it took. Held to ' +
+      '`before-quit`, one export keeps the `.lock` for the rest of the session and the ' +
+      'next launch sweeps a lock that was never stale — and `releaseProject` is what ' +
+      'makes that safe to give back while an editor may hold the same project.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    const held = this.holds.get(id);\n    if (held === undefined) return;',
+    replace: '    const held = this.holds.get(id);\n    if (held !== undefined) return;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'a-dead-export-window-hangs-the-job',
+    breaks:
+      'the bound on the one wait that had none. A renderer killed for memory sends no ' +
+      'chunk, no passDone and no exportFailed, so the job waits for ever: it stays in ' +
+      '`#jobs`, the writer and its two `wx+` scratch streams stay open, the destination ' +
+      'is never released and progress freezes — §10.2’s "an export that hangs at 40% ' +
+      'with no error", verbatim.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    this.#watchWindow(job, window);',
+    replace: '    void window;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'an-early-export-failure-leaves-no-record',
+    breaks:
+      'the promise that "no record" and "a record saying it failed" are different ' +
+      'things to wake up to. Only a *verification* failure used to be recorded, so an ' +
+      'encoder this machine cannot configure, a lost GL context, a stalled decode or an ' +
+      'append that threw left nothing at all in project.json — and with retention ' +
+      'coming, that is exactly the case where the user needs to be told something ' +
+      'happened.',
+    file: 'apps/main/src/export/session.ts',
+    find: '        await this.#record(job, { error: message }).catch((recordError: unknown) => {',
+    replace: '        await Promise.resolve().catch((recordError: unknown) => {',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'finalize-claims-a-rename-it-did-not-make',
+    breaks:
+      '`ExportMp4Writer.renamed` reporting the rename rather than the return. finalize ' +
+      'renames and *then* opens and fsyncs the parent directory inside the same try, so ' +
+      'inferring "the file is in place" from finalize having returned leaves an ' +
+      'unverified export under the finished name whenever that fsync fails — the one ' +
+      'artifact §7.5’s rename-then-verify order exists to be able to remove.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: '      this.#renamed = true;',
+    replace: '      this.#renamed = false;',
+    mustFail: [EXPORT_MOVIE, EXPORT_SESSION],
+  },
+  {
     name: 'export-chunk-offsets-off-by-one',
     breaks:
       'every chunk offset in the exported moov points at the sample data. Off by a ' +

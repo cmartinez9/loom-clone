@@ -939,6 +939,43 @@ export interface ExportSettings {
 }
 
 /**
+ * What a renderer may say about an export it is asking for.
+ *
+ * Everything except the destination. **Main owns where the file goes**: it is
+ * `settings.exportRoot`, changed only through `export:chooseFolder`, which is a
+ * native dialog main itself opens. A renderer that could name `outputDir` could make
+ * main create directories anywhere on the volume and `rename(2)` over any `.mp4` on
+ * it — §0 rule 1 read backwards, since a sandboxed renderer has no filesystem
+ * precisely so that it cannot do that. Captain decision 9 is satisfied without it:
+ * *"pick a sensible default output location and let the captain change it"*, and the
+ * changing is the picker.
+ */
+export type ExportSettingsOverride = Omit<Partial<ExportSettings>, 'outputDir'>;
+
+/**
+ * How many CFR output frames a timeline of `durationSec` produces at `fps`.
+ *
+ * `round`, not `ceil`: a 10.000 s timeline at 30 fps is 300 frames covering [0, 10),
+ * and a float that landed a microsecond over would otherwise buy a 301st frame that
+ * duplicates the 300th.
+ *
+ * It lives in the contract rather than in either end because **both ends have to
+ * agree about it and neither may derive it from the other's answer**. The export
+ * window turns it into frames; main turns it into the duration §7.5's fourth check
+ * compares the finished file against. Two copies of this arithmetic that drifted
+ * would make that check compare the writer's tally with itself, which is precisely
+ * the thing it must not do.
+ */
+export function exportFrameCount(durationSec: number, fps: number): number {
+  return Math.max(1, Math.round(durationSec * fps));
+}
+
+/** How long the file those frames make is, in seconds. See {@link exportFrameCount}. */
+export function exportDurationSec(durationSec: number, fps: number): number {
+  return exportFrameCount(durationSec, fps) / fps;
+}
+
+/**
  * Which pipeline an export is on. §5.3: *"Show the user which path they are on
  * ('Instant' vs '≈4 min') because the difference is enormous"* — 235× realtime
  * against 2.1–2.5×.

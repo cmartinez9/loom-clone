@@ -53,6 +53,31 @@
  *    the fixture, so the canvas → encoder → muxer → disk half of the export is
  *    checked too — the golden comparison reads the render target, and the render
  *    target is not the thing the user ends up with.
+ *
+ * ## Which of §4.5's rows this gate is evidence about
+ *
+ * §4.5's *"must be identical"* list is four rows, and `maxDelta === 0` is only a
+ * statement about the ones that **drew**. {@link COVERAGE} carries the split into the
+ * report so a reader of a passing run sees it:
+ *
+ * | §4.5 row | here |
+ * |---|---|
+ * | which source frame is selected for a given time | **exercised** — `frame-selection` control |
+ * | zoom amount, centre, and the spring's state at `t` | **exercised** — `clock-skew` control, over a moving spring |
+ * | the webcam bubble: centre, size, aspect, corner, opacity, mirror | **not exercised** |
+ * | the cursor: position after smoothing, image, scale | **not exercised** |
+ *
+ * The last two have **no compositor pass on `main`**: `Compositor.render` throws when
+ * handed a `webcam` or a `cursor` frame, and `ExportRenderLoop`'s preallocated
+ * `CompositorFrames` is `{ screen: null }`, so nothing ever passes one. Both paths
+ * therefore draw nothing for those rows and agreeing about nothing is not evidence.
+ * Building the passes is separate scheduled work; what this gate owes is that its
+ * headline number is not read as covering them.
+ *
+ * {@link probeCoverage} is the part that cannot rot: it asks the **real** compositor,
+ * in this run, whether it still refuses both frame kinds. The day someone builds a
+ * pass, the refusal stops, the tripwire goes false and `test/phase8-gate.test.ts`
+ * fails — in the same change that made the table above wrong.
  */
 
 import { Compositor, contentRect } from '@loom/compositor';
@@ -77,7 +102,13 @@ import { VideoExportEncoder } from '../../apps/renderer/src/export/encode.ts';
 import { verifyByDecoding } from '../../apps/renderer/src/export/verify-decode.ts';
 import { openVideoTrack, type TrackReader } from '../../apps/renderer/src/media/track-reader.ts';
 import { CODE_BIT_COUNT, codeCellCenter, generate4kPart } from '../gate/fixture.ts';
-import type { ControlOutcome, GoldenBridge, GoldenReport, GoldenSample } from './report.ts';
+import type {
+  ControlOutcome,
+  CoverageReport,
+  GoldenBridge,
+  GoldenReport,
+  GoldenSample,
+} from './report.ts';
 
 // `exportGolden`, not `golden`: phase 11's harness declares a `Window.golden` of its
 // own shape and both files are in one TypeScript program. The two gates are
@@ -121,6 +152,101 @@ function checkContext(gl: WebGL2RenderingContext, where: string): void {
   if (lost.where === null && !gl.isContextLost()) return;
   lost.where ??= where;
   throw new Error(`the WebGL context was lost (noticed at ${lost.where}); nothing can be compared`);
+}
+
+/** §4.5's rows this run compares, and the two it structurally cannot. See the header. */
+const COVERAGE: Pick<CoverageReport, 'exercised' | 'notExercised'> = {
+  exercised: [
+    'which source frame is selected for a given time (control: frame-selection)',
+    'zoom amount, zoom centre and the spring’s state at t (control: clock-skew)',
+  ],
+  notExercised: [
+    {
+      row: 'the webcam bubble: centre, size, aspect, corner radius, opacity, mirror',
+      why:
+        'there is no webcam pass on main — Compositor.render throws when handed a `webcam` ' +
+        'frame and ExportRenderLoop never passes one — so both paths draw nothing here and ' +
+        'a delta of 0 would be vacuous. See the `webcam-pass-absent` tripwire.',
+    },
+    {
+      row: 'the cursor: position after smoothing, image, scale',
+      why:
+        'there is no cursor pass on main — Compositor.render throws when handed a `cursor` ' +
+        'frame and ExportRenderLoop never passes one. See the `cursor-pass-absent` tripwire.',
+    },
+  ],
+};
+
+/**
+ * Ask the real compositor whether the two unexercised rows are still unexercisable.
+ *
+ * A comment saying "the bubble has no pass yet" is true until it is not, and nothing
+ * would notice. This asks: hand `Compositor.render` a `webcam` frame and a `cursor`
+ * frame and require it to **refuse both**. While it does, `{ screen: null }` is the
+ * whole of what either path can draw and {@link COVERAGE} is accurate. The first time
+ * one of them is built, the refusal stops, this reports `false`, and the gate fails
+ * until the coverage list is brought up to date.
+ *
+ * Run on a path that is about to be disposed, with a one-pixel frame, and every
+ * `VideoFrame` it makes is closed — §10.2 applies to the instrument too.
+ */
+async function probeCoverage(path: Path): Promise<CoverageReport> {
+  const refuses = async (
+    build: () => Promise<() => void>,
+  ): Promise<{ refused: boolean; detail: string }> => {
+    const draw = await build();
+    try {
+      draw();
+      return { refused: false, detail: 'render() accepted it' };
+    } catch (error) {
+      return {
+        refused: true,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
+
+  const state = identityState(0);
+  const webcam = await refuses(async () => {
+    const canvas = new OffscreenCanvas(2, 2);
+    const context = canvas.getContext('2d');
+    if (context === null) throw new Error('no 2d context for the coverage probe');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, 2, 2);
+    const bitmap = await createImageBitmap(canvas);
+    const frame = new VideoFrame(bitmap, { timestamp: 0 });
+    return () => {
+      try {
+        path.compositor.render({ screen: null, webcam: frame }, state);
+      } finally {
+        frame.close();
+        bitmap.close();
+      }
+    };
+  });
+  const cursor = await refuses(() => {
+    const texture = path.gl.createTexture();
+    if (texture === null) throw new Error('no texture for the coverage probe');
+    return Promise.resolve(() => {
+      try {
+        path.compositor.render(
+          { screen: null, cursor: { texture, hotspot: [0, 0], sizePx: [2, 2] } },
+          state,
+        );
+      } finally {
+        path.gl.deleteTexture(texture);
+      }
+    });
+  });
+
+  return {
+    ...COVERAGE,
+    tripwire: {
+      webcamPassStillAbsent: webcam.refused,
+      cursorPassStillAbsent: cursor.refused,
+      detail: `webcam: ${webcam.detail} | cursor: ${cursor.detail}`,
+    },
+  };
 }
 
 /**
@@ -514,6 +640,11 @@ async function run(): Promise<GoldenReport> {
   const liveBefore =
     preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
   log(`live frames before the export pass: ${liveBefore}`);
+  // The tripwire, taken on the control path just before it is let go: it is the only
+  // thing keeping the coverage list above honest, and it has to run against a real
+  // `Compositor` in a real context to mean anything.
+  const coverage = await probeCoverage(control);
+  log(`§4.5 coverage tripwire — ${coverage.tripwire.detail}`);
   disposePath(preview);
   disposePath(exporter);
   disposePath(control);
@@ -532,6 +663,7 @@ async function run(): Promise<GoldenReport> {
   return {
     ok: true,
     contextLost: false,
+    coverage,
     environment: {
       glRenderer,
       electron: '',
@@ -824,6 +956,15 @@ void run().then(
       ok: false,
       error: message,
       contextLost: lost.where !== null,
+      coverage: {
+        exercised: [],
+        notExercised: [],
+        tripwire: {
+          webcamPassStillAbsent: false,
+          cursorPassStillAbsent: false,
+          detail: 'the run did not reach the coverage probe',
+        },
+      },
       environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },
       fixture: { width: 0, height: 0, frameCount: 0, durationSec: 0, longestHoldSec: 0 },
       outputSize: OUTPUT_SIZE,

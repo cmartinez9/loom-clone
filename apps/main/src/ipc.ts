@@ -24,6 +24,7 @@ import {
   type ApplyOpsResult,
   type EditOp,
   type ExportSettings,
+  type ExportSettingsOverride,
   type RecordingSummary,
 } from '@loom/ipc';
 import {
@@ -84,17 +85,27 @@ function requireOps(value: unknown): EditOp[] {
 /**
  * Shape-check an export settings override.
  *
- * The destination is the field that matters here: it names a directory, it comes
- * from a renderer, and it is the one argument in this file that could put a file
- * anywhere on the disk. So an override of it is refused unless it is absolute —
- * a relative path would resolve against main's working directory, which is not a
- * place the user has ever seen.
+ * **The destination is not in it, and cannot be.** A directory is the one argument
+ * here that could put a file anywhere on the volume, and validating it — "absolute,
+ * no NUL" — only settles whether main can *reach* the path, never whether the user
+ * asked for it. `ExportSession.start` joins it with the file name, `beginExport`
+ * `mkdir -p`s it, `finalize` `rename(2)`s over `<dir>/<name>.mp4`, and a failed
+ * verification removes that file: a renderer naming the directory therefore names
+ * what gets created and what gets replaced, which is §0 rule 1 read backwards.
+ *
+ * So it comes from main and only from main — `settings.exportRoot`, changed through
+ * `export:chooseFolder`, a native dialog main itself opens. That is captain decision
+ * 9's *"pick a sensible default output location and let the captain change it; do not
+ * prompt on every export"* in full, with no renderer composing a path.
+ *
+ * Refused loudly rather than dropped: a caller that thought it was choosing a
+ * destination should hear that it was not.
  */
-function requireExportSettings(value: unknown): Partial<ExportSettings> {
+function requireExportSettings(value: unknown): ExportSettingsOverride {
   if (value === undefined || value === null) return {};
   if (typeof value !== 'object') throw new BadRequestError('settings must be an object');
   const raw = value as Record<string, unknown>;
-  const out: Partial<ExportSettings> = {};
+  const out: ExportSettingsOverride = {};
   const number = (name: keyof ExportSettings, min: number, max: number): void => {
     const found = raw[name];
     if (found === undefined) return;
@@ -110,11 +121,10 @@ function requireExportSettings(value: unknown): Partial<ExportSettings> {
   number('audioBitrate', 32_000, 512_000);
 
   if (raw['outputDir'] !== undefined) {
-    const dir = raw['outputDir'];
-    if (typeof dir !== 'string' || !dir.startsWith('/') || dir.includes('\0')) {
-      throw new BadRequestError('outputDir must be an absolute path');
-    }
-    out.outputDir = dir;
+    throw new BadRequestError(
+      'an export destination cannot be named by a renderer; it is settings.exportRoot, ' +
+        'changed through export:chooseFolder',
+    );
   }
   if (raw['name'] !== undefined) {
     const name = raw['name'];

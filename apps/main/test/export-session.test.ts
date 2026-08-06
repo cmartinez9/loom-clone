@@ -18,10 +18,26 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CHANNEL, type ExportCommand, type ExportProgress } from '@loom/ipc';
+import { dirname, join } from 'node:path';
+import {
+  CHANNEL,
+  exportFrameCount,
+  type ExportCommand,
+  type ExportJob,
+  type ExportProgress,
+  type ExportSettingsOverride,
+} from '@loom/ipc';
 import {
   currentSchemaId,
   newEditDocument,
@@ -32,11 +48,17 @@ import {
   type RecordingId,
 } from '@loom/format';
 import { parseMovie } from '@loom/mux';
-import { ExportDestinationBusyError, ProjectStore } from '../src/project-store.ts';
+import {
+  ExportDestinationBusyError,
+  ExportDestinationError,
+  ProjectStore,
+} from '../src/project-store.ts';
 import { ExportSession, bitrateFor, safeFileName } from '../src/export/session.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
 const fixture = loadEncodedFixture();
+/** How long the committed fixture is, as a CFR timeline. */
+const FIXTURE_SEC = fixture.frames.length / fixture.fps;
 
 /** AAC-LC, 48 kHz, stereo — the two bytes an `AudioSpecificConfig` is. */
 const AUDIO_SPECIFIC_CONFIG = new Uint8Array([0x11, 0x90]);
@@ -77,6 +99,8 @@ interface Harness {
   store: ProjectStore;
   session: ExportSession;
   window: FakeWindow;
+  /** How many times the session asked for a window to be *created*. */
+  opens: () => number;
   progress: ExportProgress[];
   clipboard: string[];
   revealed: string[];
@@ -97,14 +121,34 @@ beforeEach(async () => {
   });
   await store.loadSettings();
   const created = await store.create('Q3 / demo');
+  // A clip list covering the whole fixture, so the compiled timeline is as long as
+  // the media the fake window below encodes. Without it every bundle here compiles to
+  // a zero-length timeline, and §7.5's fourth check — the file against the *edit* —
+  // would be comparing a ten-second export against an empty one.
+  await writeFile(
+    join(created.paths.dir, 'edit.json'),
+    JSON.stringify({
+      ...newEditDocument(),
+      clips: [{ id: 'whole', sourceStart: 0, sourceEnd: FIXTURE_SEC, speed: 1 }],
+    }),
+    'utf8',
+  );
 
   const window = new FakeWindow();
   const progress: ExportProgress[] = [];
   const clipboard: string[] = [];
   const revealed: string[] = [];
+  let opens = 0;
   const session = new ExportSession({
     store,
-    openWindow: () => window as unknown as Electron.BrowserWindow,
+    openWindow: () => {
+      opens += 1;
+      return window as unknown as Electron.BrowserWindow;
+    },
+    // The real registry answers `undefined` for a job with no window; this models
+    // that, and never creates one.
+    findWindow: () =>
+      window.destroyed ? undefined : (window as unknown as Electron.BrowserWindow),
     closeWindow: () => {
       window.destroyed = true;
     },
@@ -125,6 +169,7 @@ beforeEach(async () => {
     store,
     session,
     window,
+    opens: () => opens,
     progress,
     clipboard,
     revealed,
@@ -139,6 +184,18 @@ afterEach(async () => {
   await harness.store.closeAll();
   await rm(harness.root, { recursive: true, force: true });
 });
+
+/**
+ * How many output frames the real export window would produce for this job.
+ *
+ * `ExportRenderLoop` runs `exportFrameCount(timeline.durationSec, fps)` frames and no
+ * others, so a stand-in that encoded the whole fixture regardless would be producing
+ * a file the timeline never asked for — and §7.5's fourth check exists to catch
+ * exactly that.
+ */
+function framesFor(job: ExportJob): number {
+  return Math.min(fixture.frames.length, exportFrameCount(job.durationSec, job.settings.fps));
+}
 
 /** Play the export page's part: announce the encoder, send its chunks, report done. */
 function encodeLikeTheWindow(jobId: string, frames = fixture.frames.length): void {
@@ -281,6 +338,19 @@ async function exportsDirEntries(): Promise<string[]> {
   return readdir(harness.exportsDir).catch(() => []);
 }
 
+/**
+ * Where a file of this name really lands.
+ *
+ * `resolveExportPath` realpaths the destination — a symlink standing where the
+ * Exports folder should be must not be able to put the export somewhere else — and on
+ * macOS the temp root itself is under `/var`, which *is* a symlink to `/private/var`.
+ * So the recorded path is the resolved one, and a test that compared against the
+ * unresolved temp path would be asserting that the resolution did not happen.
+ */
+async function exportedPath(name: string): Promise<string> {
+  return join(await realpath(harness.exportsDir), name);
+}
+
 function recordingDoc(tracks: RecordingDoc['tracks']): RecordingDoc {
   return {
     schema: currentSchemaId('loom.recording'),
@@ -360,7 +430,7 @@ describe('ExportSession', () => {
   it('carries a job from the first chunk to a file on disk, on the clipboard, revealed', async () => {
     answerVerification();
     harness.window.on('command', (command: ExportCommand) => {
-      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId);
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
     });
 
     const { jobId } = await harness.session.start(harness.recordingId, { name: 'Demo' });
@@ -372,7 +442,7 @@ describe('ExportSession', () => {
     if (result === undefined) return;
 
     // Captain decision 9's whole contract, and each third of it separately.
-    expect(result.path).toBe(join(harness.exportsDir, 'Demo.mp4'));
+    expect(result.path).toBe(await exportedPath('Demo.mp4'));
     expect(harness.clipboard).toEqual([result.path]);
     expect(harness.revealed).toEqual([result.path]);
     expect(await readdir(harness.exportsDir)).toEqual(['Demo.mp4']);
@@ -402,7 +472,7 @@ describe('ExportSession', () => {
   it('records `sourcesKept` when the escape hatch is used', async () => {
     answerVerification();
     harness.window.on('command', (command: ExportCommand) => {
-      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId);
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
     });
     await harness.session.start(harness.recordingId, { name: 'Kept', keepSources: true });
     const outcome = await settled();
@@ -417,7 +487,7 @@ describe('ExportSession', () => {
   it('fails the export, keeps the record, and leaves no file when the last frame will not decode', async () => {
     answerVerification(false);
     harness.window.on('command', (command: ExportCommand) => {
-      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId);
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
     });
     await harness.session.start(harness.recordingId, { name: 'Broken' });
     const outcome = await settled();
@@ -501,7 +571,7 @@ describe('ExportSession', () => {
       if (command.kind !== 'start') return;
       passes = command.job.passes;
       encodeAudioLikeTheWindow(command.job.jobId, audioFrames);
-      encodeLikeTheWindow(command.job.jobId);
+      encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
     });
 
     await harness.session.start(harness.recordingId, { name: 'WithAudio' });
@@ -565,7 +635,7 @@ describe('ExportSession', () => {
     harness.window.on('command', (command: ExportCommand) => {
       if (command.kind !== 'start') return;
       passes = command.job.passes;
-      encodeLikeTheWindow(command.job.jobId);
+      encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
     });
 
     const outcome = await (async () => {
@@ -607,7 +677,7 @@ describe('ExportSession', () => {
     expect(await exportsDirEntries()).toEqual([]);
   }, 60_000);
 
-  it('reports the failure from the window rather than hanging on it', async () => {
+  it('reports the failure from the window rather than hanging on it, and records it', async () => {
     harness.window.on('command', (command: ExportCommand) => {
       if (command.kind !== 'start') return;
       harness.session.onFailed({
@@ -615,10 +685,283 @@ describe('ExportSession', () => {
         message: 'no VideoEncoder configuration supports 1920x1080 H.264 on this machine',
       });
     });
-    await harness.session.start(harness.recordingId, { name: 'NoEncoder' });
+    const { jobId } = await harness.session.start(harness.recordingId, { name: 'NoEncoder' });
     const outcome = await settled();
     expect(outcome.phase).toBe('failed');
     expect(outcome.error).toMatch(/no VideoEncoder configuration/);
+
+    // A failure *before* the file exists is recorded too. "No record" and "a record
+    // saying it failed" are different things to wake up to, and an encoder this
+    // machine cannot configure used to leave nothing at all behind: the job vanished
+    // and the only trace was a broadcast no window subscribes to yet.
+    const doc = await projectDoc(harness.recordingId);
+    expect(doc.exports).toHaveLength(1);
+    expect(doc.exports[0]?.id).toBe(jobId);
+    expect(doc.exports[0]?.error).toMatch(/no VideoEncoder configuration/);
+    // No `verified` block at all: nothing was checked, and an empty one would read as
+    // five checks that failed rather than five that never ran.
+    expect(doc.exports[0]?.verified).toBeUndefined();
+    expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+
+  it('fails the job when the export window’s renderer dies mid-pass', async () => {
+    // §10.2's named symptom, through the one path nothing else covered: a renderer
+    // killed for memory sends no chunk, no `passDone` and no `exportFailed`, so
+    // `#awaitPasses` waited for ever — the job stuck in `#jobs`, the writer and its
+    // two `wx+` scratch streams open, the destination claimed, progress frozen.
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind !== 'start') return;
+      // A few frames, so there is a real writer and real scratch on disk, and then
+      // the process goes.
+      encodeLikeTheWindowPartially(command.job.jobId);
+      setTimeout(() => {
+        harness.window.contents.emit('render-process-gone', {}, { reason: 'oom' });
+      }, 10);
+    });
+    await harness.session.start(harness.recordingId, { name: 'Dead' });
+    const outcome = await settled();
+
+    expect(outcome.phase).toBe('failed');
+    expect(outcome.error).toMatch(/renderer process is gone \(oom\)/);
+    // And it left nothing — not the output, not the scratch streams.
+    expect(await exportsDirEntries()).toEqual([]);
+    const doc = await projectDoc(harness.recordingId);
+    expect(doc.exports[0]?.error).toMatch(/renderer process is gone/);
+  }, 60_000);
+
+  it('does not build a window in order to cancel a job', async () => {
+    // `#send` used to resolve its target with `openWindow`, which *creates* one. A
+    // stream-copy job with no audio never opens a window at all, so cancelling it
+    // constructed a hidden BrowserWindow, loaded export.html into it, sent a `cancel`
+    // nobody was listening for, and destroyed it again.
+    harness.window.loading = true;
+    const { jobId } = await harness.session.start(harness.recordingId, { name: 'Wedged' });
+    await new Promise((done) => setTimeout(done, 20));
+    const before = harness.opens();
+    harness.session.cancel(jobId);
+    expect(harness.opens()).toBe(before);
+    expect((await settled()).phase).toBe('cancelled');
+  }, 60_000);
+});
+
+/**
+ * §7.5's fourth check — *"duration within 100 ms of expected"* — and what "expected"
+ * is allowed to mean.
+ *
+ * It used to be `ExportMp4Writer.finalize()`'s own tally, which is the number
+ * `mvhd.duration` was written from, so the check compared the writer with itself and
+ * could only fail on header bytes the parse above it had already rejected. It is one
+ * of the five facts phase 9 deletes the user's only copy of a recording on the
+ * strength of, so it has to be answered against something the writer did not produce:
+ * the **timeline's** own duration.
+ */
+describe('§7.5’s duration check is against the edit, not the writer', () => {
+  it('fails an export that is not as long as the timeline asked for', async () => {
+    answerVerification();
+    let asked = 0;
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind !== 'start') return;
+      asked = framesFor(command.job);
+      // Half the frames, *with* a `passDone` claiming them — an encode that stopped
+      // early and reported success, which is what a truncated export looks like from
+      // main. Every other check still passes: the file exists, is non-zero, demuxes,
+      // is faststart, and its last frame decodes.
+      encodeLikeTheWindow(command.job.jobId, Math.floor(asked / 2));
+    });
+
+    await harness.session.start(harness.recordingId, { name: 'Short' });
+    const outcome = await settled();
+
+    expect(asked).toBe(fixture.frames.length);
+    expect(outcome.phase).toBe('failed');
+    expect(outcome.error).toMatch(/was expected/);
+    expect(outcome.error).toMatch(/§7\.5 allows/);
+    // Discarded, not left: a file the app knows is wrong must not sit in the user's
+    // Exports folder under the finished name.
+    expect(await exportsDirEntries()).toEqual([]);
+    expect(harness.clipboard).toEqual([]);
+
+    // Recorded with the checks that did pass, and with `lastFrameDecodable` false —
+    // the duration check stops the run before the decode is ever attempted.
+    const doc = await projectDoc(harness.recordingId);
+    expect(doc.exports).toHaveLength(1);
+    expect(doc.exports[0]?.verified?.exists).toBe(true);
+    expect(doc.exports[0]?.verified?.lastFrameDecodable).toBe(false);
+    expect(doc.exports[0]?.error).toMatch(/was expected/);
+  }, 60_000);
+
+  it('passes the same export when it is the length the timeline asked for', async () => {
+    // The control. Without it, "the duration check fires" and "the duration check
+    // always fires" read identically — and the second would fail every real export.
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    await harness.session.start(harness.recordingId, { name: 'Full' });
+    const outcome = await settled();
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.phase).toBe('done');
+    expect(outcome.result?.durationSec).toBeCloseTo(FIXTURE_SEC, 3);
+  }, 60_000);
+
+  it('measures a trimmed edit against the trim, not the source', async () => {
+    // The half a writer-against-itself check can never see: a trim makes the timeline
+    // shorter than the media, so an export that ignored the clip list and encoded the
+    // whole recording produces a file that is internally consistent and wrong.
+    const fps = fixture.fps;
+    await seedEdit({
+      clips: [{ id: 'a', sourceStart: 0, sourceEnd: 60 / fps, speed: 1 }],
+      output: { size: [fixture.width, fixture.height], fps, background: { kind: 'none' } },
+    });
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind !== 'start') return;
+      // The whole fixture rather than the 60 frames the trim asks for.
+      encodeLikeTheWindow(command.job.jobId, fixture.frames.length);
+    });
+    await harness.session.start(harness.recordingId, { name: 'Ignored' });
+    const outcome = await settled();
+    expect(outcome.phase).toBe('failed');
+    expect(outcome.error).toMatch(/was expected/);
+    expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+});
+
+/**
+ * Where the file goes is main's decision, and only main's.
+ *
+ * `ExportSession.start` composes `<exportRoot>/<name>.mp4`, `beginExport` `mkdir -p`s
+ * the directory, `finalize` `rename(2)`s over the output and a failed verification
+ * removes it. A caller that could name the directory would therefore be naming what
+ * gets created, what gets replaced and what gets deleted — §0 rule 1 read backwards,
+ * since a sandboxed renderer has no filesystem precisely so that it cannot.
+ */
+describe('the export destination', () => {
+  it('refuses an override that tries to name the directory', async () => {
+    const elsewhere = join(harness.root, 'not-the-exports-folder');
+    await expect(
+      harness.session.start(harness.recordingId, {
+        outputDir: elsewhere,
+      } as unknown as ExportSettingsOverride),
+    ).rejects.toBeInstanceOf(ExportDestinationError);
+    // Refused before anything was created, which is the half that matters: a check
+    // that fired after the `mkdir` would still have let a renderer make directories.
+    expect(await readdir(elsewhere).catch(() => null)).toBeNull();
+    expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+
+  it('keeps a name that looks like a path inside the exports folder', async () => {
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    await harness.session.start(harness.recordingId, { name: '../../../etc/passwd' });
+    const outcome = await settled();
+    expect(outcome.phase).toBe('done');
+    // `safeFileName` turns every separator into a space and strips the leading dots,
+    // so the join is one segment inside the folder main chose.
+    expect(outcome.result?.path).toBe(await exportedPath('.. .. etc passwd.mp4'));
+    expect(await readdir(harness.exportsDir)).toEqual(['.. .. etc passwd.mp4']);
+  }, 60_000);
+
+  it('resolves the destination through a symlink rather than writing into it', async () => {
+    // `resolveExportPath` realpaths the directory the way `resolveBundleFile` does, so
+    // a link standing where the Exports folder should be cannot put the export
+    // somewhere the app never named — and the path recorded in `project.json` is the
+    // real one rather than the link's.
+    const real = join(harness.root, 'real-exports');
+    await mkdir(real, { recursive: true });
+    await mkdir(dirname(harness.exportsDir), { recursive: true });
+    await symlink(real, harness.exportsDir, 'dir');
+
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    await harness.session.start(harness.recordingId, { name: 'Linked' });
+    const outcome = await settled();
+
+    expect(outcome.phase).toBe('done');
+    expect(outcome.result?.path).toBe(join(await realpath(real), 'Linked.mp4'));
+    expect(await readdir(real)).toEqual(['Linked.mp4']);
+  }, 60_000);
+});
+
+/**
+ * The bundle lock the export takes, and gives back.
+ *
+ * `start` opens the project — the lock, a `JournalWriter`, a journal replay — because
+ * `recordExport` requires an open project. Nothing released it, so one export held the
+ * `.lock` until `before-quit` and the next launch swept a lock that was never stale.
+ * A bare `close()` in the `finally` is not the fix: an editor with the same project
+ * open would lose its lock mid-edit.
+ */
+describe('the project an export opened', () => {
+  /**
+   * Whether a *second* process could take this bundle's lock, within a moment.
+   *
+   * Polled rather than sampled once: `#finish` broadcasts the terminal phase from the
+   * `catch`/`try`, and the release runs in the `finally` after it, so `settled()`
+   * resolving does not mean the lock has already gone.
+   */
+  async function lockBecomesFree(): Promise<boolean> {
+    for (let i = 0; i < 200; i++) {
+      if (await lockIsFree()) return true;
+      await new Promise((done) => setTimeout(done, 5));
+    }
+    return false;
+  }
+
+  /** Whether a *second* process could take this bundle's lock right now. */
+  async function lockIsFree(): Promise<boolean> {
+    const other = new ProjectStore({
+      recordingsRoot: join(harness.root, 'recordings'),
+      settingsPath: join(harness.root, 'other-settings.json'),
+      appVersion: '0.0.0-test',
+      trash: () => Promise.resolve(),
+    });
+    try {
+      await other.openProject(harness.recordingId);
+      await other.closeAll();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it('is released when the export is the only thing holding it', async () => {
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    expect(await lockIsFree()).toBe(true);
+    await harness.session.start(harness.recordingId, { name: 'Released' });
+    expect((await settled()).phase).toBe('done');
+    expect(await lockBecomesFree()).toBe(true);
+  }, 60_000);
+
+  it('is left open when something else holds it too', async () => {
+    // An editor with the recording open, which is the case a bare `close()` would
+    // break. The export must let go of *its* hold and nothing else.
+    await harness.store.openProject(harness.recordingId);
+    answerVerification();
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    await harness.session.start(harness.recordingId, { name: 'StillOpen' });
+    expect((await settled()).phase).toBe('done');
+    // Given every chance to be released, and still held — the editor's hold survives.
+    expect(await lockBecomesFree()).toBe(false);
+  }, 60_000);
+
+  it('is released after a failed export too', async () => {
+    answerVerification(false);
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') encodeLikeTheWindow(command.job.jobId, framesFor(command.job));
+    });
+    await harness.session.start(harness.recordingId, { name: 'Failed' });
+    expect((await settled()).phase).toBe('failed');
+    expect(await lockBecomesFree()).toBe(true);
   }, 60_000);
 });
 
@@ -813,6 +1156,69 @@ describe('two exports aimed at one destination', () => {
     await store.cancelExport('job-b');
   }, 60_000);
 
+  it('discards only the file the job it names actually renamed into place', async () => {
+    // The `rm` that points outside a bundle, at a directory the user chose. It takes a
+    // **job id**, not a path, so the only thing it can ever remove is a file that
+    // job's own `finalize` put there — read out of the store's own ledger, which the
+    // writer's `renamed` flag is what writes. A path argument would have put that
+    // guarantee in the caller's hands.
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Discarded.mp4');
+
+    // A job that never ran can claim nothing, so an earlier export of the same name
+    // is untouched — the case that turns a bug into data loss.
+    await store.beginExport('job-earlier', { outputPath, video: videoSpec() });
+    await appendFrames('job-earlier', 0, 12);
+    await store.finalizeExport('job-earlier');
+    store.releaseExport('job-earlier');
+    expect(await store.discardExport('a-job-that-never-ran')).toBeNull();
+    expect(await readdir(harness.exportsDir)).toEqual(['Discarded.mp4']);
+
+    // A job that *did* rename can, and the path it removes is the one it wrote.
+    await store.beginExport('job-b', { outputPath, video: videoSpec() });
+    await appendFrames('job-b', 0, 12);
+    await store.finalizeExport('job-b');
+    expect(await store.discardExport('job-b')).toBe(outputPath);
+    expect(await readdir(harness.exportsDir)).toEqual([]);
+    // ...and only once: a second discard is not a licence to delete whatever is at
+    // that path next.
+    expect(await store.discardExport('job-b')).toBeNull();
+  }, 60_000);
+
+  it('claims nothing for a job whose finalize failed before the rename', async () => {
+    // The case that turns the gate into data loss if it is dropped: a good export
+    // already sits at the path, a second job aimed at the same name fails to assemble
+    // itself, and its cleanup must not take the first one with it.
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Survivor.mp4');
+
+    await store.beginExport('job-good', { outputPath, video: videoSpec() });
+    await appendFrames('job-good', 0, 12);
+    await store.finalizeExport('job-good');
+    store.releaseExport('job-good');
+    expect(await readdir(harness.exportsDir)).toEqual(['Survivor.mp4']);
+
+    await store.beginExport('job-bad', { outputPath, video: videoSpec() });
+    await appendFrames('job-bad', 0, 12);
+    // A *directory* where `<out>.partial` goes: the scratch sweep only ever unlinks
+    // files, so the `wx` open that assembles the finished bytes fails and `finalize`
+    // throws with the rename never attempted.
+    await mkdir(`${outputPath}.partial`, { recursive: true });
+    await expect(store.finalizeExport('job-bad')).rejects.toThrow();
+
+    expect(await store.discardExport('job-bad')).toBeNull();
+    expect(await readdir(harness.exportsDir)).toContain('Survivor.mp4');
+  }, 60_000);
+
+  it('claims nothing for a job that was cancelled before it renamed', async () => {
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'NeverRenamed.mp4');
+    await store.beginExport('job-a', { outputPath, video: videoSpec() });
+    await appendFrames('job-a', 0, 8);
+    await store.cancelExport('job-a');
+    expect(await store.discardExport('job-a')).toBeNull();
+  }, 60_000);
+
   it('leaves an export to a different destination alone', async () => {
     // Control. Without it, "it refuses a second export to the same path" and "it
     // refuses a second export" read identically — and the second reading would make
@@ -869,6 +1275,14 @@ describe('safeFileName', () => {
     expect(safeFileName('   ')).toBe('Recording');
     // A name that is only separators still produces a file, not an empty path.
     expect(safeFileName('///')).toBe('Recording');
+    // And a name shaped like a path is a single segment, not a traversal: this is
+    // what lets `name` stay a renderer-supplied override when `outputDir` cannot.
+    expect(safeFileName('../../../etc/passwd')).toBe('.. .. etc passwd');
+    expect(safeFileName('/etc/passwd')).toBe('etc passwd');
+    expect(safeFileName('..')).toBe('Recording');
+    for (const name of ['../../x', '/abs/x', 'a\\b', 'a:b']) {
+      expect(safeFileName(name)).not.toMatch(/[/\\:\0]/);
+    }
     expect(safeFileName('x'.repeat(400))).toHaveLength(120);
   });
 

@@ -20,7 +20,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FastStartWriter, movieHeaderLength, parseMovie, readBoxHeader } from '../src/index.ts';
 import { ExportMp4Writer, sweepExportScratch } from '../src/fs/index.ts';
@@ -245,6 +245,74 @@ describe('the export movie', () => {
       // recovery pass or a curious user could mistake for a shorter export.
       expect(await readdir(dir)).toEqual([]);
       await expect(writer.finalize()).rejects.toThrow(/closed/);
+    });
+  }, 60_000);
+
+  it('reports whether the rename happened, not whether finalize returned', async () => {
+    // `finalize` does its `rename(2)` and *then* opens and `fsync`s the parent
+    // directory, both inside one `try`. A caller that inferred "the file is in place"
+    // from `finalize` having returned would, on an EIO in that `fsync`, skip its
+    // cleanup and leave an **unverified** export sitting under the finished name —
+    // which is the one artifact §7.5's rename-then-verify order exists to remove.
+    await withTempDir(async (dir) => {
+      const outputPath = join(dir, 'Export.mp4');
+      const writer = await ExportMp4Writer.create({
+        outputPath,
+        video: {
+          width: fixture.width,
+          height: fixture.height,
+          timescale: VIDEO_TIMESCALE,
+          avcC: fixture.avcC,
+        },
+      });
+      expect(writer.renamed).toBe(false);
+      for (const [i, frame] of fixture.frames.slice(0, 8).entries()) {
+        await writer.appendVideo({
+          data: frame.data,
+          byteLength: frame.data.byteLength,
+          durationUnits: FRAME_UNITS,
+          isKey: frame.isKey,
+          timestampUs: Math.round((i * 1e6) / fixture.fps),
+        });
+      }
+      await writer.finalize();
+      expect(writer.renamed).toBe(true);
+      expect(await readdir(dir)).toEqual(['Export.mp4']);
+    });
+  }, 60_000);
+
+  it('control: a finalize that fails before the rename does not claim one', async () => {
+    // Without this the assertion above passes on a flag that is simply always true,
+    // and the cleanup it gates would run against exports that never reached the
+    // output path — removing an *earlier*, good file of the same name.
+    await withTempDir(async (dir) => {
+      const outputPath = join(dir, 'Export.mp4');
+      const writer = await ExportMp4Writer.create({
+        outputPath,
+        video: {
+          width: fixture.width,
+          height: fixture.height,
+          timescale: VIDEO_TIMESCALE,
+          avcC: fixture.avcC,
+        },
+      });
+      const frame = fixture.frames[0];
+      expect(frame).toBeDefined();
+      if (frame === undefined) return;
+      await writer.appendVideo({
+        data: frame.data,
+        byteLength: frame.data.byteLength,
+        durationUnits: FRAME_UNITS,
+        isKey: true,
+        timestampUs: 0,
+      });
+      // A *directory* where `<out>.partial` goes: the sweep leaves it alone (it only
+      // ever unlinks files it wrote), so the `wx` open that assembles the finished
+      // bytes fails and `finalize` throws with the rename never attempted.
+      await mkdir(`${outputPath}.partial`, { recursive: true });
+      await expect(writer.finalize()).rejects.toThrow();
+      expect(writer.renamed).toBe(false);
+      expect(await readdir(dir)).not.toContain('Export.mp4');
     });
   }, 60_000);
 

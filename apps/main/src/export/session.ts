@@ -22,10 +22,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import {
   CHANNEL,
+  exportDurationSec,
   recordingUrl,
   type ExportChunkMsg,
   type ExportCommand,
@@ -41,6 +41,7 @@ import {
   type ExportProgress,
   type ExportResult,
   type ExportSettings,
+  type ExportSettingsOverride,
   type ExportVideoSource,
 } from '@loom/ipc';
 import {
@@ -54,12 +55,13 @@ import {
   isoTimestamp,
   type EditDocument,
   type ExportRecord,
+  type ExportVerification,
   type FrameIndexDoc,
   type RecordingDoc,
   type RecordingId,
   type VideoPart,
 } from '@loom/format';
-import type { ProjectStore } from '../project-store.ts';
+import { ExportDestinationError, type ProjectStore } from '../project-store.ts';
 import {
   COPY_TIMESCALE,
   StreamCopyRefused,
@@ -86,6 +88,38 @@ const LOAD_TIMEOUT_MS = 30_000;
 
 /** Bytes copied per read on the stream-copy path. */
 const COPY_BATCH_BYTES = 8 * 1024 * 1024;
+
+/**
+ * How long the passes may go without a word from the export window.
+ *
+ * The last unbounded wait in this file, and §10.2's named symptom reached through the
+ * one path nothing else covered: the export renderer dying — an OOM on a 4K composite
+ * plus encode, or Chromium taking the process — sends no `exportChunk`, no
+ * `exportPassDone` and no `exportFailed`, so `#awaitPasses` waited for ever. The job
+ * stayed in `#jobs`, the writer and its two `wx+` scratch streams stayed open, the
+ * destination claim was never released, and progress froze at the last percentage.
+ *
+ * {@link ExportSession.#watchWindow} is the fast answer — a dead renderer says so
+ * immediately — and this is the backstop for a window that is alive and has stopped
+ * producing. Generous on purpose: both passes report progress **per frame**, and
+ * every wait *inside* the window is already bounded and named (`STALL_TIMEOUT_MS` on
+ * the decode, `ENCODE_STALL_TIMEOUT_MS` on the encode), so two minutes of total
+ * silence is a machine in trouble rather than a slow one. The only unmeasured gaps
+ * are the ones before a pass starts: fetching a long recording's audio parts, and
+ * opening the readers and encoders.
+ */
+const PASS_SILENCE_TIMEOUT_MS = 120_000;
+
+/** How often the silence above is checked. */
+const SILENCE_POLL_MS = 1000;
+
+/** Raised when the export window stops answering mid-pass. */
+export class ExportWindowSilent extends Error {
+  constructor(jobId: string, reason: string) {
+    super(`export ${jobId} was abandoned: ${reason}`);
+    this.name = 'ExportWindowSilent';
+  }
+}
 
 /**
  * How much encoded media main will hold while it waits for the writer to open.
@@ -148,6 +182,16 @@ export interface ExportSessionOptions {
   store: ProjectStore;
   /** Creates (or reuses) the hidden export window for a job. */
   openWindow: (jobId: string) => BrowserWindow;
+  /**
+   * The job's window **if it has one**, without creating it.
+   *
+   * Separate from {@link openWindow} because most of what this class sends is a
+   * message to a window that is already running a pass, and a stream-copy job with no
+   * audio never opens one at all. Resolving those sends through `openWindow` built a
+   * hidden `BrowserWindow`, loaded `export.html` into it and sent a command nobody was
+   * listening for — a cancel that lit up a renderer in order to say "stop".
+   */
+  findWindow: (jobId: string) => BrowserWindow | undefined;
   /** Closes it. Called on every exit path. */
   closeWindow: (jobId: string) => void;
   /** Broadcast progress to every live window. */
@@ -168,6 +212,18 @@ interface Job {
   mode: ExportMode;
   timeline: CompiledTimeline;
   totalSec: number;
+  /**
+   * How long the finished file has to be, for §7.5's fourth check.
+   *
+   * Derived from the **timeline** — `exportFrameCount(totalSec, fps) / fps` on the
+   * recompose path, the copy plan's own duration on the fast path — and never from
+   * anything the writer produced. Handing `verifyExport` the writer's tally made that
+   * check compare `FastStartWriter.plan()`'s number against an `mvhd.duration`
+   * written from the same number, so it could only fail on corrupt header bytes the
+   * parse above it had already caught. It is one of five things phase 9 deletes the
+   * user's only copy of a recording on the strength of.
+   */
+  expectedDurationSec: number;
   /** Which passes the window owes us. */
   passes: { audio: boolean; video: boolean };
   audioDone: boolean;
@@ -175,6 +231,12 @@ interface Job {
   cancelled: boolean;
   /** Set once a fatal error has been reported, so the first one wins. */
   failure: string | null;
+  /** Set once `#finish` has broadcast an outcome, so late events cannot re-fail it. */
+  finished: boolean;
+  /** Set once this job has written its `ExportRecord`, so it writes exactly one. */
+  recorded: boolean;
+  /** Last time the window said anything about this job. See {@link PASS_SILENCE_TIMEOUT_MS}. */
+  lastMessageAtMs: number;
   video: { spec: FastStartVideoSpec | null; durationUnits: number } | null;
   audio: { spec: FastStartAudioSpec | null } | null;
   progress: { audioSec: number; videoSec: number };
@@ -273,39 +335,105 @@ export class ExportSession {
     return this.#options.store.readFrameIndex(id, part.index).catch(() => null);
   }
 
-  async start(id: RecordingId, overrides: Partial<ExportSettings>): Promise<{ jobId: string }> {
+  /**
+   * Start a job.
+   *
+   * `overrides` is {@link ExportSettingsOverride} — everything except the
+   * destination. **Main owns where the file goes**, so `settings.outputDir` is always
+   * `store.exportRoot()` and never anything a caller supplied: a renderer that could
+   * name the directory could make main `mkdir -p` anywhere on the volume, `rename(2)`
+   * over any `.mp4` on it, and — on a failed verification — delete it. Captain
+   * decision 9's *"let the captain change it"* is `export:chooseFolder`, a native
+   * dialog main itself opens, and the choice is remembered in `settings.json`.
+   *
+   * The runtime refusal below is not redundant with the type: `requireExportSettings`
+   * already refuses it at the IPC boundary, and this is the invariant restated where
+   * the path is actually composed, so a future caller inside main cannot reintroduce
+   * it by writing plain TypeScript.
+   */
+  async start(id: RecordingId, overrides: ExportSettingsOverride): Promise<{ jobId: string }> {
+    if ('outputDir' in overrides) {
+      throw new ExportDestinationError(
+        'an export destination is main’s to decide; it is settings.exportRoot, changed ' +
+          'through export:chooseFolder',
+      );
+    }
     const settings = { ...(await this.defaults(id)), ...overrides };
     const jobId = (this.#options.newJobId ?? randomUUID)();
+    // `resolve` + `realpath` on the directory and a containment check on the join, so
+    // a symlink standing where the Exports folder should be cannot walk the export out
+    // of it. `safeFileName` has already turned every separator in the name into a
+    // space, so the join is a single path segment; this checks that rather than
+    // assuming it.
+    const outputPath = await this.#options.store.resolveExportPath(
+      settings.outputDir,
+      `${safeFileName(settings.name)}.mp4`,
+    );
     // Opened, not read: the export records itself in `project.json` when it is done,
     // and `recordExport` requires the project to be open — the same rule the event
-    // logs follow. Opening here also takes the bundle lock for the export's life.
+    // logs follow. Opening here also takes the bundle lock for the export's life, and
+    // `#run`'s `finally` hands it back through `releaseProject` — which closes only if
+    // nothing else (an editor, say) is holding the same project.
     const opened = await this.#options.store.openProject(id);
-    const timeline = compile(opened.edit, {
-      cursor: null,
-      clicks: null,
-      recording: opened.recording,
-    });
+    // From here the hold exists, and `#run`'s `finally` is what gives it back — so
+    // anything between here and the job being handed to `#run` has to release it
+    // itself. A `compile` that throws on a malformed document would otherwise leave
+    // the bundle locked for the rest of the session with no job to blame.
+    let job: Job;
+    try {
+      const timeline = compile(opened.edit, {
+        cursor: null,
+        clicks: null,
+        recording: opened.recording,
+      });
 
-    const eligibility = streamCopyEligibility({
-      edit: opened.edit,
-      recording: opened.recording,
-      settings,
-      index: await this.#screenIndex(id, opened.recording),
+      const eligibility = streamCopyEligibility({
+        edit: opened.edit,
+        recording: opened.recording,
+        settings,
+        index: await this.#screenIndex(id, opened.recording),
+      });
+      const hasAudio = audioSources(id, opened.recording).length > 0;
+      job = this.#newJob({ jobId, id, settings, outputPath, timeline, eligibility, hasAudio });
+    } catch (error) {
+      await this.#options.store.releaseProject(id).catch(() => undefined);
+      throw error;
+    }
+    this.#jobs.set(jobId, job);
+
+    void this.#run(job, opened.edit, opened.recording).catch((error: unknown) => {
+      console.error('[export] job failed:', error);
     });
-    const hasAudio = audioSources(id, opened.recording).length > 0;
-    const job: Job = {
+    return { jobId };
+  }
+
+  #newJob(init: {
+    jobId: string;
+    id: RecordingId;
+    settings: ExportSettings;
+    outputPath: string;
+    timeline: CompiledTimeline;
+    eligibility: { eligible: boolean };
+    hasAudio: boolean;
+  }): Job {
+    const { jobId, id, settings, outputPath, timeline, eligibility, hasAudio } = init;
+    return {
       id: jobId,
       recordingId: id,
       settings,
-      outputPath: join(settings.outputDir, `${settings.name}.mp4`),
+      outputPath,
       mode: eligibility.eligible ? 'stream-copy' : 'recompose',
       timeline,
       totalSec: timeline.durationSec,
+      expectedDurationSec: exportDurationSec(timeline.durationSec, settings.fps),
       passes: { audio: hasAudio, video: !eligibility.eligible },
       audioDone: false,
       videoDone: false,
       cancelled: false,
       failure: null,
+      finished: false,
+      recorded: false,
+      lastMessageAtMs: Date.now(),
       video: null,
       audio: null,
       progress: { audioSec: 0, videoSec: 0 },
@@ -316,12 +444,6 @@ export class ExportSession {
       heldBytes: 0,
       waiters: new Set(),
     };
-    this.#jobs.set(jobId, job);
-
-    void this.#run(job, opened.edit, opened.recording).catch((error: unknown) => {
-      console.error('[export] job failed:', error);
-    });
-    return { jobId };
   }
 
   cancel(jobId: string): void {
@@ -356,6 +478,7 @@ export class ExportSession {
   onMeta(message: ExportMetaMsg): void {
     const job = this.#jobs.get(message.jobId);
     if (job === undefined) return;
+    this.#touch(job);
     const config = message.decoderConfig;
     if (message.kind === 'video') {
       const description = config.description;
@@ -402,6 +525,7 @@ export class ExportSession {
     // being torn down and its writer cancelled, so appending would either throw into
     // nobody's hands or grow a file that is about to be unlinked.
     if (job === undefined) return;
+    this.#touch(job);
     if (job.failure !== null) return;
 
     // Before the writer exists there is nothing to append to, and refusing is not an
@@ -443,6 +567,7 @@ export class ExportSession {
   onPassProgress(message: ExportPassProgressMsg): void {
     const job = this.#jobs.get(message.jobId);
     if (job === undefined) return;
+    this.#touch(job);
     if (message.phase === 'audio') job.progress.audioSec = message.renderedSec;
     else job.progress.videoSec = message.renderedSec;
     this.#report(job, message.phase);
@@ -451,6 +576,7 @@ export class ExportSession {
   onPassDone(message: ExportPassDoneMsg): void {
     const job = this.#jobs.get(message.jobId);
     if (job === undefined) return;
+    this.#touch(job);
     if (message.sampleCount === 0) {
       this.#fail(job, `the ${message.kind} pass produced no samples`);
       return;
@@ -463,18 +589,21 @@ export class ExportSession {
   onFailed(message: ExportFailedMsg): void {
     const job = this.#jobs.get(message.jobId);
     if (job === undefined) return;
+    this.#touch(job);
     this.#fail(job, message.message);
   }
 
   onDecoded(report: ExportDecodeReport): void {
-    this.#jobs.get(report.jobId)?.decode?.(report);
+    const job = this.#jobs.get(report.jobId);
+    if (job === undefined) return;
+    this.#touch(job);
+    job.decode?.(report);
   }
 
   // ------------------------------------------------------------------ the run
 
   async #run(job: Job, edit: EditDocument, recording: RecordingDoc | null): Promise<void> {
     this.#report(job, 'preparing');
-    let renamed = false;
     try {
       // The copy is *planned* before anything is told anything, so a plan that has to
       // be refused becomes a recompose rather than a failed export. §5.3's conditions
@@ -496,27 +625,27 @@ export class ExportSession {
 
       this.#report(job, 'muxing');
       const finished = await this.#options.store.finalizeExport(job.id);
-      // From here the file is in place under its real name (§7.5's order: rename,
-      // then verify), so a failure below has something to clean up.
-      renamed = true;
+      // Both numbers on one line, because they are two *independent* statements about
+      // how long this export is: what the writer tallied from the samples it accepted,
+      // and what the timeline says the file has to be. §7.5's fourth check below is
+      // the file against the second of them, and a run where these two disagree is
+      // where to start reading when it fails.
+      console.log(
+        `[export] ${job.id}: muxed ${finished.videoSampleCount} video and ` +
+          `${finished.audioSampleCount} audio samples, ${finished.durationSec.toFixed(3)}s, ` +
+          `against a timeline of ${job.expectedDurationSec.toFixed(3)}s`,
+      );
 
       this.#report(job, 'verifying');
-      const outcome = await verifyExport(job.outputPath, finished.durationSec, this.#io(job));
-      const record: ExportRecord = {
-        id: job.id,
-        path: job.outputPath,
-        completedAt: isoTimestamp(),
-        settings: {
-          width: job.settings.width,
-          height: job.settings.height,
-          fps: job.settings.fps,
-          bitrate: job.settings.bitrate,
-        },
+      // The expectation is the *timeline's*, never `finalizeExport`'s return. See
+      // `Job.expectedDurationSec`: the writer's own tally is what `mvhd.duration` was
+      // written from, so handing it back here would be asking the file whether it
+      // agrees with itself.
+      const outcome = await verifyExport(job.outputPath, job.expectedDurationSec, this.#io(job));
+      await this.#record(job, {
         verified: outcome.verified,
-        sourcesKept: job.settings.keepSources,
         ...(outcome.error === null ? {} : { error: outcome.error }),
-      };
-      await this.#options.store.recordExport(job.recordingId, record);
+      });
 
       if (outcome.failure !== null) {
         throw new Error(outcome.error ?? `verification failed at ${outcome.failure}`);
@@ -539,26 +668,77 @@ export class ExportSession {
       this.#finish(job, { phase: 'done', result });
     } catch (error) {
       const cancelled = error instanceof ExportCancelled || job.cancelled;
+      const message = job.failure ?? (error instanceof Error ? error.message : String(error));
       // Nothing survives, on either path — §7.5's obligation 1 read the other way
       // round: a file that is not verified must not be there to be mistaken for one
       // that is. Before the rename that is the writer's scratch; after it, the output
-      // itself, which is why `renamed` is tracked rather than assumed — an unlink of
-      // the path on a job that never got that far would remove an *earlier* good
-      // export that happened to share the name.
+      // itself — and `discardExport` is named by *job id*, so it can only ever remove
+      // a file this job's own `finalize` renamed into place. A job that never got that
+      // far has nothing to claim and this is a no-op, which is what keeps an
+      // **earlier** good export of the same name safe.
       await this.#options.store.cancelExport(job.id).catch(() => undefined);
-      if (renamed) {
-        await this.#options.store.discardExport(job.outputPath).catch(() => undefined);
+      await this.#options.store.discardExport(job.id).catch(() => undefined);
+      // Every failure is recorded, not only a verification failure. The promise this
+      // class makes is that *"no record" and "a record saying it failed" are different
+      // things to wake up to*, and an encoder this machine cannot configure, a lost GL
+      // context, a stalled decode, a held-chunk overflow or an append that threw all
+      // used to leave nothing at all behind. A cancel is deliberately not recorded: it
+      // is the user's own decision, already reflected in the UI, and not something to
+      // find in `project.json` later.
+      //
+      // The one failure that cannot reach here is main itself dying mid-export — there
+      // is nobody left to write the record, and the recording is untouched, so the
+      // next launch simply finds no export rather than a wrong one.
+      if (!cancelled) {
+        await this.#record(job, { error: message }).catch((recordError: unknown) => {
+          console.error('[export] could not record the failure:', recordError);
+        });
       }
       this.#finish(job, {
         phase: cancelled ? 'cancelled' : 'failed',
-        ...(cancelled
-          ? {}
-          : { error: job.failure ?? (error instanceof Error ? error.message : String(error)) }),
+        ...(cancelled ? {} : { error: message }),
       });
     } finally {
+      this.#options.store.releaseExport(job.id);
       this.#options.closeWindow(job.id);
       this.#jobs.delete(job.id);
+      // The bundle lock and the journal handle `start` took, handed back. Conditional
+      // by construction: `releaseProject` closes only when nothing else holds the
+      // project, so an editor with the same recording open keeps its lock.
+      await this.#options.store.releaseProject(job.recordingId).catch((error: unknown) => {
+        console.error('[export] could not release the project:', error);
+      });
     }
+  }
+
+  /**
+   * Write this job's one `ExportRecord`, whatever became of it.
+   *
+   * Exactly one, which is why the flag is on the job rather than on the caller: the
+   * verification path records inside the `try` and then throws, and the `catch` must
+   * not append a second record for the same id.
+   */
+  async #record(
+    job: Job,
+    outcome: { verified?: ExportVerification; error?: string },
+  ): Promise<void> {
+    if (job.recorded) return;
+    job.recorded = true;
+    const record: ExportRecord = {
+      id: job.id,
+      path: job.outputPath,
+      completedAt: isoTimestamp(),
+      settings: {
+        width: job.settings.width,
+        height: job.settings.height,
+        fps: job.settings.fps,
+        bitrate: job.settings.bitrate,
+      },
+      ...(outcome.verified === undefined ? {} : { verified: outcome.verified }),
+      sourcesKept: job.settings.keepSources,
+      ...(outcome.error === undefined ? {} : { error: outcome.error }),
+    };
+    await this.#options.store.recordExport(job.recordingId, record);
   }
 
   /**
@@ -622,6 +802,10 @@ export class ExportSession {
       durationUnits: 0,
     };
     job.totalSec = plan.durationSec;
+    // §5.3's copy carries the source's own sample durations rather than a CFR grid,
+    // so the plan's duration — not `exportDurationSec` — is what the file has to come
+    // out as. Still the *plan's*, never the writer's.
+    job.expectedDurationSec = plan.durationSec;
     this.#openWriterWhenReady(job);
     // A copy cannot start before the writer exists, and the writer waits for the
     // audio encoder's config when there is audio. Waiting here rather than
@@ -678,8 +862,38 @@ export class ExportSession {
     };
     // The window is created here rather than at `start`, so a job that is refused
     // before this point never lights one up.
-    await this.#awaitWindowReady(job, this.#options.openWindow(job.id));
+    const window = this.#options.openWindow(job.id);
+    await this.#awaitWindowReady(job, window);
+    this.#watchWindow(job, window);
     this.#send(job, { kind: 'start', job: message });
+  }
+
+  /**
+   * Fail the job the moment its window dies, rather than waiting on a pass nobody is
+   * running any more.
+   *
+   * A renderer killed for memory — a 4K composite plus a `VideoEncoder` is where that
+   * happens — sends nothing at all afterwards: no chunk, no `passDone`, no
+   * `exportFailed`. Both events are listened for because they are different deaths:
+   * `render-process-gone` names *why* the process went, and `destroyed` covers the
+   * window itself being taken away with the process still alive.
+   *
+   * `once` rather than a listener that has to be removed, guarded by `job.finished`:
+   * closing the window is the last thing `#run` does on **every** path, so `destroyed`
+   * fires on success too and must not be able to re-open a settled job.
+   */
+  #watchWindow(job: Job, window: BrowserWindow): void {
+    const died = (reason: string) => (): void => {
+      if (job.finished || job.cancelled) return;
+      this.#fail(job, new ExportWindowSilent(job.id, reason).message);
+    };
+    window.webContents.once(
+      'render-process-gone',
+      (_event: unknown, details: { reason: string }) => {
+        died(`its window's renderer process is gone (${details.reason})`)();
+      },
+    );
+    window.webContents.once('destroyed', died('its window was destroyed mid-export'));
   }
 
   /**
@@ -777,11 +991,51 @@ export class ExportSession {
     }
   }
 
+  /**
+   * Wait for the passes, bounded — the last wait in this file that was not.
+   *
+   * Two things can end it besides the passes themselves: {@link #watchWindow}'s
+   * events, which are immediate and name what died, and the silence watchdog here,
+   * for a window that is still alive and has stopped producing. See
+   * {@link PASS_SILENCE_TIMEOUT_MS} for why the bound is on *silence* rather than on
+   * total elapsed time — an export is minutes of work by design (§5.7), so a deadline
+   * on the whole thing would be a length limit on the user's recordings.
+   */
   #awaitPasses(job: Job): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      job.settle = { resolve, reject };
+      job.lastMessageAtMs = Date.now();
+      const timer = setInterval(() => {
+        const silentMs = Date.now() - job.lastMessageAtMs;
+        if (silentMs < PASS_SILENCE_TIMEOUT_MS) return;
+        this.#fail(
+          job,
+          new ExportWindowSilent(
+            job.id,
+            `its window sent nothing for ${Math.round(silentMs / 1000)}s while a pass was ` +
+              'still outstanding',
+          ).message,
+        );
+      }, SILENCE_POLL_MS);
+      timer.unref?.();
+      const finish = (error: Error | null): void => {
+        clearInterval(timer);
+        job.settle = null;
+        if (error === null) resolve();
+        else reject(error);
+      };
+      job.settle = {
+        resolve: () => {
+          finish(null);
+        },
+        reject: finish,
+      };
       this.#settleIfComplete(job);
     });
+  }
+
+  /** A word from the window, of any kind. Resets {@link PASS_SILENCE_TIMEOUT_MS}. */
+  #touch(job: Job): void {
+    job.lastMessageAtMs = Date.now();
   }
 
   #settleIfComplete(job: Job): void {
@@ -865,9 +1119,18 @@ export class ExportSession {
     });
   }
 
+  /**
+   * A command to the job's window, **if it has one**.
+   *
+   * Looked up rather than opened: a stream-copy job with no audio never opens a
+   * window at all, so resolving this through `openWindow` made `cancel()` construct a
+   * hidden `BrowserWindow`, load `export.html` into it, send a `cancel` nobody was
+   * listening for, and destroy it again. `#decodeInWindow` is the one caller that
+   * legitimately needs a window created, and it opens one itself.
+   */
   #send(job: Job, command: ExportCommand): void {
-    const window = this.#options.openWindow(job.id);
-    if (window.isDestroyed()) return;
+    const window = this.#options.findWindow(job.id);
+    if (window === undefined || window.isDestroyed()) return;
     window.webContents.send(CHANNEL.exportCommand, command);
   }
 
@@ -895,6 +1158,9 @@ export class ExportSession {
   }
 
   #finish(job: Job, outcome: { phase: ExportPhase; result?: ExportResult; error?: string }): void {
+    // Before the broadcast: `closeWindow` follows in `#run`'s `finally` and its
+    // `destroyed` event must not be able to re-fail a job that has already reported.
+    job.finished = true;
     this.#options.broadcast({
       jobId: job.id,
       recordingId: job.recordingId,

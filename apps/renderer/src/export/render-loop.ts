@@ -54,6 +54,7 @@
 import { resolve, type CompiledTimeline, type ResolvedState } from '@loom/edl';
 import type { CompositorFrames } from '@loom/compositor';
 import type { Seconds } from '@loom/format';
+import { exportFrameCount } from '@loom/ipc';
 import type { PreviewSource } from '../preview/index.ts';
 
 /**
@@ -232,10 +233,10 @@ export class ExportRenderLoop {
     this.#onFrame = options.onFrame;
     this.#onProgress = options.onProgress ?? ((): void => undefined);
     this.#signal = options.signal;
-    // `round`, not `ceil`: a 10.000 s timeline at 30 fps is 300 frames covering
-    // [0, 10), and a float that landed a microsecond over would otherwise buy a
-    // 301st frame that is a duplicate of the 300th.
-    this.frameCount = Math.max(1, Math.round(this.#timeline.durationSec * options.fps));
+    // `exportFrameCount` rather than the arithmetic written out here: main computes
+    // the duration §7.5's fourth check expects from the *same* function, so the file
+    // is measured against the timeline rather than against the writer's own tally.
+    this.frameCount = exportFrameCount(this.#timeline.durationSec, options.fps);
   }
 
   get report(): Readonly<ExportRenderReport> {

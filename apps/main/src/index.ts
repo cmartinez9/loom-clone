@@ -130,6 +130,7 @@ recorder.attachDrawing(overlay);
 const exportSession = new ExportSession({
   store,
   openWindow: (jobId) => windows.show('export', jobId),
+  findWindow: (jobId) => windows.get('export', jobId),
   closeWindow: (jobId) => {
     windows.get('export', jobId)?.destroy();
   },

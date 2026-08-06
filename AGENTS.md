@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, the generators,
                           # annotations, the drawing overlay and the event logs
-                          # 71 ways; each must fail a gate
+                          # 79 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -327,11 +327,19 @@ export is a shorter video that looks finished. Success is not "nothing threw" �
 is §7.5's five checks, answered off the disk by `apps/main/src/export/verify.ts`
 (exists · non-zero · demuxes · duration within 100 ms · **the last frame decodes**,
 plus a sha256), with the decode done in the export window because that is where a
-decoder lives. Phase 8 deletes nothing **of the user's**; `sourcesKept` is the boolean phase 9
-reads. It does remove its own failed output: §7.5's order is rename-then-verify, so
-a file that fails the checks is already in place under its real name, and a broken
-video the app knows is broken is worse in the user's Exports folder than absent —
-the failure is recorded in `project.json` either way.
+decoder lives. **The duration is checked against the _edit_, never against the
+writer**: `job.expectedDurationSec` is `exportFrameCount(timeline.durationSec, fps) /
+fps` on the recompose path and the copy plan's own duration on the fast path, because
+`FastStartWriter.plan()`'s tally is the number `mvhd.duration` was written from and a
+check answered with it can only fail on header bytes the parse already rejected.
+`exportFrameCount` lives in `@loom/ipc` so the window that produces the frames and the
+main process that measures them cannot drift. Phase 8 deletes nothing **of the
+user's**; `sourcesKept` is the boolean phase 9 reads. It does remove its own failed
+output: §7.5's order is rename-then-verify, so a file that fails the checks is already
+in place under its real name, and a broken video the app knows is broken is worse in
+the user's Exports folder than absent. **Every** failure is recorded in `project.json`,
+not only a verification failure — "no record" and "a record saying it failed" are
+different things to wake up to — and the only one that cannot be is main itself dying.
 Captain decision 9 is the rest: the file is written to `settings.exportRoot`
 (default `<recordingsRoot>/Exports`, changed by a picker and remembered, never
 prompted for), put on the clipboard as a **file** via `NSFilenamesPboardType`, and
@@ -741,6 +749,28 @@ was not a control.
   part, on purpose: they share no revision, write a different file, and must not be
   able to queue behind a snapshot's recursive bundle-size walk — anything queued in
   memory is exactly what a crash costs.
+- **`close(id)` is unconditional; `releaseProject(id)` is the counted one.** Every
+  `openProject` is one holder, and most never let go — an editor holds its document
+  until the window or the app goes — so a holder that took a project for the length of
+  an async job (an export, whose window outlives the editor by §1.2) gives it back
+  through `releaseProject`, which closes only at zero. A bare `close()` there would pull
+  the `.lock` out from under an editor with the same recording open. `close` itself is
+  left alone because `trash`, `recoverBundle`, the recorder and `closeAll` all need the
+  unconditional one.
+- **The one `rm` that points outside a bundle is keyed by job id, not by path.**
+  `discardExport(jobId)` removes only what `finalizeExport` recorded as renamed for
+  that job — and the writer's `renamed` flag is set at the `rename(2)` itself, not when
+  `finalize` returns, because the directory `fsync` after it is in the same `try` and
+  can throw with the file already in place. A path argument would put "never delete
+  something we did not just write" in the caller's hands, and the caller is reachable
+  from IPC; an earlier good export sharing the name is what that costs.
+- **A renderer cannot name an export's destination.** `ExportSettingsOverride` is
+  `ExportSettings` minus `outputDir`, `requireExportSettings` refuses the key outright,
+  and `ExportSession.start` refuses it again where the path is composed. The directory
+  is `settings.exportRoot`, changed only by `export:chooseFolder` — a native dialog main
+  opens — and `resolveExportPath` `realpath`s it the way `resolveBundleFile` does. The
+  `name` override stays: `safeFileName` turns every separator into a space, so it cannot
+  be more than one path segment.
 - **Stop the sampler, then close the project — in that order.** `ProjectStore`'s
   event-log and cursor-bitmap writes require the project to be open and throw
   `UnknownRecordingError` otherwise; they never open a bundle on the caller's behalf,
@@ -1110,6 +1140,18 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   than a frame number for exactly that reason. They also declare separate window
   globals — `window.exportGolden` and `window.golden` — because both harnesses are in
   one TypeScript program and one name cannot hold two shapes.
+- **Phase 8's `delta 0` covers two of §4.5's four "must be identical" rows, and says
+  so.** Frame selection and the zoom state are each perturbed by a control that must go
+  non-zero; **the webcam bubble and the cursor are not exercised at all**, because
+  neither has a compositor pass — `Compositor.render` throws when handed a `webcam` or
+  a `cursor` frame and `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }` —
+  so both paths draw nothing and agreeing about nothing is not evidence. The split is
+  `COVERAGE` in `test/export-golden/harness.ts`, printed on every run including a
+  passing one, and it is kept honest by a **tripwire**: `probeCoverage` hands the real
+  compositor a `webcam` frame and a `cursor` frame and requires it to refuse both.
+  Building either pass makes the gate go red, in the same change that makes the
+  coverage list wrong. Do not "fix" that by deleting the assertion; extend the gate to
+  perturb the row instead.
 - **An export draws annotation shapes and redactions; annotation _text_ is not wired
   to it yet.** `Compositor.render` takes annotations off the `ResolvedState` both
   loops already compute, so blur, mask and the four shapes reach an export with no

@@ -211,6 +211,41 @@ describe('verifyExport', () => {
     expect(outcome.verified.sha256).toBe('');
   });
 
+  it('fails a file that is not the length it was told to expect, before decoding anything', async () => {
+    // The check that could not fail while the expectation was `FastStartWriter`'s own
+    // tally — the number `mvhd.duration` was written from. Here it is handed the
+    // *timeline's* answer, and the file is a second short of it.
+    const { bytes, durationSec } = buildMovie();
+    let asked = false;
+    const outcome = await verifyExport('/tmp/Export.mp4', durationSec + 1, {
+      ...ioOver(bytes),
+      decode: () => {
+        asked = true;
+        return Promise.resolve({ ok: true });
+      },
+    });
+    expect(outcome.failure).toBe('duration');
+    expect(outcome.error).toMatch(/§7\.5 allows/);
+    // The decode is never attempted: a file of the wrong length is already refused,
+    // and asking a renderer to decode it would be a round trip for an answer that
+    // cannot change the outcome.
+    expect(asked).toBe(false);
+    expect(outcome.verified.lastFrameDecodable).toBe(false);
+    expect(outcome.verified.sha256).toBe('');
+  });
+
+  it('control: the same file passes when the expectation matches the edit', async () => {
+    // Without this, "the duration check fires" and "the duration check always fires"
+    // read the same, and the second would fail every real export.
+    const { bytes, durationSec } = buildMovie();
+    const outcome = await verifyExport(
+      '/tmp/Export.mp4',
+      durationSec + DURATION_TOLERANCE_SEC / 2,
+      ioOver(bytes),
+    );
+    expect(outcome.failure).toBeNull();
+  });
+
   it('hands the decoder the last GOP, starting at a sync sample', async () => {
     const { bytes, durationSec } = buildMovie();
     let seen: { isKey: boolean }[] = [];

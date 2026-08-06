@@ -42,6 +42,7 @@ import {
   type ExportPassProgressMsg,
   type ExportProgress,
   type ExportSettings,
+  type ExportSettingsOverride,
   type LoomApi,
   type MetaMsg,
   type OverlayStatus,
@@ -238,7 +239,8 @@ const api: LoomApi = {
       ipcRenderer.invoke(CHANNEL.exportDefaults, id) as Promise<ExportSettings>,
     chooseOutputFolder: (): Promise<string | null> =>
       ipcRenderer.invoke(CHANNEL.exportChooseFolder) as Promise<string | null>,
-    start: (id: RecordingId, settings?: Partial<ExportSettings>): Promise<{ jobId: string }> =>
+    // No destination: main owns where the file goes. See `ExportSettingsOverride`.
+    start: (id: RecordingId, settings?: ExportSettingsOverride): Promise<{ jobId: string }> =>
       ipcRenderer.invoke(CHANNEL.exportStart, id, settings ?? {}) as Promise<{ jobId: string }>,
     cancel: (jobId: string): void => {
       ipcRenderer.send(CHANNEL.exportCancel, jobId);

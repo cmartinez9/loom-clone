@@ -83,6 +83,15 @@ function failureReport(error: string): GoldenReport {
     ok: false,
     error,
     contextLost: gpuGone,
+    coverage: {
+      exercised: [],
+      notExercised: [],
+      tripwire: {
+        webcamPassStillAbsent: false,
+        cursorPassStillAbsent: false,
+        detail: 'the run did not reach the coverage probe',
+      },
+    },
     environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },
     fixture: { width: 0, height: 0, frameCount: 0, durationSec: 0, longestHoldSec: 0 },
     outputSize: [0, 0],
@@ -303,7 +312,12 @@ void app.whenReady().then(async () => {
 
   ipcMain.handle('golden:finalizeExport', async (_event, expectedDurationSec: number) => {
     const finishedExport = await store.finalizeExport(JOB);
-    const outcome = await verifyExport(finishedExport.path, finishedExport.durationSec, {
+    // The **timeline's** expectation, as the shipping session passes it — not
+    // `finishedExport.durationSec`, which is the writer's own tally and therefore the
+    // number `mvhd.duration` was written from. Passing that would make §7.5's fourth
+    // check compare the file with itself, here and only here, while production did
+    // the honest thing.
+    const outcome = await verifyExport(finishedExport.path, expectedDurationSec, {
       size: (path) => store.fileSize(path),
       readHead: (path, byteLength) => store.readFileHead(path, byteLength),
       readRanges: (path, ranges) => store.readFileRanges(path, ranges),

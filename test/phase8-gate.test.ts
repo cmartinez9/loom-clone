@@ -53,6 +53,22 @@
  *    the frame numbers painted into the fixture can be read out of it. The golden
  *    comparison reads the render target; the user gets the file.
  *
+ * ## What `delta 0` here is *not* evidence about
+ *
+ * §4.5's *"must be identical"* list has four rows and this gate exercises two of them
+ * — frame selection and the zoom state — each with a control that must go non-zero.
+ * The other two, **the webcam bubble and the cursor**, have no compositor pass on
+ * `main`: `Compositor.render` throws when handed a `webcam` or a `cursor` frame, and
+ * `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }`, so neither path draws
+ * anything for them and a per-pixel delta of 0 between two blanks says nothing.
+ * Building those passes is separate scheduled work.
+ *
+ * So the report carries `coverage` — printed on every run, passing or not — and a
+ * **tripwire**: the harness hands the real compositor a `webcam` frame and a `cursor`
+ * frame and requires it to refuse both. The assertions below fail if either refusal
+ * stops, which is the day the coverage list becomes wrong and the day this gate could
+ * start covering those rows. A comment would have rotted; this cannot.
+ *
  * ## The one thing that is not a comparison
  *
  * A lost WebGL context is not a reading — Chromium exits the GPU process when one is
@@ -274,6 +290,14 @@ function describeRun(report: GoldenReport): string {
         `control     ${c.name}: max delta=${c.maxDelta} over ${c.differingSamples}/${report.samples.length} samples — ${c.what}`,
     ),
     `frames      live at end=${report.liveFramesAtEnd}`,
+    // Printed on a passing run too: the headline `delta 0` is only evidence about the
+    // rows listed here, and a reader who cannot see the boundary will assume there
+    // isn't one.
+    ...report.coverage.exercised.map((row) => `§4.5 ok      ${row}`),
+    ...report.coverage.notExercised.map((row) => `§4.5 NOT     ${row.row} — ${row.why}`),
+    `tripwire    webcam pass absent=${report.coverage.tripwire.webcamPassStillAbsent} ` +
+      `cursor pass absent=${report.coverage.tripwire.cursorPassStillAbsent} ` +
+      `(${report.coverage.tripwire.detail})`,
     report.exported === null
       ? 'export      did not run'
       : `export      ${report.exported.bytes} bytes, ` +
@@ -364,6 +388,32 @@ describe('phase 8 gate: preview and export are pixel-identical', () => {
 
       // ---- §10.2: every VideoFrame closed -----------------------------------
       expect(report.liveFramesAtEnd, detail).toBe(0);
+
+      // ---- what the 24 zeroes above are, and are not, evidence about ---------
+      // The two rows this gate perturbs, named in the report rather than inferred
+      // from the control names.
+      expect(report.coverage.exercised.length, detail).toBe(2);
+      expect(report.coverage.notExercised.map((row) => row.row).join(' '), detail).toMatch(
+        /webcam bubble[\s\S]*cursor/,
+      );
+      // THE TRIPWIRE. While `Compositor.render` refuses a `webcam` frame and a
+      // `cursor` frame, neither path can draw either, and the coverage list above is
+      // accurate. The first time one of those passes is built the refusal stops and
+      // this fails — which is the point: the change that makes the list wrong is the
+      // change that has to update it, and is also the change that lets this gate start
+      // perturbing those rows the way it perturbs the other two.
+      expect(
+        report.coverage.tripwire.webcamPassStillAbsent,
+        `${detail}\nCompositor.render no longer refuses a webcam frame, so the webcam bubble ` +
+          'is now drawable — extend this gate to perturb §4.5’s bubble row (centre, size, ' +
+          'aspect, corner radius, opacity, mirror) and move it into `coverage.exercised`.',
+      ).toBe(true);
+      expect(
+        report.coverage.tripwire.cursorPassStillAbsent,
+        `${detail}\nCompositor.render no longer refuses a cursor frame, so the cursor is now ` +
+          'drawable — extend this gate to perturb §4.5’s cursor row (position after ' +
+          'smoothing, image, scale) and move it into `coverage.exercised`.',
+      ).toBe(true);
 
       // ---- the file the user actually gets ----------------------------------
       const exported = report.exported;

@@ -63,10 +63,42 @@ export interface ExportedFile {
   decodedFrames: DecodedFrameCheck[];
 }
 
+/**
+ * Which of §4.5's *"must be identical"* rows this run actually looked at.
+ *
+ * `maxDelta === 0` over 24 timestamps is only evidence about the rows that **drew**.
+ * The bubble and the cursor have no compositor pass on `main` — `Compositor.render`
+ * throws when handed a `webcam` or a `cursor` frame, and nothing ever passes one — so
+ * both paths draw nothing for them and agreeing about it says nothing at all. This
+ * carries the boundary into the printed report, so a reader of a *passing* run sees
+ * what the pass covers rather than inferring it from the headline number.
+ *
+ * {@link CoverageReport.tripwire} is what stops it rotting: it re-asks the compositor
+ * whether it still refuses those two frame kinds. The day somebody builds the passes,
+ * the refusal stops and the gate goes red — which forces this list to be updated in
+ * the same change that makes it wrong.
+ */
+export interface CoverageReport {
+  /** Rows this run perturbs and compares. */
+  exercised: string[];
+  /** Rows it cannot, and why. */
+  notExercised: { row: string; why: string }[];
+  tripwire: {
+    /** True while `Compositor.render` still refuses a `webcam` frame. */
+    webcamPassStillAbsent: boolean;
+    /** True while it still refuses a `cursor` frame. */
+    cursorPassStillAbsent: boolean;
+    /** What it did when handed each, so a failure says which changed. */
+    detail: string;
+  };
+}
+
 export interface GoldenReport {
   ok: boolean;
   error?: string;
   contextLost: boolean;
+  /** §4.5's rows, split into what this gate judges and what it cannot. */
+  coverage: CoverageReport;
   environment: {
     glRenderer: string;
     electron: string;
@@ -130,6 +162,13 @@ export interface GoldenBridge {
     isKey: boolean;
     timestampUs: number;
   }): Promise<void>;
+  /**
+   * Assemble the file and run §7.5's checks against it.
+   *
+   * `expectedDurationSec` is the **timeline's**, handed in by the harness exactly as
+   * `ExportSession` hands in `job.expectedDurationSec` — never `finalizeExport`'s own
+   * tally, which is the number `mvhd.duration` was written from.
+   */
   finalizeExport(expectedDurationSec: number): Promise<{
     path: string;
     url: string;

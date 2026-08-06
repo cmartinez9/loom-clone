@@ -274,6 +274,14 @@ export class PathEscapeError extends Error {
   }
 }
 
+/** Raised when an export destination cannot be resolved. See `resolveExportPath`. */
+export class ExportDestinationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ExportDestinationError';
+  }
+}
+
 /**
  * A batch was rejected because the document it produces is not a valid
  * `EditDocument`.
@@ -339,6 +347,31 @@ export class ProjectStore {
    * decoded from the front.
    */
   private readonly openExports = new Map<string, OpenExport>();
+  /**
+   * Outputs `finalizeExport` has actually `rename(2)`d into place, by job id.
+   *
+   * The ledger {@link discardExport} deletes from, and the reason it takes a job id
+   * rather than a path: the only file this store may ever remove from the user's
+   * Exports folder is one it just put there itself. A path argument would make the
+   * caller responsible for that, and a caller that got it wrong — or a caller reached
+   * through an IPC surface that named the path — would be deleting the user's earlier,
+   * good export.
+   *
+   * Recorded from {@link ExportMp4Writer.renamed}, not from `finalize()` having
+   * returned: the rename happens before the directory `fsync` that follows it, so a
+   * failure in that `fsync` leaves the file in place under its real name and
+   * unverified. Cleared by {@link releaseExport}.
+   */
+  private readonly renamedExports = new Map<string, string>();
+  /**
+   * How many holders each open project has. See {@link releaseProject}.
+   *
+   * Not a change to what {@link close} means — that stays the unconditional close
+   * every existing caller relies on. This is the *opt-in* half: a holder that opened
+   * a project for the length of an async job (an export) releases it through
+   * `releaseProject`, which closes only once nothing else is holding it.
+   */
+  private readonly holds = new Map<RecordingId, number>();
   private settings: SettingsDoc | null = null;
   /**
    * Settings writes, serialized — the same reason the per-project queue exists.
@@ -502,8 +535,18 @@ export class ProjectStore {
    * Takes the bundle lock, sweeps temp files a killed writer left behind, migrates
    * any stale documents in place, and replays `edit.journal.ndjson` on top of the
    * `edit.json` snapshot — which is what "Restored unsaved changes" means (§7.6).
+   *
+   * Every call counts as one holder (see {@link holds}). Most callers never release —
+   * an editor holds its project until the window goes or the app quits — and that is
+   * what makes {@link releaseProject} safe for the ones that do.
    */
   async openProject(id: RecordingId): Promise<OpenedBundle> {
+    const opened = await this.openProjectInternal(id);
+    this.holds.set(id, (this.holds.get(id) ?? 0) + 1);
+    return opened;
+  }
+
+  private async openProjectInternal(id: RecordingId): Promise<OpenedBundle> {
     const existing = this.open.get(id);
     if (existing !== undefined) {
       return {
@@ -894,6 +937,13 @@ export class ProjectStore {
       await writer.cancel();
       throw error;
     } finally {
+      // Read off the writer rather than inferred from this call returning.
+      // `finalize` does its `rename(2)` and *then* opens and `fsync`s the parent
+      // directory, both inside one `try` — so an EIO on that `fsync` throws with the
+      // file already in place under its real name. Inferring from the return left
+      // exactly the artifact `discardExport` exists to prevent: an unverified export
+      // sitting in the user's Exports folder under the finished name.
+      if (writer.renamed) this.renamedExports.set(jobId, writer.outputPath);
       this.openExports.delete(jobId);
     }
   }
@@ -931,12 +981,67 @@ export class ProjectStore {
    * left, and the failure is recorded in `project.json` either way, so nothing goes
    * quiet.
    *
-   * Only ever called with the path a job just renamed into place; a caller that has
-   * not renamed must not call it, or it would remove an *earlier* good export that
-   * happened to share the name.
+   * **Named by job id, never by path.** This is the one `rm` in the application that
+   * points outside a bundle, at a directory the user chose, and the rule it keeps is
+   * that it can only ever delete a file *this job just renamed into place* — read out
+   * of {@link renamedExports}, which only {@link finalizeExport} writes and only when
+   * the writer says the rename happened. A job that never got that far, or a name that
+   * matches an **earlier** good export, resolves to nothing and this returns having
+   * done nothing. Taking a path instead would put that guarantee in the caller's
+   * hands, and the caller is reachable from an IPC surface.
+   *
+   * Returns the path it removed, or `null` when there was nothing this job could
+   * claim, so a caller can say which.
    */
-  async discardExport(path: string): Promise<void> {
+  async discardExport(jobId: string): Promise<string | null> {
+    const path = this.renamedExports.get(jobId);
+    if (path === undefined) return null;
+    this.renamedExports.delete(jobId);
     await rm(path, { force: true });
+    return path;
+  }
+
+  /**
+   * Forget a finished job's renamed output, so the ledger tracks exports in flight
+   * rather than every export of the session. Idempotent; called on every exit path.
+   */
+  releaseExport(jobId: string): void {
+    this.renamedExports.delete(jobId);
+  }
+
+  /**
+   * Where a job's finished file goes: the configured export root, made real.
+   *
+   * `resolve` + `realpath`, the way {@link resolveBundleFile} does it, and for the
+   * same reason — a symlink standing where the directory should be would otherwise
+   * put the export somewhere the app never named. The directory is created first
+   * because `realpath` needs something to resolve, and because `beginExport` would
+   * create it a moment later anyway.
+   *
+   * The *file name* is the caller's, already scrubbed by `safeFileName` into a single
+   * path segment; this refuses anything that still resolves outside the directory, so
+   * the containment is checked rather than assumed.
+   */
+  async resolveExportPath(dir: string, fileName: string): Promise<string> {
+    if (!dir.startsWith('/') || dir.includes('\0')) {
+      throw new ExportDestinationError(
+        `the export directory ${JSON.stringify(dir)} is not an absolute path`,
+      );
+    }
+    if (fileName.length === 0 || fileName.includes('/') || fileName.includes('\0')) {
+      throw new ExportDestinationError(
+        `${JSON.stringify(fileName)} is not a single path segment, so it cannot name an export`,
+      );
+    }
+    await mkdir(dir, { recursive: true });
+    const realDir = await realpath(dir);
+    const candidate = resolve(realDir, fileName);
+    if (dirname(candidate) !== realDir) {
+      throw new ExportDestinationError(
+        `${JSON.stringify(fileName)} would put the export outside ${realDir}`,
+      );
+    }
+    return candidate;
   }
 
   /** Size of a file, or `null` if it is not there or is not one. */
@@ -1405,6 +1510,12 @@ export class ProjectStore {
    *
    * Snapshot, then truncate the journal, then release — in that order, because the
    * journal may only be dropped once the snapshot that supersedes it is durable.
+   *
+   * **Unconditional**, and every existing caller depends on that: `trash` has to shed
+   * the handles before it moves the directory, `recoverBundle` opened the bundle only
+   * to repair it, the recorder closes the recording it just finished, and `closeAll`
+   * runs at `before-quit`. {@link releaseProject} is the conditional counterpart, for
+   * a holder that took a project it did not necessarily open.
    */
   async close(id: RecordingId): Promise<void> {
     // Media parts first, and before the lock goes: a part still holding a file
@@ -1412,6 +1523,7 @@ export class ProjectStore {
     await this.abortAllMediaParts(id);
 
     const open = this.open.get(id);
+    this.holds.delete(id);
     if (open === undefined) return;
     this.open.delete(id);
 
@@ -1434,6 +1546,33 @@ export class ProjectStore {
         await open.lock.release();
       }
     });
+  }
+
+  /**
+   * Give back one {@link openProject}, and close the project if it was the last.
+   *
+   * An export takes the bundle lock and a `JournalWriter` for the length of a job
+   * that outlives the window that started it (§1.2), and something has to hand them
+   * back — otherwise a single export holds the lock until `before-quit`, and the next
+   * launch sweeps a `.lock` that was never stale. A bare {@link close} cannot do it:
+   * an editor with the same project open would lose its lock mid-edit, and that is a
+   * live case rather than a hypothetical.
+   *
+   * So the arithmetic is the whole mechanism. Every `openProject` is one holder;
+   * this drops one; the project closes only at zero. Callers that never release —
+   * `project:open` and `applyOps`, which are an editor holding its document — keep
+   * the count above zero, which is exactly the outcome wanted: the export lets go and
+   * the editor keeps the lock.
+   */
+  async releaseProject(id: RecordingId): Promise<void> {
+    const held = this.holds.get(id);
+    if (held === undefined) return;
+    if (held > 1) {
+      this.holds.set(id, held - 1);
+      return;
+    }
+    // `close` clears the entry itself, so the count cannot go negative.
+    await this.close(id);
   }
 
   /** Close every open project. Called from `before-quit`. */
