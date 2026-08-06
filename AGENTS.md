@@ -327,7 +327,11 @@ export is a shorter video that looks finished. Success is not "nothing threw" �
 is §7.5's five checks, answered off the disk by `apps/main/src/export/verify.ts`
 (exists · non-zero · demuxes · duration within 100 ms · **the last frame decodes**,
 plus a sha256), with the decode done in the export window because that is where a
-decoder lives. Phase 8 deletes nothing; `sourcesKept` is the boolean phase 9 reads.
+decoder lives. Phase 8 deletes nothing **of the user's**; `sourcesKept` is the boolean phase 9
+reads. It does remove its own failed output: §7.5's order is rename-then-verify, so
+a file that fails the checks is already in place under its real name, and a broken
+video the app knows is broken is worse in the user's Exports folder than absent —
+the failure is recorded in `project.json` either way.
 Captain decision 9 is the rest: the file is written to `settings.exportRoot`
 (default `<recordingsRoot>/Exports`, changed by a picker and remembered, never
 prompted for), put on the clipboard as a **file** via `NSFilenamesPboardType`, and

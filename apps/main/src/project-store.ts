@@ -835,6 +835,24 @@ export class ProjectStore {
     await writer?.cancel();
   }
 
+  /**
+   * Remove an export this store wrote and could not verify.
+   *
+   * §7.5's sequence is *"atomic rename. Then verify"*, so a file that fails the
+   * checks is already in place under its real name — a broken video sitting in the
+   * user's Exports folder that the app knows is broken. That is worse than no file:
+   * the user finds it, sends it, and it does not play. It is removed rather than
+   * left, and the failure is recorded in `project.json` either way, so nothing goes
+   * quiet.
+   *
+   * Only ever called with the path a job just renamed into place; a caller that has
+   * not renamed must not call it, or it would remove an *earlier* good export that
+   * happened to share the name.
+   */
+  async discardExport(path: string): Promise<void> {
+    await rm(path, { force: true });
+  }
+
   /** Size of a file, or `null` if it is not there or is not one. */
   async fileSize(path: string): Promise<number | null> {
     try {

@@ -22,7 +22,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import {
   CHANNEL,
@@ -330,6 +330,7 @@ export class ExportSession {
 
   async #run(job: Job, edit: EditDocument, recording: RecordingDoc | null): Promise<void> {
     this.#report(job, 'preparing');
+    let renamed = false;
     try {
       // The window first, always: on the fast path the copy below waits for the
       // writer, and the writer waits for the audio encoder to announce its track —
@@ -345,6 +346,9 @@ export class ExportSession {
 
       this.#report(job, 'muxing');
       const finished = await this.#options.store.finalizeExport(job.id);
+      // From here the file is in place under its real name (§7.5's order: rename,
+      // then verify), so a failure below has something to clean up.
+      renamed = true;
 
       this.#report(job, 'verifying');
       const outcome = await verifyExport(job.outputPath, finished.durationSec, this.#io(job));
@@ -385,10 +389,16 @@ export class ExportSession {
       this.#finish(job, { phase: 'done', result });
     } catch (error) {
       const cancelled = error instanceof ExportCancelled || job.cancelled;
-      // Nothing partial survives, on either path — §7.5's obligation 1 read the
-      // other way round: a file that is not verified must not be there to be
-      // mistaken for one that is.
+      // Nothing survives, on either path — §7.5's obligation 1 read the other way
+      // round: a file that is not verified must not be there to be mistaken for one
+      // that is. Before the rename that is the writer's scratch; after it, the output
+      // itself, which is why `renamed` is tracked rather than assumed — an unlink of
+      // the path on a job that never got that far would remove an *earlier* good
+      // export that happened to share the name.
       await this.#options.store.cancelExport(job.id).catch(() => undefined);
+      if (renamed) {
+        await this.#options.store.discardExport(job.outputPath).catch(() => undefined);
+      }
       this.#finish(job, {
         phase: cancelled ? 'cancelled' : 'failed',
         ...(cancelled
@@ -535,6 +545,15 @@ export class ExportSession {
   }
 
   #settleIfComplete(job: Job): void {
+    // Cancellation first, and checked here rather than only in `cancel()`: the window
+    // is handed the job before `#awaitPasses` installs the settle, so a cancel — or a
+    // window that fails instantly — can land while there is nothing to reject. Losing
+    // it would leave the job waiting for a pass nobody is running, which is §10.2's
+    // hang with a different cause.
+    if (job.cancelled) {
+      job.settle?.reject(new ExportCancelled());
+      return;
+    }
     if (job.failure !== null) {
       job.settle?.reject(new Error(job.failure));
       return;
@@ -720,7 +739,11 @@ export function bitrateFor(width: number, height: number, fps: number): number {
  * is a reasonable thing to call a recording.
  */
 export function safeFileName(name: string): string {
-  const source = basename(name);
+  // Deliberately **not** `basename`. It splits on the separator, so a recording a
+  // person called "Q3 / demo" would export as "demo.mp4" — half the name gone, with
+  // nothing to notice. Scrubbing the separators to spaces is what makes the result a
+  // single path segment, and it keeps the whole name while doing it.
+  const source = name;
   let scrubbed = '';
   // Code unit by code unit rather than by code point: every character being replaced
   // is ASCII, so a surrogate pair can only ever fall through untouched — and
