@@ -12,9 +12,10 @@ WebGL2 compositor, phase 7's timeline model, phase 8's exporter, phase 9's
 delete-after-export retention, phase 10's cursor-follow and auto-zoom generators,
 phase 11's annotations and phase 12's live drawing overlay, built early and out of
 order because they are self-contained — the editor window that finally puts the
-decode path, the compositor and the timeline model in front of a person, and the two
-safety surfaces taken early out of phase 13's polish: the disk monitor, and telling
-you when a recording was recovered.
+decode path, the compositor and the timeline model in front of a person, with the
+keyframe, zoom, annotation and generator controls that reach them, and the two safety
+surfaces taken early out of phase 13's polish: the disk monitor, and telling you when a
+recording was recovered.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -45,8 +46,21 @@ is never rewritten. The timeline is drawn as the recording was captured, so the
 trimmed-away head and tail stay on screen rather than disappearing. The editor is
 deliberately silent: sound played against the frame clock would drift away from the
 scrub bar, and doing it properly means making the audio device the clock first.
-Keyframes, manual zoom, annotation tools and the buttons that run the generators are
-the next piece of work.
+
+The controls are in that window too. The **Automatic** panel runs the two generators
+over that recording's own cursor and click logs, says when one has gone stale against
+the logs it was made from, and can bake it — which hands its keyframes over for good
+and stops a later regeneration from overwriting them. A zoom a generator made can be
+taken over by hand at the instant you are looking at: taking manual control starts a
+region from the magnification and framing the picture already has, so nothing jumps,
+and its amount, its centre and its two ends are then yours to tune, with the keyframes
+draggable along the timeline. Your zoom wins inside the stretch you took
+over and the generator drives everywhere else — regenerating rewrites its track and
+leaves yours alone. The tool rail draws rectangles, ellipses, arrows, highlights,
+text, blur and mask onto the picture; a blur or a mask is anchored to the content
+rather than to the frame, so a zoom cannot slide it off the thing it hides. Every one
+of those is a line in the same edit document a trim is, undoable, and never baked into
+the captured media.
 
 The property phase 1 established: **a recording survives the process being killed.**
 Frames are encoded in a hidden renderer, cross IPC as encoded chunks, and are written
@@ -146,8 +160,9 @@ than on synthetic fixtures, with controls that must fail: the same ten logs foll
 with the rest box and the spring removed, and each of those two mechanisms removed on
 its own. Following the cursor needs no permission; only the click-driven zoom needs
 Accessibility, and without that grant it declines and names why, rather than quietly
-generating nothing. The editor window exists now, but it has no button that runs either
-of them yet.
+generating nothing. The editor's **Automatic** panel is what runs them, and a zoom you
+take over by hand stacks over the generated track rather than editing it, so
+regenerating cannot overwrite what you did.
 
 The property phase 11 establishes: **a redaction that cannot be drawn is never
 published.** Arrows, boxes, ellipses, highlights, text and blur/mask are spans on that
@@ -157,9 +172,9 @@ be placed refuses the frame instead of compositing without it, and one that cann
 blurred is filled opaque rather than quietly weakened. `npm test` proves it by drawing
 24 fixed timestamps through the shipping preview loop and through the shipping
 export loop and requiring **max per-pixel delta 0**, plus a third annotation-free frame
-at every timestamp so a pair that both drew nothing cannot pass. The editor window
-exists now, but it has no tools for authoring one yet; the only annotations a shipping
-window writes today are the strokes below.
+at every timestamp so a pair that both drew nothing cannot pass. The editor's tool rail
+is what authors them — a drag on the picture places the span — and the strokes below
+are the other way one gets written.
 
 The property phase 12 establishes: **the ink is on the screen and not in the
 recording.** The HUD's Draw button lays a transparent sheet over the display — a pen,
@@ -214,6 +229,17 @@ pass found — how much was kept, how many frames, and how many bytes of an unfi
 fragment were discarded — every figure measured by the repair itself rather than quoted
 from a constant, and no claim about a loss window at all. A recording that could not be
 repaired says that instead, and is still in the library rather than quietly gone.
+
+The property the editor's controls establish: **the zoom you took over by hand is the
+zoom that gets exported — everywhere you said, and nowhere else.** `npm test` proves it
+in the same kind of real Electron run, over a recording with real cursor and click logs:
+run the generator, take manual control of one of the zooms it made, drag the amount
+slider, and export the recording twice, once before and once after. Both finished MP4s
+are decoded back out of their own sample tables; inside the stretch you took over they
+differ, and outside it they are **identical**. The outside reading is the control, and
+it is what a whole class of plausible defects fails — a manual zoom that leaked past
+its own stretch, a disturbed trim, a wrong frame chosen for a given instant, all of
+which change the picture everywhere.
 
 `npm run verify:mutation` proves those gates are real by breaking the production source
 on disk — one property at a time, in the real file rather than a copy of it — and

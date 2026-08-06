@@ -1942,7 +1942,7 @@ export const MUTATIONS = [
   {
     name: 'the-zoom-panel-does-not-follow-the-playhead',
     breaks:
-      'the standing Zoom panel\'s per-frame half. Rebuilt on a document or selection ' +
+      "the standing Zoom panel's per-frame half. Rebuilt on a document or selection " +
       'change alone, it describes whatever instant the last edit happened at: after ' +
       'an ordinary scrub its readout is a magnification the picture no longer has, ' +
       'and — the half that matters — *Take manual control* is withheld, because its ' +

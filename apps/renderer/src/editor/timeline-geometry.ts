@@ -15,7 +15,8 @@
  *    tracks in source time *"so that trimming does not re-time your zooms"*, and a
  *    ruler in timeline time would draw those tracks sliding under a trim they are
  *    explicitly independent of. A zoom keyframe stays over the frame it was placed
- *    on, which is what makes placing one by hand — `loom-p15`'s job — mean anything.
+ *    on, which is what makes placing one by hand — phase 15's controls, `zoom.ts` —
+ *    mean anything.
  *  - **You can see and undo what you cut.** A timeline-time ruler makes trimmed
  *    material vanish; the handles then have nothing to be dragged back out of.
  *  - **The cursor and click logs line up with the picture.** They are source-time

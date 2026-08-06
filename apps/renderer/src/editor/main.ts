@@ -887,6 +887,9 @@ async function start(): Promise<void> {
    * playhead's frame and must not allocate.
    */
   function zoomRegionIndexAt(sourceSec: Seconds): number {
+    // The indexed loop is the point: `for…of` takes an array iterator, and this runs
+    // on the playhead's own frame. See the note above.
+    // eslint-disable-next-line @typescript-eslint/prefer-for-of
     for (let i = 0; i < zoomRegions.length; i++) {
       const region = zoomRegions[i];
       if (region === undefined) continue;
