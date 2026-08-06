@@ -149,9 +149,20 @@ export interface PreviewLoopOptions {
    * still goes through the real model rather than around it.
    */
   timeline?: CompiledTimeline;
-  /** §4.2's lookahead target. */
+  /**
+   * §4.2's lookahead target, in **source** seconds — {@link PreviewSource}'s domain,
+   * so a clip whose `speed` is not 1 scales what it buys: 0.5 is 0.25 s of playback
+   * ahead at 2×, and 1.0 s at 0.5×.
+   */
   lookaheadSec?: number;
-  /** How far behind the playhead frames are kept before being closed. */
+  /**
+   * How far behind the *source* read head frames are kept before being closed —
+   * source seconds too, and scaled by clip speed the same way.
+   *
+   * Compensating for that scaling is not this loop's to do alone: §4.5 puts preview
+   * and export on the must-be-identical list. `AGENTS.md` § Sharp edges carries the
+   * argument and what a change to it would take.
+   */
   retainBehindSec?: number;
   /**
    * The glyph atlas `text` annotations are drawn from (phase 11).
