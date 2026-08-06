@@ -1,13 +1,23 @@
 /**
  * A gate may relaunch for exactly one reason, and this is the fence around it.
  *
- * `GATE_ATTEMPTS` exists because a lost WebGL context is not a measurement — see
- * `test/gate/relaunch.ts`. That is a narrow and defensible exception, and what keeps
- * it narrow is the *trigger*, not the count: the moment it admits "the run failed",
- * the phase 6 gate becomes a coin flipped until it lands, and every acceptance
- * criterion behind it becomes advisory. So the count is allowed to answer to what a
- * lost context costs on these runners, and this file is the fence that does not move
- * with it.
+ * `GATE_ATTEMPTS = 3` exists because a lost WebGL context is not a measurement — see
+ * `test/gate/relaunch.ts`. That is a narrow and defensible exception, and it stays
+ * defensible only while it stays narrow: the moment the trigger admits "the run
+ * failed", the phase 6 gate becomes a coin flipped until it lands, and every
+ * acceptance criterion behind it becomes advisory.
+ *
+ * **Both halves are fenced here, and they are fenced differently.** The trigger is
+ * fixed and never moves: the cases below enumerate the ways a run can be *bad* and
+ * require that none of them earns a launch. The count is fixed too — pinned by this
+ * file — but it is the one part that may answer to evidence, and only to the kind that
+ * moved it last: a measured demonstration that every launch the gate currently gets can
+ * fail to yield a reading for one shared cause. It went from two to three on CI run
+ * 31084636446, where both launches lost the context at the same place, 18 s and 16 s
+ * in, on one runner inside 35 s, with `GPU process gone: abnormal-exit (exit 8704)`
+ * naming the shared cause — two launches, no reading. Anyone raising it again owes a
+ * reading of that kind, and the pin below is what makes them come here to say so
+ * rather than nudge a number in a gate file.
  *
  * So this file enumerates the ways a run can be *bad* and requires that none of them
  * earns a second launch. It is cheap and runs in Node; the gates it guards cost a 4K
@@ -23,7 +33,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { CONTROL_PERIOD_MS, CONTROL_TARGET_MS } from './gate/budget-control.ts';
-import { shouldRelaunch } from './gate/relaunch.ts';
+import { GATE_ATTEMPTS, shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
 import { shouldRelaunchGolden } from './export-golden/relaunch.ts';
 import type { GoldenReport } from './export-golden/report.ts';
@@ -110,6 +120,29 @@ function report(overrides: Partial<GateReport> = {}): GateReport {
 }
 
 describe('the gate relaunches only for a lost context', () => {
+  /**
+   * The count, pinned — so raising it is a deliberate edit *here* rather than a nudge
+   * in a gate file.
+   *
+   * Not a property of the code under test, and that is the point: it is the tripwire
+   * that routes anyone changing the number through the paragraph above, which says what
+   * a change to it costs. `GATE_ATTEMPTS` moved once, from two to three, on a measured
+   * demonstration that two launches can leave the gate with no reading at all; the next
+   * move owes evidence of the same kind. Every other guard in this file fences the
+   * *trigger*, which does not move at all.
+   */
+  it('pins the number of launches, so the count cannot drift without this file', () => {
+    expect(
+      GATE_ATTEMPTS,
+      'GATE_ATTEMPTS changed. This is the fence, not an obstacle: the trigger is fixed ' +
+        'and a reading is still never retried, but the count may only be raised on a ' +
+        'measured demonstration that every launch the gate currently gets can fail to ' +
+        'yield a reading for one shared cause — the way CI run 31084636446 raised it to ' +
+        'three. Record that evidence in test/gate/relaunch.ts and in this file, then ' +
+        'change this number.',
+    ).toBe(3);
+  });
+
   it('relaunches when the context was lost', () => {
     expect(shouldRelaunch(report({ contextLost: true }))).toBe(true);
   });

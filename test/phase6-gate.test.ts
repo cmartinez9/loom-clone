@@ -53,7 +53,7 @@ import {
   type BudgetEvidence,
   type HostProfile,
 } from './gate/budget-control.ts';
-import { shouldRelaunch } from './gate/relaunch.ts';
+import { GATE_ATTEMPTS, shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport, GpuProfile } from './gate/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -93,39 +93,16 @@ const GATE_TIMEOUT_MS = 300_000;
 /** Per launch, so a hung run leaves room for the attempts after it. */
 const ATTEMPT_TIMEOUT_MS = 120_000;
 /**
- * Launches allowed before a lost WebGL context is called a failure.
+ * Launches allowed before a lost WebGL context is called a failure — declared beside
+ * the predicate it belongs to, in `test/gate/relaunch.ts`, and pinned by
+ * `test/relaunch-policy.test.ts`.
  *
- * The **only** thing retried, and nothing else is: a run that measured and came out
- * over budget, or short of frames, or holding a leaked frame, is reported exactly
- * once. A lost context is not a measurement — the driver takes the program, the
- * textures and the render target away mid-run, every GL call after it is a no-op and
- * every query answers `null`, so what the harness would report is whatever it was
- * holding when the lights went out. Observed once on a GitHub macOS runner (an
- * "Apple Paravirtual device"), on a commit whose other run of the same SHA passed.
- *
- * More than one launch because a single loss is a shared host having a moment; not
- * many, because retrying is how a real defect gets to look like weather. What decides
- * the number is how many launches it takes for two of them to be two *samples*, and
- * two is not enough — measured, on CI run 31084636446. Both launches lost the context
- * at the same place (the first scrub readback, 18 s and 16 s in) on one runner inside
- * 35 s, and `child-process-gone` named the mechanism that the previous occurrence
- * could only guess at: `GPU process gone: abnormal-exit (exit 8704)`. Not a watchdog
- * kill — that lever is already pulled, in `test/gate/main.ts` — but Chromium's GPU
- * process *exiting* on a context loss, taking the harness's one context with it, the
- * same way it takes all four of phase 8's (`test/relaunch-policy.test.ts`). A launch
- * that starts seconds after that exit, on that runner, against the GPU process
- * restarted in its place, is a second reading of the same host in the same state
- * rather than the independent one "a second loss in a row" was read as. Three is the
- * smallest number that gives the gate a launch which is not that.
- *
- * Nothing else moves with it, and this is the whole of why it is allowed to move at
- * all: the *predicate* is untouched — {@link shouldRelaunch} is `report.contextLost`
- * and nothing else, fenced by `test/relaunch-policy.test.ts`, which enumerates every
- * bad-run shape and requires that none of them earns a launch. A run that measured is
- * still reported exactly once, over budget or not, on the first launch. Three
- * consecutive losses still fail this gate, on the assertion below.
+ * It is imported rather than written here on purpose: as a bare `const` in this file it
+ * was a one-character edit away from being larger, in a file nobody opens to review
+ * retry policy. What may *trigger* a relaunch is fixed at {@link shouldRelaunch} and
+ * never moves; the count answers to measured evidence and to nothing else, and both
+ * halves of that rule are stated where the number now lives.
  */
-const GATE_ATTEMPTS = 3;
 
 /**
  * How few frames a phase may measure and still be a measurement rather than an anecdote.
