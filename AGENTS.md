@@ -37,8 +37,9 @@ npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
-                          # generators, annotations, the drawing overlay and the event
-                          # logs 91 ways; each must fail a gate
+                          # generators, annotations, the drawing overlay, the event logs
+                          # and the phase-6 gate's judgement policy 93 ways; each must
+                          # fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -1104,9 +1105,17 @@ was not a control.
   the same synchronous scheduler dispatch (`counting()` in `harness.ts` —
   `callback(nowMs); afterFrame();`) on the one renderer thread, and `burn` reads its own
   clock, so a slower compositor delays the spin and cannot lengthen it. The harness
-  measures exactly that on every run — the slow-compositor phase burns four whole budgets
-  inside `render` beside this same control — and the readings are at
-  `instrumentOutOfCalibration`.
+  measures that on every run — the slow-compositor phase burns four whole budgets inside
+  `render` beside this same control — and the readings are at
+  `instrumentOutOfCalibration`, along with the scope of what they cover: that phase's
+  source is `frameAt: () => null`, so its frames carry `burn` and no GL traffic, and the
+  readings are evidence about synchronous cost specifically. Deferred cost — a GC pause,
+  driver-side backpressure landing inside a later spin — is carried by the serialisation
+  argument rather than by the experiment. `test/budget-control.test.ts` reproduces both
+  red runs as withheld and constructs the counter-case from them by substituting the
+  control's _health_ only, each run keeping its own spin count; the over-budget share is
+  proved separately, against a reachable regression at a shape a real run produced, and
+  both doors carry a `verify:mutation` entry.
   **A stalled control cannot be reproduced on this machine, so do not try to get there
   with load.** `scripts/gate-load.mjs` at 20 and at 64 spinners (load average 18.5 on 18
   cores) left the control at 8.40 ms both times, unchanged from quiet: macOS keeps

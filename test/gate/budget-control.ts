@@ -782,6 +782,20 @@ export function spinResolution(spins: number): number {
  * moments later. `test/phase6-gate.test.ts` requires that slowed path to fail §8's own
  * number on every host and both branches, so the case this withholding could have
  * hidden is the one case still proved in-run.
+ *
+ * **What that in-run experiment covers, scoped rather than overstated.** The slowed
+ * phase's source is a stub with `frameAt: () => null` (`test/gate/harness.ts`), so
+ * `Compositor.render` returns before any texture upload, draw or timer query: what runs
+ * inside that frame body is {@link burn} and the composite's early return, with no GL
+ * traffic and no `VideoFrame` churn beside it. So the readings above are evidence about
+ * **synchronous CPU cost specifically** — which is the shape this gate's own documented
+ * regression takes, 20 ms burned on one composite in thirty. The paths they do not
+ * exercise are the ones where a regression's cost is *deferred* past the frame body: a GC
+ * pause earned by frame churn, or driver-side backpressure, landing inside a later
+ * {@link burn} window. Those are carried by the structural argument above rather than by
+ * the experiment — the spin's interval begins after the frame body returned, so the
+ * compositor's own work is never inside it — and that is the honest division of the two
+ * halves rather than one claim doing the work of both.
  */
 export function instrumentOutOfCalibration(control: ControlPhase, budgetMs: number): boolean {
   return !environmentSustainsBudget(control, budgetMs);

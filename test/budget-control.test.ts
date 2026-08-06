@@ -733,17 +733,34 @@ describe('the frame budget is enforced against a measured environment', () => {
  * two spins of 136 over budget, failing the phase on a 40.10 ms frame against a 39.00 ms
  * ceiling, 1.03× it.
  *
- * The two tests that matter here are the second and the third. The second constructs the
- * case this must never stop failing — a clean control beside a frame over budget — from
- * those same two runs, by changing the control and nothing else. The third pins that the
- * withholding keys on the control's own overrun and on nothing else at all.
+ * The tests that matter here are the second, the third and the fourth. The second
+ * constructs the case this must never stop failing — a clean control beside a frame over
+ * budget — from those same two runs, substituting the control's *health* and nothing
+ * else: each run keeps its own spin count, its own worst-spin index, its own frames and
+ * its own host. §8's strict pair fails both runs there, and that is the half a
+ * withholding must never be able to touch.
+ *
+ * The deferred branch's answer is **not** uniform across the two, and is asserted as what
+ * it is rather than made to look uniform. The scaled envelope catches run 31074994194's
+ * 52.90 ms frame whatever the spin count; run 31075861127's *single* over-budget frame in
+ * 310 is 0.32%, finer than the 0.74% its own 136-spin control can resolve, so that phase
+ * comes back INCONCLUSIVE. That is a real finding about the instrument's resolution — a
+ * phase that short cannot tell one frame apart from the host's own quantised zero — and
+ * it is recorded rather than dressed up as a throw. So the share door is proved by the
+ * third test instead, at a shape a real run produced and against a regression a real
+ * compositor could make. The fourth pins that the withholding keys on the control's own
+ * overrun and on nothing else at all.
  */
 interface RedRun {
   control: ControlPhase;
   measured: BudgetEvidence['measured'];
   host: HostProfile;
-  /** The bound of the deferred branch that catches this phase once its control is healthy. */
-  cleanControlCaughtBy: RegExp;
+  /**
+   * What the deferred branch makes of this phase once only the control's *health* is
+   * substituted and the run's own spin count is kept — a throw, and which bound, or the
+   * line it reports instead.
+   */
+  cleanControl: { throws: boolean; matches: RegExp };
 }
 
 describe('a control that missed its own budget yields no verdict', () => {
@@ -754,24 +771,32 @@ describe('a control that missed its own budget yields no verdict', () => {
   /**
    * The play phase of CI run 31074994194: `main`, red on this gate at the time of writing.
    *
-   * `cleanControlCaughtBy` is what door two — a healthy control on a host that is not the
-   * product's machine — catches this same phase with once the control is replaced. It is
-   * the scaled envelope here (16.67 × 2.878 / 1.67 = 28.78 ms, against a 52.90 ms frame)
-   * and the share on the run below, whose deeper GPU cost earns an envelope the frame
-   * fits inside. Both bounds, from two real runs, and neither of them withheld.
+   * `cleanControl` is what door two — a healthy control on a host that is not the
+   * product's machine — makes of this same phase once only the control's health is
+   * substituted. The scaled envelope catches it here: 16.67 × 2.878 / 1.667 = 28.78 ms
+   * against a 52.90 ms frame, which it clears by 24 ms whatever the spin count beside it.
    */
   const RED_MAIN = {
     control: control({ count: 158, maxMs: 22.6, maxAt: 149, meanMs: 8.5, overBudget: 1 }),
     measured: { count: 470, maxMs: 52.9, maxAt: 330, overBudget: 1 },
     host: { hardwareDecode: 'no', gpu: { count: 238, medianMs: 2.878, maxMs: 27.062 } },
-    cleanControlCaughtBy: /this host's own workload earns/,
+    cleanControl: { throws: true, matches: /this host's own workload earns/ },
   } satisfies RedRun;
-  /** The play phase of CI run 31075861127, measured with no concurrent macOS job of ours. */
+  /**
+   * The play phase of CI run 31075861127, measured with no concurrent macOS job of ours.
+   *
+   * At this phase's **own** 136 spins neither remaining door reaches it once the control
+   * is healthy: this host's deeper GPU cost earns an envelope of 16.67 × 4.509 / 1.667 =
+   * 45.09 ms against a 40.10 ms frame, and one over-budget frame in 310 is 0.32% against
+   * the 0.74% a 136-spin control can resolve. So it reports INCONCLUSIVE, which is the
+   * honest reading of a phase too short to separate one frame from the host's quantised
+   * zero. §8's own strict pair still fails it; the share door is proved below instead.
+   */
   const RED_ALONE = {
     control: control({ count: 136, maxMs: 26, maxAt: 132, meanMs: 8.71, overBudget: 2 }),
     measured: { count: 310, maxMs: 40.1, maxAt: 28, overBudget: 1 },
     host: { hardwareDecode: 'no', gpu: { count: 121, medianMs: 4.509, maxMs: 17.917 } },
-    cleanControlCaughtBy: /a larger share than this host missed it on of its own spins/,
+    cleanControl: { throws: false, matches: /INCONCLUSIVE rather than passed/ },
   } satisfies RedRun;
 
   it('reports the two runs that turned this gate red as not judged, naming the overrun', () => {
@@ -814,21 +839,46 @@ describe('a control that missed its own budget yields no verdict', () => {
    * **The one that proves this is not a way out.**
    *
    * Constructed deliberately, and from the failing runs above rather than from a
-   * convenient fiction: the same frames, the same hosts, the same everything — with the
-   * control replaced by a healthy one. Both doors that still judge must still fail.
+   * convenient fiction: the same frames, the same hosts, the same spin counts — with the
+   * control's *health* replaced and nothing else. §8's own strict pair must still fail
+   * both runs, and it does; that half is untouched by anything the control measured.
+   *
+   * The deferred branch's own answer differs between them and each run asserts its own,
+   * because substituting a healthy control at a spin count neither phase could have
+   * produced is what made it look uniform. `HEALTHY`'s own 360 spins is more than either
+   * phase can yield — `framesPerSpin(60)` puts three frames to a spin on the slowest
+   * panel this gate meets, so 470 frames cannot carry more than about 157 of them and 310
+   * cannot carry more than about 103 — and that inflation bought run 31075861127 a
+   * resolution it never had, turning its one over-budget frame into a throw. A check
+   * exercised at conditions that cannot occur proves nothing about the conditions that
+   * can, so the share door is proved separately, at a reachable shape, in the test below.
    *
    * If this test can be made to pass by a change to the withholding, the withholding has
    * become a tolerance and the gate has stopped being a gate.
    */
-  it('CONTROL: a clean control beside a frame over budget still fails, on both doors', () => {
+  it('CONTROL: a clean control beside a frame over budget still fails §8 on both runs', () => {
     for (const run of [RED_MAIN, RED_ALONE]) {
+      // Only the instrument's *health* is substituted. This phase's own spin count and
+      // its own worst-spin index stay, so the resolution the share is judged at is the
+      // one this phase really had — pinned here so a future edit cannot re-inflate it.
+      const healthy = control({ ...HEALTHY, count: run.control.count, maxAt: run.control.maxAt });
+      expect(healthy.count).toBe(run.control.count);
+      expect(healthy.maxAt).toBe(run.control.maxAt);
+      expect(healthy.maxMs).toBe(HEALTHY.maxMs);
+      expect(healthy.overBudget).toBe(0);
+      // And why it has to be the run's own: `HEALTHY`'s default is not a healthier host
+      // but a control this phase could not have produced, at one spin per
+      // `framesPerSpin(60)` frames.
+      expect(HEALTHY.count).toBeGreaterThan(run.measured.count / framesPerSpin(60));
+
       // The host held the budget in these frames — the same 8.4 ms spin the quiet
       // runners measure — so nothing is withheld and the phase is judged.
-      expect(instrumentOutOfCalibration(HEALTHY, FRAME_BUDGET_MS)).toBe(false);
+      expect(instrumentOutOfCalibration(healthy, FRAME_BUDGET_MS)).toBe(false);
 
       // Door one: a host that runs the product's own workload. §8's number applies
-      // exactly as written, and these are the gate's two assertions verbatim.
-      const strict = evidence(run.measured, HEALTHY, TARGET_HOST);
+      // exactly as written, these are the gate's two assertions verbatim, and both fail
+      // on both runs whatever the spin count beside them.
+      const strict = evidence(run.measured, healthy, TARGET_HOST);
       expect(assertsAbsoluteBudget(strict)).toBe(true);
       expect(() => {
         expect(strict.measured.overBudget).toBe(0);
@@ -837,17 +887,71 @@ describe('a control that missed its own budget yields no verdict', () => {
         expect(strict.measured.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
       }).toThrow();
 
-      // Door two: a host that is a different machine, judged by the deferred branch.
-      // Still a throw, and the assertion names *which* of that branch's bounds caught
-      // it, so this stays a positive proof that a specific bound fired rather than a
-      // matcher that would accept any throw at all: the scaled envelope on the first
-      // run, and — where this host's deeper GPU cost earns an envelope the frame fits
-      // inside — the over-budget share on the second.
-      const deferred = evidence(run.measured, HEALTHY, run.host);
+      // Door two: a host that is a different machine, judged by the deferred branch. Each
+      // run asserts what that branch genuinely does with it, by name — the scaled
+      // envelope on the first, and on the second the INCONCLUSIVE verdict a 136-spin
+      // control earns a single frame of 310. Never a matcher that would accept any throw,
+      // and never a throw manufactured out of a spin count the phase did not have.
+      const deferred = evidence(run.measured, healthy, run.host);
       expect(assertsAbsoluteBudget(deferred)).toBe(false);
       expect(instrumentOutOfCalibration(deferred.control, FRAME_BUDGET_MS)).toBe(false);
-      expect(() => expectTracksControl(deferred)).toThrow(run.cleanControlCaughtBy);
+      if (run.cleanControl.throws) {
+        expect(() => expectTracksControl(deferred)).toThrow(run.cleanControl.matches);
+      } else {
+        expect(expectTracksControl(deferred)).toMatch(run.cleanControl.matches);
+      }
     }
+  });
+
+  /**
+   * **The share door, proved against a regression a real compositor could make.**
+   *
+   * The counter-case above establishes the envelope and cannot establish the share: both
+   * red runs are a *single* over-budget frame, and one frame of 470 or of 310 is finer
+   * than either phase's own control could resolve. Inflating the substituted control's
+   * spin count until it did resolve would be proving the door at a condition the gate
+   * cannot meet, which is no proof at all.
+   *
+   * So it is proved at a shape a real run produced — run 31074994194's own 470 frames and
+   * its own 158-spin control, made healthy — carrying the regression this project has
+   * already measured against this gate: 20 ms burned on one composite in thirty, worst
+   * frame 20.30 ms. That is 15 frames of 470, 3.19%, against the 0.63% a 158-spin control
+   * resolves and a host that missed none of its own spins.
+   *
+   * `verify:mutation`'s `the-over-budget-share-is-never-compared` deletes that comparison
+   * from `test/gate/budget-control.ts` on disk and requires this file to notice.
+   */
+  it('CONTROL: the share catches a reachable regression at a shape a real run produced', () => {
+    const spins = RED_MAIN.control.count;
+    const frames = RED_MAIN.measured.count;
+    const healthy = control({ ...HEALTHY, count: spins, maxAt: RED_MAIN.control.maxAt });
+    // One composite in thirty, over this run's own frame count.
+    const regressed = {
+      count: frames,
+      maxMs: 20.3,
+      maxAt: 256,
+      overBudget: Math.floor(frames / 30),
+    };
+
+    // Not the envelope: this host's own per-frame workload earns 28.78 ms and the
+    // regression's worst frame is 20.30 ms, so what fires below is the share alone.
+    expect(scaledFrameEnvelope(RED_MAIN.host, FRAME_BUDGET_MS) ?? 0).toBeGreaterThan(
+      regressed.maxMs,
+    );
+    expect(overBudgetRate(regressed.overBudget, frames)).toBeGreaterThan(spinResolution(spins));
+    expect(() => expectTracksControl(evidence(regressed, healthy, RED_MAIN.host))).toThrow(
+      /a larger share than this host missed it on of its own spins/,
+    );
+
+    // CONTROL: the same evidence with the regression taken back out — this run's own
+    // single over-budget frame, everything else identical — must not throw, so the throw
+    // above is the regression's doing rather than the fixture's. One frame of 470 is
+    // 0.21% against the 0.63% a 158-spin control can resolve.
+    const unregressed = { ...regressed, overBudget: RED_MAIN.measured.overBudget };
+    expect(overBudgetRate(unregressed.overBudget, frames)).toBeLessThan(spinResolution(spins));
+    const reported = expectTracksControl(evidence(unregressed, healthy, RED_MAIN.host));
+    expect(reported).toContain('INCONCLUSIVE rather than passed');
+    expect(reported).toContain(`${String(spins)}-spin control can resolve`);
   });
 
   it('CONTROL: keys on the control’s own overrun and on nothing else', () => {
@@ -881,6 +985,11 @@ describe('a control that missed its own budget yields no verdict', () => {
     }
   });
 
+  /**
+   * `verify:mutation`'s `a-dead-control-withholds-the-verdict` keys the withholding on
+   * something other than the control's own measured overrun — a control that produced
+   * nothing — in `test/gate/budget-control.ts` on disk, and requires this file to notice.
+   */
   it('CONTROL: a control that measured nothing is judged, never withheld', () => {
     // The one shape that must not reach this branch. A dead instrument has shown
     // nothing, and "shown nothing" must never buy a compositor a withheld verdict —
