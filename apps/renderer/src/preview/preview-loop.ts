@@ -399,8 +399,16 @@ export class PreviewLoop {
     // index and a lerp. Integrating at frame rate instead — even "just for preview"
     // — is §3.4's one forbidden shortcut, and worth 82.6 px at 3456 wide.
     const state = resolve(this.#timeline, t);
+    // The frame's only source-time truth, read out before anything else runs. `state`
+    // is the timeline's own object and every `resolve` overwrites it in place — and
+    // `seek()` resolves too, through `#sourceTime()` — so a caller's `onError` that
+    // re-enters `seek` during `render`, `present` or `#report` would move
+    // `state.sourceTime` under the rest of this frame. Nothing below may re-derive it:
+    // the four source-domain calls are the same instant by construction, not by the
+    // order they happen to sit in.
+    const sourceTime = state.sourceTime;
 
-    const frame = this.#screen.frameAt(state.sourceTime);
+    const frame = this.#screen.frameAt(sourceTime);
     let composited = false;
     try {
       this.#frames.screen = frame;
@@ -441,20 +449,19 @@ export class PreviewLoop {
     // Every callback that can reach the caller sits below the measurement, for the
     // reason `#prime` states: a handler of theirs must not be charged to a frame the
     // phase-6 gate judges on the single worst one, with no allowance.
-    //
-    // `sourceTime`, not `t`, for the same reason `frameAt` above takes it: the source
-    // is asked about the instant the *media* is at. `state` is the timeline's own
-    // object and `resolve` overwrites it, so it is read out here rather than kept.
-    const sourceTime = state.sourceTime;
     this.#watchStall(frame !== null, sourceTime, t, started);
     this.#watchTextAtlas(drew);
 
     // Off the critical path, after the budget has been measured (§4.3).
     this.#prime(sourceTime);
     // Behind the *source* read head. Released in timeline time this is wrong in both
-    // directions: with a large `sourceStart` it names an instant before the media
-    // begins and frees nothing, and on a fast clip it names one the playhead has not
-    // reached and closes frames still to be drawn.
+    // directions, and asymmetrically so: with a large `sourceStart` it names an instant
+    // before the media begins and frees nothing, while on a *slow* clip — where timeline
+    // time runs ahead of source time — it names one the read head has not reached and
+    // closes frames still to be drawn. At `speed: 0.5`, timeline 10 is source 5, so
+    // `release(9.9)` would close source 5..9.9, none of it drawn yet. A fast clip fails
+    // the other way and merely frees too little: at `speed: 2`, timeline 5 is source 10
+    // and `release(4.9)` sits far behind the head.
     this.#screen.release(sourceTime - this.#retainBehindSec);
     return elapsed;
   }
