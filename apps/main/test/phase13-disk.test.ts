@@ -23,7 +23,7 @@
  * is checked with AVFoundation rather than with our own reader, exactly as
  * `capture-crash.test.ts` and `recorder-session.test.ts` do.
  *
- * **Four controls, because each assertion here passes for a wrong reason without
+ * **Eight controls, because each assertion here passes for a wrong reason without
  * one.**
  *
  * 1. A recording on a volume that never drops must *not* stop and must carry no
@@ -36,6 +36,15 @@
  *    instrument that fails must not be a new way to lose footage.
  * 4. The banner must have been *published* below 5 GB and absent above it, or the
  *    stop is the only thing anybody would ever see.
+ * 5. A volume that *answers* must be read afresh on every poll, or the single
+ *    underlying read the stalled scenario asserts is a guard that stopped reading
+ *    rather than the stall it is meant to describe.
+ * 6. A library with nothing in it must report `reference`, or `measured` is the
+ *    label that path always carries.
+ * 7. A library that answers must reach `measured`, or the `reference` a wedged walk
+ *    reports is the wiring rather than the wedge.
+ * 8. A preflight volume that answers must band `ok`, or the `unknown` a stalled one
+ *    reports is what that function always says.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,6 +55,7 @@ import { join } from 'node:path';
 import {
   CHANNEL,
   DISK_THRESHOLDS,
+  diskRefusesStart,
   type DiskReading,
   type DiskSpace,
   type RecorderStatus,
@@ -57,7 +67,7 @@ import {
   type RecordingDoc,
   type RecordingId,
 } from '@loom/format';
-import { LIBRARY_RATE_DEADLINE_MS } from '../src/disk.ts';
+import { LIBRARY_RATE_DEADLINE_MS, readDiskForPreflight } from '../src/disk.ts';
 import { ProjectStore } from '../src/project-store.ts';
 import { RecorderSession } from '../src/recorder/session.ts';
 import type { WindowRegistry, WindowRole } from '../src/windows.ts';
@@ -790,6 +800,75 @@ describe("the capacity estimate's provenance", () => {
       await untilState(id, 'editable');
     } finally {
       list.mockRestore();
+    }
+  });
+});
+
+describe('the preflight reading a window awaits', () => {
+  /**
+   * `readDiskForPreflight` is `recorder.preflight`'s half of the answer, and it is
+   * the one path here where somebody is *waiting* on the other side of IPC. A
+   * `statfs` with no bound on it is therefore not a missing reading but a reply that
+   * never arrives: `refreshPermissions()` never returns — its `try`/`catch` covers
+   * throws, not hangs — and the library awaits it ahead of `refreshRecovery()`, so
+   * §7.1's recovery banner and §7.2's capacity line both fail to render with nothing
+   * in the log. Same sentence as the stalled poll, one process further out.
+   */
+  it(
+    'comes back as `unknown` rather than not coming back',
+    async () => {
+      const space = vi
+        .spyOn(store, 'diskSpace')
+        .mockImplementation(() => new Promise(() => undefined));
+      try {
+        const startedAt = Date.now();
+        const reading = await readDiskForPreflight(store);
+        // The volume read has a deadline of its own, well under the library walk's —
+        // so landing inside the walk's bound says the `statfs` was stopped by its own
+        // rather than by anything downstream of it. An unbounded one never lands.
+        expect(Date.now() - startedAt).toBeLessThan(LIBRARY_RATE_DEADLINE_MS);
+        expect(reading.level).toBe('unknown');
+        expect(reading.space).toBeNull();
+        expect(reading.capacitySec).toBeNull();
+        // And `unknown` refuses nothing, so a volume we could not measure does not
+        // become a volume we refuse to record on.
+        expect(diskRefusesStart(reading)).toBe(false);
+      } finally {
+        space.mockRestore();
+      }
+    },
+    LIBRARY_RATE_DEADLINE_MS + 5_000,
+  );
+
+  it('reads a volume that answers — the control the stall is measured against', async () => {
+    // Without this, "the reading came back `unknown`" is a claim about this function
+    // always saying `unknown` rather than about the volume that would not answer.
+    const space = vi
+      .spyOn(store, 'diskSpace')
+      .mockResolvedValue({ freeBytes: 40 * GB, totalBytes: 500 * GB });
+    try {
+      const reading = await readDiskForPreflight(store);
+      expect(reading.level).toBe('ok');
+      expect(reading.space?.freeBytes).toBe(40 * GB);
+      expect(reading.capacitySec).not.toBeNull();
+    } finally {
+      space.mockRestore();
+    }
+  });
+
+  it('issues one underlying read while a stalled one is outstanding', async () => {
+    // The second guard, on this path too: a deadline abandons a read and cannot
+    // retire it, so two windows refreshing against a wedged volume must not park two
+    // requests on the threadpool `ProjectStore`'s media writes share.
+    const space = vi
+      .spyOn(store, 'diskSpace')
+      .mockImplementation(() => new Promise(() => undefined));
+    try {
+      const both = await Promise.all([readDiskForPreflight(store), readDiskForPreflight(store)]);
+      expect(both.every((reading) => reading.level === 'unknown')).toBe(true);
+      expect(space).toHaveBeenCalledTimes(1);
+    } finally {
+      space.mockRestore();
     }
   });
 });

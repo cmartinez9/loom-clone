@@ -22,8 +22,20 @@
  * audio and §7.4 gives the camera, applied to an instrument rather than a device.
  */
 
-import { classifyDisk, measureCaptureRate, type CaptureRate, type DiskReading } from '@loom/ipc';
-import { beforeDeadline } from './recorder/disk-monitor.ts';
+import {
+  DISK_THRESHOLDS,
+  classifyDisk,
+  measureCaptureRate,
+  type CaptureRate,
+  type DiskReading,
+  type DiskSpace,
+} from '@loom/ipc';
+import {
+  SingleFlightDiskRead,
+  beforeDeadline,
+  diskReadDeadlineMs,
+  readSpaceBeforeDeadline,
+} from './recorder/disk-monitor.ts';
 import type { ProjectStore } from './project-store.ts';
 
 /**
@@ -39,15 +51,51 @@ import type { ProjectStore } from './project-store.ts';
 export const LIBRARY_RATE_DEADLINE_MS = 10_000;
 
 /**
+ * One in-flight `statfs` per store on this path, for {@link SingleFlightDiskRead}'s
+ * reason: a deadline *abandons* a read and nothing in Node retires one, so a preflight
+ * repeated against a wedged volume would park another request on libuv's shared
+ * threadpool every time a window asked. Keyed by the store because the store is the
+ * volume as far as this file is concerned, and because a process holds one of them
+ * while a test holds many.
+ */
+const singleFlight = new WeakMap<ProjectStore, SingleFlightDiskRead>();
+
+function volumeReadFor(store: ProjectStore): SingleFlightDiskRead {
+  const existing = singleFlight.get(store);
+  if (existing !== undefined) return existing;
+  const created = new SingleFlightDiskRead(() => store.diskSpace());
+  singleFlight.set(store, created);
+  return created;
+}
+
+/**
+ * Free space, bounded, through the same two guards §7.2's poll uses.
+ *
+ * This is the `recorder.preflight` IPC path and a window **awaits** it, so an
+ * unbounded `statfs` here is not a missing reading — it is a reply that never comes.
+ * `refreshPermissions()` never returns (its `try`/`catch` covers throws, not hangs)
+ * and the library sequences it ahead of `refreshRecovery()`, so both of this phase's
+ * safety surfaces — §7.1's recovery banner and §7.2's capacity line — silently fail
+ * to render, with nothing in the log. That is the original stalled-read defect one
+ * process out, and it is closed the same way.
+ */
+function readSpaceForPreflight(store: ProjectStore): Promise<DiskSpace | null> {
+  return readSpaceBeforeDeadline(
+    () => volumeReadFor(store).read(),
+    diskReadDeadlineMs(DISK_THRESHOLDS.pollIntervalMs),
+  );
+}
+
+/**
  * Free space and this user's own measured cost of a second, banded (§7.2).
  *
- * Both halves are taken concurrently and both degrade rather than throw: a library
- * that could not be listed costs the *provenance* of the estimate, not the estimate,
- * and a volume that could not be read costs the reading.
+ * Both halves are taken concurrently and **neither can outlast its own deadline**: a
+ * library that could not be listed costs the *provenance* of the estimate, a volume
+ * that could not be read costs the reading, and neither costs the surface that asked.
  */
 export async function readDiskForPreflight(store: ProjectStore): Promise<DiskReading> {
   const [space, rate] = await Promise.all([
-    store.diskSpace().catch((error: unknown) => {
+    readSpaceForPreflight(store).catch((error: unknown) => {
       console.error('[disk] free space could not be read:', error);
       return null;
     }),

@@ -90,12 +90,15 @@ const TIMED_OUT = Symbol('the work passed its deadline');
  * instrument that had stopped watching looked exactly like a volume with nothing to
  * report.
  *
- * **One of these, because it is one hazard in three places.** A syscall against a
+ * **One of these, because it is one hazard in four places.** A syscall against a
  * wedged volume never returns, and every path here runs one: the monitor's poll,
  * where it wedges the in-flight guard and silently disables §7.2's stop; the
  * preflight in `RecorderSession.start`, where it wedges the Record button with no
- * recording and no message; and the library walk behind the capacity estimate, which
- * is `readdir` and `stat` rather than `statfs` and hangs in exactly the same way.
+ * recording and no message; the library walk behind the capacity estimate, which is
+ * `readdir` and `stat` rather than `statfs` and hangs in exactly the same way; and
+ * `readDiskForPreflight`, the `recorder.preflight` IPC path, where a window is
+ * **awaiting** the answer — so a hang there is not a missing reading but a reply that
+ * never comes, and it takes §7.1's recovery banner down with §7.2's capacity line.
  *
  * **A rejection is not caught here.** The callers log it — they already have that
  * line, and folding it in would make "the volume errored" and "the volume went

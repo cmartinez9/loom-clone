@@ -1729,6 +1729,25 @@ export const MUTATIONS = [
     replace: '    await this.measureLibrary();',
     mustFail: [PHASE13_DISK],
   },
+  {
+    name: 'the-preflight-reading-waits-on-the-volume-for-ever',
+    breaks:
+      "both of this phase's safety surfaces at once, on the one disk path a window " +
+      '*awaits*. An unbounded `statfs` in `readDiskForPreflight` is not a missing ' +
+      'reading but a reply that never comes: `loom.recorder.preflight()` never ' +
+      'resolves, `refreshPermissions()` never returns — its `try`/`catch` covers ' +
+      'throws, not hangs — and the library awaits it ahead of `refreshRecovery()`, so ' +
+      "§7.1's recovery banner and §7.2's capacity line both fail to render with " +
+      'nothing in the log. The stalled-read defect, one process further out.',
+    file: 'apps/main/src/disk.ts',
+    find:
+      '  return readSpaceBeforeDeadline(\n' +
+      '    () => volumeReadFor(store).read(),\n' +
+      '    diskReadDeadlineMs(DISK_THRESHOLDS.pollIntervalMs),\n' +
+      '  );',
+    replace: '  return store.diskSpace();',
+    mustFail: [PHASE13_DISK],
+  },
 ];
 
 /**

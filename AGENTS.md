@@ -997,8 +997,13 @@ nothing and stops nothing. A monitor that could fail a recording would be a new 
 lose footage installed by the thing meant to prevent one.
 
 **And every wait on the volume has a deadline on it**, `readSpaceBeforeDeadline`, shared
-by the poll and by `RecorderSession.start`'s preflight because it is one hazard in two
-places. A `statfs` that never returns — against the volume being watched _because_ it is
+by the poll, by `RecorderSession.start`'s preflight and by `readDiskForPreflight` —
+`recorder.preflight`'s own reading, which is the one a **window awaits**, so a hang there
+is not a missing number but a reply that never comes: `refreshPermissions()` never
+returns and the library sequences it ahead of `refreshRecovery()`, taking §7.1's recovery
+banner down with §7.2's capacity line and logging nothing.
+`the-preflight-reading-waits-on-the-volume-for-ever` is that mutation. A `statfs` that
+never returns — against the volume being watched _because_ it is
 in trouble — wedged the in-flight guard for good: every later tick returned immediately,
 nothing was published, nothing was logged, and §7.2's stop became unreachable while the
 disk filled. The deadline is half the poll interval (`diskReadDeadlineMs`), so a
@@ -1067,22 +1072,25 @@ than one that is inert and says so; `packages/ipc/test/disk.test.ts` pins both h
 the real H.264 fixture through the real `ProjectStore`, with the volume's answer driven
 down past 5 GB and then past 1 GB, ending `editable` with a part marked `disk-full`, a
 `media/screen.000.mp4` `/usr/bin/avconvert` remuxes, and a frame index carrying every
-frame that went in. **Seven controls**, because each assertion passes for a wrong reason
+frame that went in. **Eight controls**, because each assertion passes for a wrong reason
 without one: a volume that never drops must not stop the recording and must write no
 `disk-full`; that recording's file must play too, so playability is about the interrupted
 run rather than the fixture; a reader that throws on every poll must leave the recording
 running; the banner must have been _published_ below 5 GB and absent above it; a volume
 that _answers_ must be read afresh every poll, or the single read the stalled scenario
 asserts is a guard that stopped reading rather than the stall; a library with nothing in
-it must report `reference`, or `measured` is the label that path always carries; and a
+it must report `reference`, or `measured` is the label that path always carries; a
 library that answers must reach `measured`, or the `reference` a wedged walk reports is
-the wiring rather than the wedge. **Ten** `disk`/`preflight`/`monitor` entries in
-`npm run verify:mutation` break the production source on disk — the six phase 13 shipped
-with, plus `a-stalled-disk-read-switches-the-monitor-off`,
+the wiring rather than the wedge; and a preflight volume that answers must band `ok`, or
+the `unknown` a stalled one reports is what that function always says. **Eleven**
+`disk`/`preflight`/`monitor` entries in `npm run verify:mutation` break the production
+source on disk — the six phase 13 shipped with, plus
+`a-stalled-disk-read-switches-the-monitor-off`,
 `the-first-seconds-of-a-recording-ignore-the-users-own-library`,
-`abandoned-disk-reads-pile-up-on-the-threadpool` and
-`the-library-walk-is-awaited-before-the-recording-starts` — none of them guarded only by
-a gate that can withhold.
+`abandoned-disk-reads-pile-up-on-the-threadpool`,
+`the-library-walk-is-awaited-before-the-recording-starts` and
+`the-preflight-reading-waits-on-the-volume-for-ever` — none of them guarded only by a
+gate that can withhold.
 
 ## Crash recovery is told to the user, and where its numbers come from
 
