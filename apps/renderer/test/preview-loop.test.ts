@@ -11,7 +11,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { CompositorFrames } from '@loom/compositor';
-import { identityTimeline, type ResolvedState } from '@loom/edl';
+import { compile, identityTimeline, type CompiledTimeline, type ResolvedState } from '@loom/edl';
+import { newEditDocument, type Clip } from '@loom/format';
 import {
   PreviewLoop,
   type FrameScheduler,
@@ -75,6 +76,9 @@ function recordingCompositor(): RecordingCompositor {
 interface StubSource extends PreviewSource {
   primeCalls: { t: number; ahead: number }[];
   releaseCalls: number[];
+  /** Every `t` the watchdog asked about, so its *domain* can be asserted. */
+  hasCalls: number[];
+  frameAtCalls: number[];
   frames: Map<number, VideoFrame>;
   liveFrames: number;
   primeResult: Promise<void>;
@@ -86,11 +90,14 @@ function stubSource(
   const source = {
     primeCalls: [] as { t: number; ahead: number }[],
     releaseCalls: [] as number[],
+    hasCalls: [] as number[],
+    frameAtCalls: [] as number[],
     frames: new Map<number, VideoFrame>(),
     liveFrames: 0,
     ringCapacity: 20,
     primeResult: Promise.resolve(),
     frameAt(t: number) {
+      source.frameAtCalls.push(t);
       return options.frameAt?.(t) ?? null;
     },
     prime(t: number, ahead: number) {
@@ -101,6 +108,7 @@ function stubSource(
       source.releaseCalls.push(t);
     },
     hasSourceFrameAt(t: number) {
+      source.hasCalls.push(t);
       return options.has?.(t) ?? true;
     },
   };
@@ -627,6 +635,152 @@ describe('PreviewLoop stall watchdog — §10.2', () => {
     for (let i = 0; i < 200; i++) scheduler.tick(16);
     loop.seek(1); // a seek is progress; the clock starts again
     for (let i = 0; i < 200; i++) scheduler.tick(16);
+    loop.stop();
+    expect(onStall).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The two time domains, at the one seam that has to keep them apart.
+ *
+ * §3.1 gives source time and timeline time, and `packages/edl/src/clips.ts` is
+ * unambiguous that the clip list is the **only** map between them. Every method on
+ * `PreviewSource` is `SourceReader`'s and every one of them is in source time — so
+ * `prime`, `release` and `hasSourceFrameAt` take exactly what `frameAt` takes, and
+ * the loop's own `time` is not it.
+ *
+ * The loop used to pass `state.sourceTime` to `frameAt` and the raw timeline time to
+ * the other three. That is invisible today because nothing produces a non-identity
+ * clip list — there is no editing UI yet — and it is invisible in both gates for a
+ * second reason: they stub the reader so the argument is discarded, and they drive
+ * `identityTimeline`, where the two numbers are equal by construction. **These tests
+ * break that pattern deliberately**: a real `compile` over a real clip list with a
+ * non-zero `sourceStart`, and assertions on the argument the reader was handed.
+ *
+ * Report §4.3's own pseudo-code has the same defect (`screenReader.prime(t, 0.5)`
+ * under a `frameAt(state.sourceTime)`) and needs the same correction; the docblock in
+ * `preview-loop.ts` no longer copies it.
+ */
+describe('PreviewLoop drives the source in SOURCE time — §3.1, §3.2', () => {
+  /** A trim: the output starts `sourceStart` into the recording. */
+  function trimmed(clips: readonly Clip[]): CompiledTimeline {
+    const doc = newEditDocument();
+    doc.clips = [...clips];
+    return compile(doc);
+  }
+
+  /** `sourceStart = 12`, so timeline `t` is source `12 + t` and the output is 10 s. */
+  const TRIM: readonly Clip[] = [{ id: 'trim', sourceStart: 12, sourceEnd: 22, speed: 1 }];
+
+  function loopOver(
+    timeline: CompiledTimeline,
+    source: StubSource,
+    extra: Partial<{ onStall: (info: { atSec: number; forMs: number }) => void }> = {},
+  ): { loop: PreviewLoop; scheduler: ManualScheduler } {
+    const scheduler = new ManualScheduler();
+    const loop = new PreviewLoop({
+      compositor: recordingCompositor(),
+      screen: source,
+      durationSec: timeline.durationSec,
+      timeline,
+      scheduler,
+      now: () => scheduler.nowMs,
+      ...extra,
+    });
+    return { loop, scheduler };
+  }
+
+  it('primes at the source instant, not the timeline instant', () => {
+    const source = stubSource();
+    const { loop, scheduler } = loopOver(trimmed(TRIM), source);
+    loop.start();
+    loop.seek(4); // timeline 4 s -> source 16 s
+    scheduler.tick();
+    loop.stop();
+
+    expect(source.primeCalls.length).toBeGreaterThan(0);
+    // Both the seek's prime and the frame's. Every one of them is the source instant.
+    for (const call of source.primeCalls) {
+      expect(call.t).toBeCloseTo(16, 6);
+      expect(call.ahead).toBe(0.5);
+    }
+    // And it is the number `frameAt` was given — the two cannot be allowed to differ,
+    // or the lookahead runs somewhere the read head never goes.
+    expect(source.frameAtCalls.at(-1)).toBeCloseTo(16, 6);
+  });
+
+  it('releases behind the source read head, not behind the playhead', () => {
+    const source = stubSource();
+    const { loop, scheduler } = loopOver(trimmed(TRIM), source);
+    loop.seek(4);
+    loop.start();
+    scheduler.tick();
+    loop.stop();
+    // Timeline-time release here is 3.9 — before the media even begins — so it frees
+    // nothing and the ring fills until `FrameLedger` throws.
+    expect(source.releaseCalls.at(-1)).toBeCloseTo(16 - 0.1, 6);
+  });
+
+  it('scales the release with clip speed, because sourceTime does', () => {
+    // A 2x clip: 5 s of timeline is 10 s of source. A release computed in timeline
+    // time is *ahead* of nothing and *behind* the wrong frames — here it would name
+    // 4.9 while the read head is at 10, closing eight seconds of frames the playhead
+    // has already passed only by accident, and on a 0.5x clip closing frames it has
+    // not reached at all.
+    const source = stubSource();
+    const fast: readonly Clip[] = [{ id: 'fast', sourceStart: 0, sourceEnd: 20, speed: 2 }];
+    const { loop, scheduler } = loopOver(trimmed(fast), source);
+    loop.seek(5);
+    loop.start();
+    scheduler.tick();
+    loop.stop();
+    expect(source.frameAtCalls.at(-1)).toBeCloseTo(10, 6);
+    expect(source.primeCalls.at(-1)?.t).toBeCloseTo(10, 6);
+    expect(source.releaseCalls.at(-1)).toBeCloseTo(10 - 0.1, 6);
+  });
+
+  it('asks the stall watchdog about the source instant, so §10.2 still fails loudly', () => {
+    // The source has media only where the clip points — frames exist from 12 s on,
+    // and nothing has been decoded. That is exactly §10.2's condition: the index says
+    // a frame is there and the ring never produces one.
+    //
+    // Asked in timeline time the watchdog gets `hasSourceFrameAt(4)` -> false, reads
+    // it as "an idle desktop, legitimately no frame", resets on every frame and never
+    // fires. A stall that reports nothing is the silent freeze the watchdog exists to
+    // prevent, under a scrub bar that still looks correct.
+    const onStall = vi.fn();
+    const source = stubSource({ frameAt: () => null, has: (t) => t >= 12 });
+    const { loop, scheduler } = loopOver(trimmed(TRIM), source, { onStall });
+    loop.seek(4);
+    loop.start();
+    for (let i = 0; i < 400; i++) scheduler.tick(16);
+    loop.stop();
+
+    expect(source.hasCalls.length).toBeGreaterThan(0);
+    for (const t of source.hasCalls) expect(t).toBeCloseTo(16, 6);
+
+    expect(onStall).toHaveBeenCalledOnce();
+    const info = onStall.mock.calls[0]?.[0] as {
+      atSec: number;
+      timelineSec: number;
+      forMs: number;
+    };
+    expect(info.forMs).toBeGreaterThanOrEqual(5000);
+    // Reported in the domain the question was asked in, with the playhead alongside
+    // it: over a trim those are two different numbers and a caller needs both.
+    expect(info.atSec).toBeCloseTo(16, 6);
+    expect(info.timelineSec).toBeCloseTo(4, 6);
+  });
+
+  it('still does not fire where the source genuinely has nothing at the source instant', () => {
+    // The control for the test above: same trim, same watchdog, but the media really
+    // is absent where the clip points. §4.2's 1.4 fps idle desktop must stay quiet.
+    const onStall = vi.fn();
+    const source = stubSource({ frameAt: () => null, has: (t) => t < 12 });
+    const { loop, scheduler } = loopOver(trimmed(TRIM), source, { onStall });
+    loop.seek(4);
+    loop.start();
+    for (let i = 0; i < 400; i++) scheduler.tick(16);
     loop.stop();
     expect(onStall).not.toHaveBeenCalled();
   });
