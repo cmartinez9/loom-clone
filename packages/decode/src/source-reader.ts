@@ -38,8 +38,10 @@
  * an adapter that supplies those three values. It requires nothing from inside this
  * class. **The one thing an adapter must decide** is where the `description` comes
  * from once the app is restarted and `MetaMsg` is long gone: persist it beside the
- * part, or read it out of the container. That is a capture-side choice; this reader
- * takes whichever config it is handed.
+ * part, or read it out of the container. This reader takes whichever config it is
+ * handed. The adapter this app ships is `apps/renderer/src/editor/screen-source.ts`
+ * (phase 14) and it takes the second option, for reasons its own header gives; a
+ * second adapter is free to decide differently.
  *
  * ## Lifetimes
  *

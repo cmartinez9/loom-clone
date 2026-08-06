@@ -3,7 +3,8 @@
  * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
  * model, phase 8's export and the phase-8 gate's own judgement of when it has a
  * verdict at all, phase 9's delete-after-export retention, phase 10's generators,
- * phase 11's golden-frame gate over annotations and phase 12's live drawing overlay.
+ * phase 11's golden-frame gate over annotations, phase 12's live drawing overlay
+ * and phase 14's editor gate over playback and trimming.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
