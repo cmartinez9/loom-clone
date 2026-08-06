@@ -102,6 +102,7 @@ import { VideoExportEncoder } from '../../apps/renderer/src/export/encode.ts';
 import { verifyByDecoding } from '../../apps/renderer/src/export/verify-decode.ts';
 import { openVideoTrack, type TrackReader } from '../../apps/renderer/src/media/track-reader.ts';
 import { CODE_BIT_COUNT, codeCellCenter, generate4kPart } from '../gate/fixture.ts';
+import { COVERAGE_PROBE_NOT_REACHED } from './report.ts';
 import type {
   ControlOutcome,
   CoverageReport,
@@ -218,7 +219,10 @@ const liveContexts = new Set<WebGL2RenderingContext>();
  *
  * So this asks `isContextLost()` of every live context, which is the same question the
  * export loop asked. It widens nothing: the relaunch condition is still *"the context
- * was lost"*, and a run that loses it twice still fails at the gate's first assertion.
+ * was lost"*. What a run that loses it on **every** launch earns is no verdict at all
+ * rather than a failure — `instrumentOutOfCalibration` in `verdict.ts` keys on this
+ * value together with the readings the report carries, and the gate then reports
+ * *skipped* under a NOT JUDGED banner.
  */
 function contextWasLost(): boolean {
   if (lost.where !== null) return true;
@@ -1095,7 +1099,7 @@ void run().then(
         tripwire: {
           webcamPassStillAbsent: false,
           cursorPassStillAbsent: false,
-          detail: 'the run did not reach the coverage probe',
+          detail: COVERAGE_PROBE_NOT_REACHED,
         },
       },
       environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },

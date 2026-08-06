@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
                           # generators, annotations, the drawing overlay, the event logs
-                          # and the phase-6 gate's judgement policy; one way per entry in
+                          # and both gates' judgement policies; one way per entry in
                           # scripts/mutation-check.mjs's MUTATIONS registry, which is
                           # where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
@@ -951,6 +951,33 @@ was not a control.
   restore puts back the bytes it read at the start, silently reverting anything you
   changed in between. It handles `SIGINT`/`SIGTERM` and restores in a `finally`, so
   killing it is safe — but a concurrent edit is not. Run it, or edit; not both.
+  **And the same window will put a mutation into a commit.** `git add` taken while it is
+  going stages whichever source it has broken at that instant, and the restore afterwards
+  cannot un-commit it. That is not hypothetical: `2b658e3` on
+  `fm/loom-gate8-instrument-validity` committed and **pushed**
+  `audio-gaps-closed-instead-of-reproduced` into `packages/format/src/sync/align.ts` —
+  verbatim its registry `find` → `replace` — and CI run 31101555081 caught it at the
+  phase-3 A/V sync gate reading **-500.5 ms** against a ±20 ms budget. So: never commit
+  from a tree while a mutation run owns it, and if a commit's diff touches a production
+  file the change had no business in, check it against the registry before anything else.
+  A `find` string missing from a source file is the signature.
+- **The mutation proof has three outcomes, and its old two over-claimed.** A gate that
+  withholds its verdict exits 0 exactly as one that ran and noticed nothing does, so
+  `runTests` reads vitest's per-test statuses rather than the exit code alone: a guard
+  where **every** test withheld is `NO VERDICT`, which is neither proof nor hole and does
+  not fail the run. The half worth remembering is what the _previous_ two outcomes did —
+  everything that was not a clean pass counted as `caught`, so a gate that died of a lost
+  GPU context was credited as detection. **An "all N caught" recorded before that third
+  outcome may include false catches and is not evidence the gates in it measure anything;
+  those counts have not been re-audited.** Quote a run, not a number. The script's own
+  header carries the measurement that established it.
+  **`WITHHOLDABLE_GUARDS` is the structural half**: a mutation guarded _only_ by a gate
+  that can withhold is unproven rather than caught whenever that host's instrument fails,
+  and no single run looks wrong when that repeats — so it is printed on **every** run
+  straight off the registry, deterministic and identical on every host, rather than
+  counted over time. One mutation is on that list today
+  (`export-writer-registered-after-it-opens`, guarded only by the phase-8 gate) and the
+  fix for it is a second guard that cannot withhold, never a retry.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
@@ -1033,20 +1060,20 @@ was not a control.
   gate whose whole job is per-pixel identity materially worse at it. It is a weaker
   guarantee than it reads as. Turning this knob again is a change to what phase 8
   establishes and needs the same scrutiny as deleting one of its checks.
-  **What closes it is the third outcome, one gate over.** A run whose every launch lost
-  the context measured nothing, and a gate that calls that a failure is reporting a
-  verdict it never reached — exactly what `instrumentOutOfCalibration` answers for phase
-  6's frame budget. The same remedy for phase 8 — withhold the verdict when every launch
-  lost the GPU context — is in flight as its own task and is **not** phase 6's branch to
-  land. Until it does, a red `test/phase8-gate.test.ts` whose log carries
+  **What closes it is the third outcome, and it has landed.** A run whose every launch
+  lost the context measured nothing, and a gate that calls that a failure is reporting a
+  verdict it never reached — what `instrumentOutOfCalibration` answers for phase 6's
+  frame budget and now for phase 8's too, so this crash no longer turns the gate red: it
+  reports **skipped** under a `NOT JUDGED` banner. § The phase-8 gate has three outcomes,
+  below, owns that mechanism. So a `test/phase8-gate.test.ts` whose log carries
   `GPU process gone: abnormal-exit (exit 8704)` within a second of `export writer open`
-  on **both** launches is this known crash rather than a regression to chase, and the
-  answer is neither a smaller fixture nor a third launch. **Match on that pair and not
-  on the allocator**: this rule used to read `Failed to allocate texture`, which run
-  `31102224786` — the first run after the revert, and the one that turned this branch red
-  — does not contain anywhere in its log. A recognition rule that fails to recognise the
-  run it was written for sends the next reader chasing a regression, which is the one
-  thing this entry exists to prevent.
+  on **both** launches is this known crash rather than a regression to chase, and the run
+  now says so itself; the answer is still neither a smaller fixture nor a third launch.
+  **Match on that pair and not on the allocator**: this rule used to read
+  `Failed to allocate texture`, which run `31102224786` — the first run after the revert,
+  and the one that turned this branch red — does not contain anywhere in its log. A
+  recognition rule that fails to recognise the run it was written for sends the next
+  reader chasing a regression, which is the one thing this entry exists to prevent.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
@@ -1055,8 +1082,11 @@ was not a control.
   run whose context was gone, `shouldRelaunchGolden` never fired, and a run that produced
   no reading was judged as a phase-8 failure. `contextWasLost()` asks the live contexts
   themselves (minus the ones `disposePath` handed back), and main folds in the
-  GPU-process exit it watched. The predicate is untouched and nothing is widened: a run
-  that loses the context twice still fails at the gate's first assertion.
+  GPU-process exit it watched. The predicate is untouched and nothing is widened: the
+  relaunch condition is still `report.contextLost` alone. What a run that loses the
+  context on **every** launch earns is not that first assertion but no verdict at all —
+  `instrumentOutOfCalibration` in `test/export-golden/verdict.ts`, and § The phase-8 gate
+  has three outcomes, below.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
@@ -1419,6 +1449,54 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   than a frame number for exactly that reason. They also declare separate window
   globals — `window.exportGolden` and `window.golden` — because both harnesses are in
   one TypeScript program and one name cannot hold two shapes.
+- **The phase-8 gate has three outcomes, and the third is not a pass.** Where **every**
+  launch had its WebGL contexts taken away before anything was compared, §4.5's
+  per-pixel zero was neither met nor missed — it was not measured — so the run reports
+  **skipped** under a `NOT JUDGED` banner rather than failing on
+  `expect(report.contextLost).toBe(false)` over a report reading `samples n=0`,
+  `identity max delta=-1`, `export did not run`. `instrumentOutOfCalibration` in
+  `test/export-golden/verdict.ts` is the condition, and it borrows phase 6's vocabulary
+  on purpose while staying a separate, differently-typed function for the reason
+  `relaunch.ts` gives about the two gates' relaunch predicates.
+  **`shouldRelaunchGolden` is untouched and still `report.contextLost` alone, and
+  `GATE_ATTEMPTS` is still two** — more retries around a crash is the move this project
+  keeps refusing.
+  **The branch runs before every assertion, which is the opposite of phase 6's ordering
+  and needs its own safety.** Phase 6's `skip()` is the last statement in its test, so a
+  withheld verdict is structurally unable to suppress a real one; here a lost context
+  empties the report, so everything below would fail on the absence and the branch has to
+  come first. The safety is therefore the predicate's: `readingsTaken` enumerates every
+  reading _of the subject_ a `GoldenReport` can carry, field by field, and **one of them
+  refuses to withhold** — `mayDeleteSources`'s discipline applied to a verdict instead of
+  a deletion. `fixture` and `environment` are excluded from it deliberately — they
+  describe the input and the host, not the subject — and the reason is at `readingsTaken`
+  itself; it is not a list to finish. `test/golden-verdict.test.ts` is the fence, `test/relaunch-policy.test.ts`'s
+  sibling; three `verdict.ts` entries in `npm run verify:mutation` break it on disk.
+  **The hazard it would be unsound without is a defect in the export path provoking the
+  context loss itself**, and it is ruled out structurally rather than statistically:
+  `Compositor` allocates in its constructor and nowhere else, `GpuTimer` reuses one
+  query, `ExportRenderLoop.renderAt` allocates nothing, `VideoExportEncoder.encode`
+  closes its `new VideoFrame(canvas)` in a `finally` in the same statement, and a decode
+  leak trips `FrameLedger` in JavaScript on the _first_ frame past the ring cap. The
+  argument, the three CI readings that agree with it, and what would re-open it are at
+  `instrumentOutOfCalibration`'s docblock — do not re-derive them here.
+  **All five outcomes were observed end to end** against the real gate on 2026-08-06
+  (deliberate injections, reverted): agree → pass; disagree → **fail**; lost once then
+  agree → pass; lost once then disagree → **fail**; lost on both launches → skipped with
+  the banner. The recipe is in the PR; the point of recording it is that a branch on
+  which an acceptance gate does not go red is worth watching go red first.
+  **And `npm run verify:mutation` has the same third outcome, because it had to.** A gate
+  that withholds exits 0, exactly as one that ran and noticed nothing does, so the first
+  run of the mutation proof after this branch read a skipped phase-8 gate as `SURVIVED`
+  and reported a hole in a gate that had never been given an instrument (CI run
+  31099311259 — the same run's `verify` job skipped that gate for the same lost contexts).
+  `runTests` now reads vitest's own per-test statuses: a file where **every** test
+  withheld is `NO VERDICT`, which is neither proof nor hole and does not fail the run,
+  and a mutation is only `no verdict` where no file judged it — one gate that judged and
+  did not notice is still a hole and still exits non-zero. Do not widen that to "a skip
+  happened": `av-sync.test.ts` and `recorder-events.test.ts` skip single tests routinely
+  on a host without `afconvert` or the Accessibility grant, and counting those would
+  quietly stop proving the mutations they carry.
 - **Phase 8's `delta 0` covers two of §4.5's four "must be identical" rows, and says
   so.** Frame selection and the zoom state are each perturbed by a control that must go
   non-zero; **the webcam bubble and the cursor are not exercised at all**, because

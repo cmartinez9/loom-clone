@@ -93,10 +93,31 @@ export interface CoverageReport {
   };
 }
 
+/**
+ * What {@link CoverageReport.tripwire}'s detail says when the run never got there.
+ *
+ * A constant rather than three copies of a sentence, because `readingsTaken` in
+ * `verdict.ts` asks *"did this probe run?"* by comparing against it — and a gate that
+ * decides whether it has a verdict by matching a string literal one of its writers can
+ * reword is a gate with a silent branch in it.
+ */
+export const COVERAGE_PROBE_NOT_REACHED = 'the run did not reach the coverage probe';
+
 export interface GoldenReport {
   ok: boolean;
   error?: string;
   contextLost: boolean;
+  /**
+   * What Chromium said died, when what died was the **GPU process**. `null` otherwise.
+   *
+   * Stamped by `main.ts`'s `finish`, never by the harness: the harness only ever sees
+   * the lights going out, and `child-process-gone` is the same event arriving by the
+   * one route that names the mechanism and the exit code. It is **evidence, not a
+   * condition** — `verdict.ts` prints it and does not key on it, because a context can
+   * be lost without the process exiting and a run that produced no reading is a run
+   * that produced no reading either way.
+   */
+  gpuProcessGone?: string | null;
   /** §4.5's rows, split into what this gate judges and what it cannot. */
   coverage: CoverageReport;
   environment: {

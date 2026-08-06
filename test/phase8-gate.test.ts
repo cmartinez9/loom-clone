@@ -74,8 +74,17 @@
  * A lost WebGL context is not a reading — Chromium exits the GPU process when one is
  * lost and takes every context in it, so what a harness would report afterwards is
  * whatever it was holding when the lights went out. That earns exactly one relaunch,
- * through {@link shouldRelaunchGolden}, and nothing else does; `report.contextLost` is
- * still asserted below, so a run that loses it twice fails here.
+ * through {@link shouldRelaunchGolden}, and nothing else does.
+ *
+ * When **every** launch is taken away, this gate has no verdict to give and says so:
+ * the run reports **skipped**, under a NOT JUDGED banner carrying Chromium's own
+ * account of what died, rather than printing a pixel-identity failure over a report
+ * that reads `samples n=0`. {@link instrumentOutOfCalibration} is that condition, the
+ * hazard it would be unsound without, and the guard that makes it safe to take before
+ * every assertion here; `test/golden-verdict.test.ts` is its counter-cases. A run whose
+ * context survived is judged exactly as it was, and `report.contextLost` is still
+ * asserted below — so a run that lost it once, relaunched, and then compared 24
+ * timestamps fails here if anything about them is wrong.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -88,6 +97,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { shouldRelaunchGolden } from './export-golden/relaunch.ts';
+import {
+  instrumentOutOfCalibration,
+  notJudgedBanner,
+  withheldJudgement,
+} from './export-golden/verdict.ts';
 import type { GoldenReport } from './export-golden/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -244,15 +258,20 @@ async function runGate(): Promise<{
  * of its own — and not a clause in this loop, for the reason phase 6's gate states:
  * a retry around an acceptance gate is how a real defect gets to look like weather,
  * and this one stays defensible only while it stays this narrow. The last report is
- * returned either way, so the assertions below judge a real run, including one whose
- * context was lost twice — which they fail on, at the first line.
+ * judged either way, so the assertions below judge a real run.
+ *
+ * **Every** attempt comes back, not just the last, because
+ * {@link instrumentOutOfCalibration} is a question about all of them: a verdict is
+ * withheld only where no launch produced a reading, and a launch whose report is
+ * discarded here is a launch whose reading could not be consulted there.
  */
 async function runGateUntilCompared(): Promise<{
-  report: GoldenReport;
+  attempts: GoldenReport[];
   exitCode: number | null;
   output: string;
 }> {
   let result = await runGate();
+  const attempts = [result.report];
   for (
     let attempt = 2;
     attempt <= GATE_ATTEMPTS && shouldRelaunchGolden(result.report);
@@ -263,8 +282,9 @@ async function runGateUntilCompared(): Promise<{
         `launch ${String(attempt)} of ${String(GATE_ATTEMPTS)}`,
     );
     result = await runGate();
+    attempts.push(result.report);
   }
-  return result;
+  return { attempts, exitCode: result.exitCode, output: result.output };
 }
 
 function describeRun(report: GoldenReport): string {
@@ -319,14 +339,46 @@ function describeRun(report: GoldenReport): string {
 describe('phase 8 gate: preview and export are pixel-identical', () => {
   it(
     'agrees at 24 timestamps, and can see it when they disagree',
-    async () => {
-      const { report, exitCode, output } = await runGateUntilCompared();
+    async ({ skip }) => {
+      const { attempts, exitCode, output } = await runGateUntilCompared();
+      const report = attempts[attempts.length - 1]!;
       const detail =
         describeRun(report) +
         (report.ok ? '' : `electron output\n${output.slice(-ELECTRON_TAIL_CHARS)}\n`);
       // Printed unconditionally: a gate whose numbers appear only on a failure tells
       // you nothing about the margin you had while it passed.
       console.log(detail);
+
+      // ---- the third outcome, and it has to come first ----------------------
+      // Where **every** launch had its GPU context taken away and not one of them read
+      // anything, there is no verdict to give on §4.5 — good or bad — and this run says
+      // so rather than failing. `expect(report.contextLost).toBe(false)` below would
+      // otherwise print a pixel-identity failure over a report whose own numbers are
+      // `samples n=0`, `identity max delta=-1`, `export did not run`.
+      //
+      // **First rather than last, which is the opposite of phase 6's ordering and needs
+      // its own safety.** Phase 6 can put its `skip()` after every assertion, so a
+      // withheld verdict is structurally unable to suppress a real one. Here a lost
+      // context empties the report, so everything below would fail on the absence rather
+      // than on a finding, and the branch has to precede them. The safety therefore
+      // lives in the predicate: `instrumentOutOfCalibration` refuses to withhold a run
+      // that carries **any** reading — one timestamp, one control, one file, field by
+      // field — so a run with something to judge is judged. `test/golden-verdict.test.ts`
+      // is where that is required, counter-case by counter-case, including a healthy run
+      // whose pixels disagree and a lost-context run that compared 24 timestamps anyway.
+      //
+      // Nothing about the *relaunch* moves: `shouldRelaunchGolden` is still
+      // `report.contextLost` alone, and {@link GATE_ATTEMPTS} is still two.
+      if (instrumentOutOfCalibration(attempts)) {
+        console.log(notJudgedBanner(withheldJudgement(attempts)));
+        skip(
+          `§4.5's per-pixel zero was NOT JUDGED and this is not a pass: the WebGL ` +
+            `contexts both paths composite into were taken away on all ` +
+            `${String(attempts.length)} launches this gate is given, so no pixel was ever ` +
+            `compared (${report.gpuProcessGone ?? 'no GPU-process exit reached main'}). A ` +
+            `run whose context survives is judged exactly as before; see the output above.`,
+        );
+      }
 
       // First, because it makes every number below a fiction rather than a reading.
       expect(report.contextLost, detail).toBe(false);
