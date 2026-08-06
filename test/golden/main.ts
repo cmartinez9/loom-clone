@@ -77,6 +77,7 @@ function failureReport(error: string): GoldenReport {
     outputSize: [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
     sourceSize: [SOURCE_SIZE[0], SOURCE_SIZE[1]],
     timestamps: [],
+    exportLoop: { framesRendered: 0, drawnFrames: 0, heldFrames: 0, waits: 0 },
     controls: [],
     privacyFallbacks: 0,
     textTruncations: 0,

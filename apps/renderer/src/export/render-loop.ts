@@ -52,7 +52,7 @@
  */
 
 import { resolve, type CompiledTimeline, type ResolvedState } from '@loom/edl';
-import type { CompositorFrames } from '@loom/compositor';
+import type { CompositorFrames, TextAtlas } from '@loom/compositor';
 import type { Seconds } from '@loom/format';
 import { exportFrameCount } from '@loom/ipc';
 import type { PreviewSource } from '../preview/index.ts';
@@ -146,6 +146,28 @@ export interface ExportRenderLoopOptions {
   /** Seconds of decoded frames kept behind the read head. */
   retainBehindSec?: number;
   /**
+   * The glyph atlas `text` annotations are drawn from (phase 11).
+   *
+   * `PreviewLoopOptions.textAtlas` is the same option, and its docstring says the
+   * exporter *"has to be handed the same object"* — which nothing could do until this
+   * existed. Without it every `text` span an export composites is skipped and counted
+   * in `AnnotationPass.textSpansWithoutAtlas`: not a refusal (text failing is cosmetic
+   * and visible, where a redaction failing is invisible), but a divergence from the
+   * preview that §4.5 puts on the must-be-identical list.
+   *
+   * It stays optional because the atlas is a property of the *renderer* rather than of
+   * the timeline, exactly as it is on `CompositorFrames` — an export of a document with
+   * no `text` span needs none, and a caller that has one passes the object rather than
+   * a raster the loop would upload a second copy of.
+   *
+   * **The export window does not build one yet**, and that is unchanged by this: no
+   * surface authors an annotation today (they are `loom-p15`'s), so the first thing
+   * that does is what has to hand `ExportSession`'s window the preview's atlas. What
+   * this closes is the seam, and `test/phase11-golden.test.ts` is what now holds both
+   * paths to drawing glyphs from one raster.
+   */
+  textAtlas?: TextAtlas | null;
+  /**
    * Called once per composited frame, with the picture in the render target and on
    * the canvas. The caller encodes; awaiting it is where §5.3's backpressure lives.
    */
@@ -215,7 +237,7 @@ export class ExportRenderLoop {
   readonly #signal: AbortSignal | undefined;
 
   /** Preallocated, exactly as the preview loop's is. §4.3's first rule. */
-  readonly #frames: CompositorFrames = { screen: null };
+  readonly #frames: CompositorFrames = { screen: null, textAtlas: null };
 
   #report: ExportRenderReport = { framesRendered: 0, drawnFrames: 0, heldFrames: 0, waits: 0 };
   /** Output frame the context was first seen lost at. Sticky; see `#assertContextAlive`. */
@@ -230,6 +252,7 @@ export class ExportRenderLoop {
     this.#keyEvery = Math.max(1, Math.round(options.fps * (options.keyframeIntervalSec ?? 2)));
     this.#lookaheadSec = options.lookaheadSec ?? 0.5;
     this.#retainBehindSec = options.retainBehindSec ?? 0.5;
+    this.#frames.textAtlas = options.textAtlas ?? null;
     this.#onFrame = options.onFrame;
     this.#onProgress = options.onProgress ?? ((): void => undefined);
     this.#signal = options.signal;

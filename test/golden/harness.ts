@@ -7,19 +7,28 @@
  * > and the export path at the same output size and asserts a per-pixel max delta
  * > of 0.
  *
- * **The preview path here is the shipping `PreviewLoop`** and the export path is a
- * fixed-timestamp loop of the kind phase 8 owns — `resolve` then `Compositor.render`
- * then `readPixels`, with no preview machinery in it. Both drive the *same*
- * `Compositor` instance and the same `CompiledTimeline`, which is the arrangement
- * §4.5 is about: they cannot disagree because there is one `resolve()` and one
- * `render()`.
+ * **The preview path here is the shipping `PreviewLoop`, and the export path is the
+ * shipping `ExportRenderLoop`.** Both drive the *same* `Compositor` instance, the same
+ * `CompiledTimeline` and the same source, which is the arrangement §4.5 is about: they
+ * cannot disagree because there is one `resolve()` and one `render()`.
  *
- * Nothing in this file reaches into the export pipeline. Phase 8 owns that, and has
- * landed it: the seam is `ExportRenderLoop.renderAt`, so the loop in
- * {@link exportFrame} is the two lines that fold into one call into it. That fold is
- * deliberately still owed rather than done here — `test/phase8-gate.test.ts` is the
- * *other* §4.5 gate and neither subsumes the other, so neither set of assertions may
- * be dropped when it happens. AGENTS.md § Sharp edges says which axis each covers.
+ * ## The fold
+ *
+ * This file used to carry a documented two-line stand-in for the export path —
+ * `resolve` then `render` then `readPixels` — because phase 8 owned that pipeline and
+ * was still being built, so phase 11 could not call into it. Phase 8 landed
+ * `ExportRenderLoop.renderAt(t)`, which is exactly the seam that stand-in was written
+ * against: a timeline **instant** rather than a frame number, so §4.5's 24 fixed
+ * timestamps do not have to be rounded onto a CFR grid. {@link exportFrame} is now one
+ * call into it, and **every assertion in `test/phase11-golden.test.ts` is unchanged** —
+ * they now hold over the path the product ships rather than over a stand-in.
+ *
+ * `test/phase8-gate.test.ts` is the *other* §4.5 gate and neither subsumes the other:
+ * phase 8 exercises a real decoded VFR source through two contexts and two frame rings
+ * and decodes the finished MP4 back out; this one proves annotations are non-vacuous
+ * over one painted frame. AGENTS.md § Sharp edges says which axis each covers, and
+ * `phase11-golden-reaches-the-export-loop` in `npm run verify:mutation` is what keeps
+ * this one on the real path.
  *
  * ## Why equality is only a third of the gate
  *
@@ -53,9 +62,11 @@ import {
   type FrameScheduler,
   type PreviewSource,
 } from '../../apps/renderer/src/preview/index.ts';
+import { ExportRenderLoop } from '../../apps/renderer/src/export/render-loop.ts';
 import {
   BOXES,
   DURATION_SEC,
+  OUTPUT_FPS,
   expectedBoxPx,
   fixtureDocument,
   MASK_FILL,
@@ -250,9 +261,51 @@ async function run(): Promise<GoldenReport> {
   const exportBuffer = new Uint8Array(bytes);
   const plainBuffer = new Uint8Array(bytes);
 
-  /** The export path: fixed timestamp, `resolve`, `render`, read the framebuffer. */
-  function exportFrame(timeline: CompiledTimeline, t: number, into: Uint8Array): Uint8Array {
-    compositor.render(frames, resolve(timeline, t));
+  /**
+   * The export path: phase 8's shipping {@link ExportRenderLoop}, one per timeline.
+   *
+   * One loop per `CompiledTimeline` because that is what the class takes — an export
+   * job renders one document — and the gate renders two: annotations on, and the same
+   * document with the annotation tracks disabled. They share the compositor, the
+   * source and the atlas object, so the only difference between them is the document,
+   * which is the difference the "annotations changed the picture" checks read.
+   *
+   * The atlas is the **same object** the preview loop was handed above. That identity
+   * is the whole of "glyphs cannot differ between the two paths", and until this fold
+   * `ExportRenderLoop` had no way to be given one — see its `textAtlas` option.
+   */
+  const exportLoops = new Map<CompiledTimeline, ExportRenderLoop>();
+  function exportLoopFor(timeline: CompiledTimeline): ExportRenderLoop {
+    const existing = exportLoops.get(timeline);
+    if (existing !== undefined) return existing;
+    const created = new ExportRenderLoop({
+      compositor,
+      screen: source,
+      timeline,
+      fps: OUTPUT_FPS,
+      textAtlas: atlas,
+      // The gate reads the render target rather than encoding, so nothing is handed
+      // on. `renderAt` does not call this; it is here because the option is required.
+      onFrame: () => undefined,
+    });
+    exportLoops.set(timeline, created);
+    return created;
+  }
+
+  /**
+   * One composited export frame at a timeline instant, read out of the render target.
+   *
+   * `renderAt` leaves the picture in the render target and on the canvas and returns;
+   * the readback is the gate's, because §5.2's export has no readback in it — the
+   * encoder is handed the canvas. Reading the *render target* is what makes this
+   * comparable to `readCanvas` below in the same orientation and the same encoding.
+   */
+  async function exportFrame(
+    timeline: CompiledTimeline,
+    t: number,
+    into: Uint8Array,
+  ): Promise<Uint8Array> {
+    await exportLoopFor(timeline).renderAt(t);
     return compositor.readPixels(into);
   }
 
@@ -268,12 +321,12 @@ async function run(): Promise<GoldenReport> {
     const state = resolve(withAnnotations, t);
     const zoom = { amount: state.zoom.amount, center: [...state.zoom.center] as [number, number] };
 
-    exportFrame(withAnnotations, t, exportBuffer);
+    await exportFrame(withAnnotations, t, exportBuffer);
     const annotated = exportBuffer.slice();
     const preview = previewFrame(t);
     const delta = maxDelta(annotated, preview);
 
-    exportFrame(without, t, plainBuffer);
+    await exportFrame(without, t, plainBuffer);
 
     const parkedActive = t >= PARKED_RANGE[0] && t <= PARKED_RANGE[1];
     const expected: { x0: number; y0: number; x1: number; y1: number }[] = [];
@@ -365,6 +418,16 @@ async function run(): Promise<GoldenReport> {
     });
   }
 
+  // The annotated export loop's own bookkeeping, which is the report's evidence that
+  // the export path here *is* `ExportRenderLoop` rather than something shaped like it:
+  // a stand-in composites the same pixels and counts nothing.
+  const exportLoop = { ...exportLoopFor(withAnnotations).report };
+  note(
+    `export loop: ${String(exportLoop.framesRendered)} frame(s) rendered, ` +
+      `${String(exportLoop.drawnFrames)} drawn, ${String(exportLoop.heldFrames)} held, ` +
+      `${String(exportLoop.waits)} wait(s)`,
+  );
+
   const controls = runControls(gl, compositor, frames, atlas, exportBuffer);
 
   frame.close();
@@ -380,6 +443,7 @@ async function run(): Promise<GoldenReport> {
     outputSize: [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
     sourceSize: [SOURCE_SIZE[0], SOURCE_SIZE[1]],
     timestamps,
+    exportLoop,
     controls,
     privacyFallbacks: compositor.annotations.privacyFallbacks,
     textTruncations: compositor.annotations.textTruncations,
@@ -606,6 +670,7 @@ void (async () => {
       outputSize: [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
       sourceSize: [SOURCE_SIZE[0], SOURCE_SIZE[1]],
       timestamps: [],
+      exportLoop: { framesRendered: 0, drawnFrames: 0, heldFrames: 0, waits: 0 },
       controls: [],
       privacyFallbacks: 0,
       textTruncations: 0,

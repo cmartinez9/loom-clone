@@ -82,6 +82,26 @@ export interface TimestampReport {
   revealProgress: number;
 }
 
+/**
+ * `ExportRenderLoop`'s own bookkeeping over the 24 timestamps, verbatim.
+ *
+ * The report carries it for one reason: it is the only thing in here that a *stand-in*
+ * for the export path could not produce. Every pixel reading below is equally true of
+ * two lines that call `resolve` and `render` directly — that is what made the stand-in
+ * viable while phase 8 was being built — so "the export path is the shipping loop"
+ * needs a reading of the loop itself, not of the frames it left behind.
+ */
+export interface ExportLoopReport {
+  /** Output frames the loop composited. One per §4.5 timestamp. */
+  framesRendered: number;
+  /** Of those, composited from a source frame rather than held. */
+  drawnFrames: number;
+  /** Frames where the *index* had no picture, so the previous composite stood. */
+  heldFrames: number;
+  /** Times the loop had to await a decode that was not ready. */
+  waits: number;
+}
+
 /** A control: something that must be true only because the check can see it fail. */
 export interface Control {
   name: string;
@@ -102,6 +122,8 @@ export interface GoldenReport {
   outputSize: [number, number];
   sourceSize: [number, number];
   timestamps: TimestampReport[];
+  /** The export path's own account of what it did. See {@link ExportLoopReport}. */
+  exportLoop: ExportLoopReport;
   controls: Control[];
   /** Regions the compositor redacted solid because it could not blur them. */
   privacyFallbacks: number;

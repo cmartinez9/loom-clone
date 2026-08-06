@@ -16,12 +16,19 @@
  *
  * ## What is real here
  *
- * The preview path is `apps/renderer`'s `PreviewLoop`, unmodified. The export path
- * is `resolve` → `Compositor.render` → `Compositor.readPixels` at a fixed timestamp —
- * the loop phase 8 owns, written out in two lines rather than imported, **because
- * phase 8 is being built concurrently and owns that pipeline**. Nothing in this gate
- * or its harness touches it. When it lands, those two lines become a call into it and
- * every assertion below stays exactly where it is.
+ * The preview path is `apps/renderer`'s `PreviewLoop`, unmodified. The export path is
+ * `apps/renderer`'s `ExportRenderLoop`, unmodified — `renderAt(t)`, the seam phase 8
+ * built for exactly this, since §4.5's timestamps are instants rather than frame
+ * numbers.
+ *
+ * It was two lines written out rather than imported while phase 8 was being built
+ * concurrently and owned that pipeline. That fold has happened and **every assertion
+ * below stayed exactly where it was**: they were always written against this seam, so
+ * what changed is only that they now hold over the path the product ships. One check
+ * was *added* — `drives §4.5's export path through the shipping ExportRenderLoop` —
+ * because every other reading in this file is a reading of pixels, and a stand-in
+ * produces the same pixels; that is what made the stand-in viable in the first place
+ * and is what would make a silent slide back to one invisible.
  *
  * ## Why "max delta 0" is asserted and is not the gate
  *
@@ -245,6 +252,27 @@ describe('phase 11 gate: preview and export are pixel-identical with annotations
           `preview and export disagree at t=${frame.t.toFixed(3)}s by ${String(frame.maxDelta)}`,
         ).toBe(0);
       }
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'drives §4.5’s export path through the shipping ExportRenderLoop',
+    async () => {
+      // Not a pixel reading, and that is the point of it. Everything else in this
+      // file is equally true of a two-line stand-in that calls `resolve` and
+      // `render` — which is exactly what this gate carried while phase 8 was being
+      // built — so the only way to say "the export path is the shipping loop" is to
+      // read the loop's own bookkeeping, which a stand-in does not have.
+      const { report } = await gate();
+      expect(
+        report.exportLoop.framesRendered,
+        'the export loop composited nothing, so the export path is not going through it',
+      ).toBe(TIMESTAMP_COUNT);
+      // And it drew from the source at every one of them: a loop that held would be
+      // comparing the preview against a picture it did not composite for that instant.
+      expect(report.exportLoop.drawnFrames).toBe(TIMESTAMP_COUNT);
+      expect(report.exportLoop.heldFrames).toBe(0);
     },
     TIMEOUT_MS,
   );
