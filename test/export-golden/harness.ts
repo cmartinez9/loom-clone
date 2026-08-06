@@ -178,20 +178,43 @@ const COVERAGE: Pick<CoverageReport, 'exercised' | 'notExercised'> = {
 };
 
 /**
+ * The refusals this probe is looking for, verbatim from `Compositor.render`.
+ *
+ * Matched rather than "something threw", because `render` calls `#assertLive()`
+ * *before* the webcam and cursor checks: a disposed or lost context throws too, and
+ * counting that as a refusal would have the tripwire report "the bubble and cursor
+ * passes are still absent" for a reason that has nothing to do with the passes —
+ * exactly the vacuous-pass defect the tripwire exists to prevent, one level up.
+ */
+const WEBCAM_REFUSAL = /no webcam pass yet/;
+const CURSOR_REFUSAL = /cursor compositing lands/;
+
+/**
  * Ask the real compositor whether the two unexercised rows are still unexercisable.
  *
  * A comment saying "the bubble has no pass yet" is true until it is not, and nothing
  * would notice. This asks: hand `Compositor.render` a `webcam` frame and a `cursor`
- * frame and require it to **refuse both**. While it does, `{ screen: null }` is the
- * whole of what either path can draw and {@link COVERAGE} is accurate. The first time
- * one of them is built, the refusal stops, this reports `false`, and the gate fails
- * until the coverage list is brought up to date.
+ * frame and require it to refuse both **with the refusal that names the missing
+ * pass**. While it does, `{ screen: null }` is the whole of what either path can draw
+ * and {@link COVERAGE} is accurate. The first time one of them is built, the refusal
+ * stops, this reports `false`, and the gate fails until the coverage list is brought
+ * up to date.
  *
- * Run on a path that is about to be disposed, with a one-pixel frame, and every
+ * Run on a **live** path, well before anything is disposed, and against a control:
+ * `render({ screen: null })` is the frame shape both shipping loops pass and it has
+ * to come back without throwing, which is what proves the two probes below reached
+ * the checks they are asking about rather than dying on the way in. Every
  * `VideoFrame` it makes is closed — §10.2 applies to the instrument too.
  */
 async function probeCoverage(path: Path): Promise<CoverageReport> {
+  checkContext(path.gl, 'the §4.5 coverage probe');
+  const state = identityState(0);
+  // The control. A throw here is a broken probe, not a finding about the passes, and
+  // it stops the run rather than being reported as one.
+  path.compositor.render({ screen: null }, state);
+
   const refuses = async (
+    expected: RegExp,
     build: () => Promise<() => void>,
   ): Promise<{ refused: boolean; detail: string }> => {
     const draw = await build();
@@ -199,15 +222,15 @@ async function probeCoverage(path: Path): Promise<CoverageReport> {
       draw();
       return { refused: false, detail: 'render() accepted it' };
     } catch (error) {
-      return {
-        refused: true,
-        detail: error instanceof Error ? error.message : String(error),
-      };
+      const message = error instanceof Error ? error.message : String(error);
+      if (!expected.test(message)) {
+        return { refused: false, detail: `threw something else: ${message}` };
+      }
+      return { refused: true, detail: message };
     }
   };
 
-  const state = identityState(0);
-  const webcam = await refuses(async () => {
+  const webcam = await refuses(WEBCAM_REFUSAL, async () => {
     const canvas = new OffscreenCanvas(2, 2);
     const context = canvas.getContext('2d');
     if (context === null) throw new Error('no 2d context for the coverage probe');
@@ -224,7 +247,7 @@ async function probeCoverage(path: Path): Promise<CoverageReport> {
       }
     };
   });
-  const cursor = await refuses(() => {
+  const cursor = await refuses(CURSOR_REFUSAL, () => {
     const texture = path.gl.createTexture();
     if (texture === null) throw new Error('no texture for the coverage probe');
     return Promise.resolve(() => {
@@ -239,6 +262,9 @@ async function probeCoverage(path: Path): Promise<CoverageReport> {
     });
   });
 
+  // Both probes leave the render target untouched — `render` throws before it draws —
+  // so the path is exactly as this found it.
+  checkContext(path.gl, 'the §4.5 coverage probe');
   return {
     ...COVERAGE,
     tripwire: {
@@ -579,6 +605,13 @@ async function run(): Promise<GoldenReport> {
     `compared ${samples.length} timestamps; worst delta ${Math.max(...samples.map((s) => s.maxDelta))}`,
   );
 
+  // ---- what those 24 zeroes are, and are not, evidence about -------------------
+  // Taken here, on a live context in the middle of the run, rather than beside the
+  // dispose: the whole value of this probe is that a *refusal* is what it saw, and a
+  // context on its way out throws for a reason that says nothing about the passes.
+  const coverage = await probeCoverage(exporter);
+  log(`§4.5 coverage tripwire — ${coverage.tripwire.detail}`);
+
   // ---- the comparator's own control: the export path, twice ------------------
   let identityMaxDelta = 0;
   for (const index of indices.slice(0, 6)) {
@@ -640,11 +673,6 @@ async function run(): Promise<GoldenReport> {
   const liveBefore =
     preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
   log(`live frames before the export pass: ${liveBefore}`);
-  // The tripwire, taken on the control path just before it is let go: it is the only
-  // thing keeping the coverage list above honest, and it has to run against a real
-  // `Compositor` in a real context to mean anything.
-  const coverage = await probeCoverage(control);
-  log(`§4.5 coverage tripwire — ${coverage.tripwire.detail}`);
   disposePath(preview);
   disposePath(exporter);
   disposePath(control);

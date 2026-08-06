@@ -558,6 +558,23 @@ const MUTATIONS = [
     mustFail: [EXPORT_MOVIE, EXPORT_SESSION],
   },
   {
+    name: 'mvhd-counts-the-aac-priming',
+    breaks:
+      '`mvhd.duration` being what the file PRESENTS. AAC carries 2112 samples of ' +
+      'priming and the audio `elst` is what tells every player to skip exactly them, ' +
+      'so a `mvhd` written from the raw sample tally disagrees with its own audio ' +
+      '`tkhd` by 44 ms and describes a movie longer than anything plays. §7.5’s ' +
+      'fourth check compares that number against the *timeline* inside a 100 ms ' +
+      'budget, so the over-count spends nearly half of it on sound nobody hears — and ' +
+      'a job that fails verification has its finished file discarded, which makes ' +
+      'this a correct export deleted rather than a cosmetic header.',
+    file: 'packages/mux/src/faststart.ts',
+    find: '    return Math.max(video, this.#audioPresentedSec());',
+    replace:
+      '    return Math.max(video, this.#audio.durationUnits / (this.#options.audio?.sampleRate ?? 1));',
+    mustFail: [EXPORT_MOVIE, EXPORT_SESSION],
+  },
+  {
     name: 'export-chunk-offsets-off-by-one',
     breaks:
       'every chunk offset in the exported moov points at the sample data. Off by a ' +

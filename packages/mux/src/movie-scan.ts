@@ -42,6 +42,15 @@ export interface MovieTrack {
   /** `mdhd.duration`, media timescale units. */
   durationUnits: number;
   durationSec: number;
+  /**
+   * `tkhd.duration` in seconds — what this track **presents**, priming excluded.
+   *
+   * Shorter than {@link durationSec} on an audio track, by exactly the `elst`'s
+   * media time: the AAC priming is in the stream and is not sound. `mvhd.duration`
+   * is the longest of these across the tracks, so a file where they disagree is one
+   * whose header contradicts itself.
+   */
+  presentedSec: number;
   /** Four-character sample entry type: `avc1` or `mp4a`. */
   sampleEntry: string;
   /** The `avcC` (video) or AudioSpecificConfig (audio), verbatim. */
@@ -152,7 +161,7 @@ export function parseMovie(head: Uint8Array): Movie {
 
   const tracks = children(head, moov.at + moov.header.headerBytes, moov.at + moov.header.size)
     .filter((c) => c.header.type === 'trak')
-    .map((trak) => parseTrack(head, view, trak.at, trak.at + trak.header.size));
+    .map((trak) => parseTrack(head, view, trak.at, trak.at + trak.header.size, timescale));
 
   return {
     timescale,
@@ -162,12 +171,19 @@ export function parseMovie(head: Uint8Array): Movie {
   };
 }
 
-function parseTrack(head: Uint8Array, view: DataView, trakAt: number, trakTo: number): MovieTrack {
+function parseTrack(
+  head: Uint8Array,
+  view: DataView,
+  trakAt: number,
+  trakTo: number,
+  movieTimescale: number,
+): MovieTrack {
   const trakFrom = trakAt + (readBoxHeader(head, trakAt)?.headerBytes ?? 8);
   const tkhd = child(head, trakFrom, trakTo, 'tkhd');
   const tkhdAt = tkhd.at + tkhd.header.headerBytes;
   if (view.getUint8(tkhdAt) !== 0) throw new Mp4ParseError('only a version-0 tkhd is understood');
   const trackId = view.getUint32(tkhdAt + 12, false);
+  const presentedMovieUnits = view.getUint32(tkhdAt + 20, false);
 
   const edts = optionalChild(head, trakFrom, trakTo, 'edts');
   let editMediaTime = 0;
@@ -212,6 +228,7 @@ function parseTrack(head: Uint8Array, view: DataView, trakAt: number, trakTo: nu
     timescale,
     durationUnits,
     durationSec: timescale > 0 ? durationUnits / timescale : 0,
+    presentedSec: movieTimescale > 0 ? presentedMovieUnits / movieTimescale : 0,
     ...entry,
     editMediaTime,
     samples,

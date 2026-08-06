@@ -24,11 +24,13 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { FastStartWriter, movieHeaderLength, parseMovie, readBoxHeader } from '../src/index.ts';
 import { ExportMp4Writer, sweepExportScratch } from '../src/fs/index.ts';
-import { encodeAac, haveAfconvert, writeWav } from './helpers/aac.ts';
+import { afinfoDurationSec, encodeAac, haveAfconvert, writeWav } from './helpers/aac.ts';
 import { loadEncodedFixture } from './helpers/fixture.ts';
 import { withTempDir } from './helpers/temp.ts';
 
 const AVCONVERT = '/usr/bin/avconvert';
+/** §7.5's fourth check, verbatim — the budget this file's duration has to fit in. */
+const DURATION_TOLERANCE_SEC = 0.1;
 const fixture = loadEncodedFixture();
 
 /** `fps * 1000`, so every frame is exactly 1000 units. See `faststart.ts`. */
@@ -98,6 +100,18 @@ async function writeExport(
   }
   await writer.finalize();
   return outputPath;
+}
+
+/** Container duration from ffmpeg, when the machine happens to have it. Not required. */
+function ffprobeDurationSec(mediaPath: string): number | null {
+  const result = spawnSync(
+    'ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', mediaPath],
+    { encoding: 'utf8', timeout: 120_000 },
+  );
+  if (result.error !== undefined || result.status !== 0) return null;
+  const seconds = Number.parseFloat((result.stdout ?? '').trim());
+  return Number.isFinite(seconds) ? seconds : null;
 }
 
 function encodedAudio(dir: string, seconds: number): ReturnType<typeof encodeAac> {
@@ -210,6 +224,67 @@ describe('the export movie', () => {
         await assertSamplesTileTheMdat(path);
         const play = playsUnderAVFoundation(path, join(dir, 'remux.mov'));
         expect(play.ok, `avconvert refused the export: ${play.log}`).toBe(true);
+      });
+    },
+    180_000,
+  );
+
+  it.runIf(haveAfconvert())(
+    'gives mvhd the duration the file presents, not the one the priming pads it to',
+    async () => {
+      // §7.5's fourth check reads `mvhd.duration` back and compares it against the
+      // *timeline's* length. `mvhd` and the audio `tkhd` are two statements about one
+      // movie, and while `mvhd` counted the 2112 priming samples the audio `elst`
+      // trims, they disagreed by 44 ms — 44 ms of a 100 ms budget, spent on sound no
+      // player plays, on every export that has audio. That is not a cosmetic header:
+      // a job that fails verification has its finished file discarded, so an
+      // over-counted `mvhd` could delete a correct export.
+      //
+      // Two layers, and neither is the other. The first is the header's agreement
+      // with itself, and it is the one that sees this defect. The second is an
+      // authority that is not us, and it is what stops the first from being two of our
+      // own numbers agreeing about the wrong thing.
+      await withTempDir(async (dir) => {
+        const path = await writeExport(dir, { audio: true });
+        const bytes = await readFile(path);
+        const movie = parseMovie(bytes.subarray(0, movieHeaderLength(bytes)!));
+        const audio = movie.tracks[1]!;
+
+        // ---- 1: the header agrees with itself ------------------------------------
+        // Both read off the disk: `tkhd.duration` is what the audio track presents,
+        // `mvhd.duration` is the longest track. Audio is the longest here — the AAC
+        // blocks round up past the video and the encoder's priming and flush packets
+        // are in the stream — so the two have to be the same number, and a `mvhd`
+        // that still counted the priming sits 2112 samples above it.
+        expect(audio.presentedSec).toBeGreaterThan(movie.tracks[0]!.presentedSec);
+        expect(movie.durationSec).toBeCloseTo(audio.presentedSec, 3);
+        // ...and the presented length really is shorter than the media, by exactly
+        // the priming the `elst` names. Without this the assertion above would pass on
+        // a file where nothing was trimmed anywhere.
+        expect(audio.durationSec - audio.presentedSec).toBeCloseTo(2112 / audio.sampleRate, 3);
+
+        // ---- 2: a judge that is not us -------------------------------------------
+        // AudioToolbox reading the finished file, compared against the TIMELINE's own
+        // length rather than against any number our writer produced. `afinfo` derives
+        // its answer from the audio track and its `elst` rather than from `mvhd` —
+        // measured: it reports the same 10.004s whether `mvhd` is trimmed or not — so
+        // this is not a second look at the number above. It is the question layer 1
+        // cannot ask: is the *sound in the file* as long as the edit asked for.
+        const timelineSec = fixture.frames.length / fixture.fps;
+        const judged = afinfoDurationSec(path);
+        expect(judged.seconds, `afinfo could not read the export:\n${judged.log}`).not.toBeNull();
+        expect(
+          Math.abs((judged.seconds ?? 0) - timelineSec),
+          `afinfo says ${String(judged.seconds)}s where the timeline is ${timelineSec}s\n${judged.log}`,
+        ).toBeLessThanOrEqual(DURATION_TOLERANCE_SEC);
+
+        // And ffmpeg too, where the machine happens to have it. Additional, never
+        // required — it reads the container's own duration, so it sees `mvhd` where
+        // `afinfo` sees the track.
+        const probed = ffprobeDurationSec(path);
+        if (probed !== null) {
+          expect(Math.abs(probed - timelineSec)).toBeLessThanOrEqual(DURATION_TOLERANCE_SEC);
+        }
       });
     },
     180_000,

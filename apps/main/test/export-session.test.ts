@@ -64,6 +64,8 @@ const FIXTURE_SEC = fixture.frames.length / fixture.fps;
 const AUDIO_SPECIFIC_CONFIG = new Uint8Array([0x11, 0x90]);
 const AUDIO_RATE = 48_000;
 const AAC_FRAME = 1024;
+/** What AAC-LC puts in front of the sound, and what the `elst` trims. */
+const AAC_PRIMING = 2112;
 
 /**
  * A `BrowserWindow` reduced to what `ExportSession` touches, plus a hook to see what
@@ -563,7 +565,13 @@ describe('ExportSession', () => {
     // `passes.audio` was never true.
     const durationSec = fixture.frames.length / fixture.fps;
     await seedRecording(recordingDoc(micTrack(durationSec)));
-    const audioFrames = Math.ceil((durationSec * AUDIO_RATE) / AAC_FRAME);
+    // `runAudioPass` feeds `ceil(D * rate / 1024)` blocks and the encoder emits
+    // `ceil(2112 / 1024) = 3` more for its own priming and flush — so a real audio
+    // pass produces this many chunks, not the block count. Modelling the block count
+    // alone was the single value with the most headroom against §7.5's duration
+    // check, which is the opposite of what a test of that check should feed it.
+    const audioFrames =
+      Math.ceil((durationSec * AUDIO_RATE) / AAC_FRAME) + Math.ceil(AAC_PRIMING / AAC_FRAME);
 
     answerVerification();
     let passes: { audio: boolean; video: boolean } | null = null;
@@ -592,6 +600,14 @@ describe('ExportSession', () => {
     const audio = movie.tracks.find((track) => track.handler === 'soun');
     expect(video?.samples).toHaveLength(fixture.frames.length);
     expect(audio?.samples).toHaveLength(audioFrames);
+
+    // §7.5's fourth check ran against this file and passed, so the margin is a
+    // measurement rather than an assumption. `mvhd` is the longest track *presented*,
+    // which here is the audio: the AAC blocks round up past the video and the priming
+    // is subtracted. A `mvhd` that counted the priming would spend 44 ms of the 100 ms
+    // budget on sound no player plays.
+    expect(movie.durationSec).toBeCloseTo((audioFrames * AAC_FRAME - AAC_PRIMING) / AUDIO_RATE, 3);
+    expect(Math.abs(movie.durationSec - durationSec)).toBeLessThan(0.1);
 
     // In the order they were produced, which is what "held, in arrival order" means:
     // each chunk's payload is stamped with its own index, so a buffer flushed

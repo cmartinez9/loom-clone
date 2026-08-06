@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, the generators,
                           # annotations, the drawing overlay and the event logs
-                          # 79 ways; each must fail a gate
+                          # 80 ways; each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -697,7 +697,18 @@ was not a control.
   while libavformat does not — 44 ms apart, twice the sync budget. The writer states
   the trim in an `elst` edit list so both agree; a reader that pulls raw chunks out of
   a part instead of demuxing it has to apply `parseAudioInitSegment().encoderDelaySamples`
-  itself.
+  itself. **In a finished export, `mvhd.duration` and the audio `tkhd.duration` are two
+  statements about the same trim and must agree**: both come from
+  `FastStartWriter`'s `#audioPresentedSec()`, which is the sample tally _minus_ the
+  priming. A `mvhd` written from the raw tally describes a movie 44 ms longer than
+  anything plays, and §7.5's fourth check compares that number against the timeline
+  inside a 100 ms budget — so it was spending nearly half the budget on sound nobody
+  hears, and a job that fails verification has its finished file discarded. Pinned two
+  ways in `packages/mux/test/export-movie.test.ts`: the header against itself
+  (`movie.durationSec` vs `MovieTrack.presentedSec`, both read off the disk) and
+  `/usr/bin/afinfo` against the **timeline** — AudioToolbox answers from the audio
+  track and its `elst` rather than from `mvhd`, so it is a genuinely separate reading
+  rather than a second look at ours.
 - **A track's in-flight state is registered before the first `await`, not after.**
   Opening a part is two awaits long and frames keep arriving across them — that is
   what `MAX_HELD_CHUNKS` is for. If the announcement path and the chunk path can each
@@ -1148,7 +1159,11 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   so both paths draw nothing and agreeing about nothing is not evidence. The split is
   `COVERAGE` in `test/export-golden/harness.ts`, printed on every run including a
   passing one, and it is kept honest by a **tripwire**: `probeCoverage` hands the real
-  compositor a `webcam` frame and a `cursor` frame and requires it to refuse both.
+  compositor a `webcam` frame and a `cursor` frame and requires it to refuse both —
+  **with the refusal that names the missing pass**, not merely with a throw, because
+  `render` calls `#assertLive()` first and a dead context would otherwise report the
+  passes absent for a reason that has nothing to do with them. It runs mid-run on a
+  live context, against a `render({ screen: null })` control that must not throw.
   Building either pass makes the gate go red, in the same change that makes the
   coverage list wrong. Do not "fix" that by deleting the assertion; extend the gate to
   perturb the row instead.

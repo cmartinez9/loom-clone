@@ -23,6 +23,8 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, openSync, readFileSync, readSync, writeSync } from 'node:fs';
 
 export const AFCONVERT = '/usr/bin/afconvert';
+/** AudioToolbox's own reader. Ships with macOS, like `afconvert` and `avconvert`. */
+export const AFINFO = '/usr/bin/afinfo';
 
 /** One encoded AAC frame, as `EncodedAudioChunk` would carry it. */
 export interface AacFrame {
@@ -162,6 +164,25 @@ export function readAdts(path: string): EncodedAac {
     sampleRate: ADTS_RATES[frequencyIndex] ?? 48000,
     channels: channelConfig,
   };
+}
+
+/**
+ * How long AudioToolbox thinks a file carrying audio is.
+ *
+ * A judge that is not us, on a question our own writer is the only other answer to.
+ * `afinfo` reports the **presented** length — it applies the `elst` and the priming
+ * the stream declares — so it is the one reading that can say whether a movie's
+ * header describes the sound a player would actually get.
+ *
+ * `null` when it could not be read, so a caller can say "the judge declined" rather
+ * than silently pass.
+ */
+export function afinfoDurationSec(path: string): { seconds: number | null; log: string } {
+  const result = spawnSync(AFINFO, [path], { encoding: 'utf8', timeout: 120_000 });
+  const log = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
+  const match = /estimated duration:\s*([0-9]+(?:\.[0-9]+)?)\s*sec/.exec(log);
+  const seconds = match === null ? null : Number.parseFloat(match[1] ?? '');
+  return { seconds: seconds !== null && Number.isFinite(seconds) ? seconds : null, log };
 }
 
 /** Decode an MP4/M4A back to PCM with AVFoundation. */

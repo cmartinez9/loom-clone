@@ -306,14 +306,46 @@ export class FastStartWriter {
     };
   }
 
-  /** Longest track, in seconds. */
+  /**
+   * Samples of encoder priming the audio stream carries.
+   *
+   * One reading, used by `mvhd`, by the audio `tkhd` and by the `elst`, because all
+   * three are statements about the same trim and a file where they disagree is a file
+   * whose own header contradicts itself.
+   */
+  get #audioDelaySamples(): number {
+    return Math.max(0, Math.round(this.#options.audio?.encoderDelaySamples ?? 0));
+  }
+
+  /**
+   * What the audio track **presents**, in seconds — the priming removed.
+   *
+   * Not `durationUnits / sampleRate`. AAC carries 2112 samples of priming in the
+   * stream (see `AAC_ENCODER_DELAY_SAMPLES`) and the `elst` two functions down is
+   * what tells a player to skip exactly them, so the media is 44 ms longer than the
+   * sound. A duration that counted the priming would describe a file 44 ms longer
+   * than anything plays.
+   */
+  #audioPresentedSec(): number {
+    const audio = this.#options.audio;
+    if (audio === undefined || audio.sampleRate <= 0) return 0;
+    return Math.max(0, (this.#audio.durationUnits - this.#audioDelaySamples) / audio.sampleRate);
+  }
+
+  /**
+   * Longest track, in seconds — as **presented**, which is what `mvhd.duration` means.
+   *
+   * The audio term is {@link #audioPresentedSec} rather than the raw sample tally, and
+   * that is load-bearing in two directions. `mvhd` and the audio `tkhd` are two
+   * statements about one movie and a reader that believed one over the other would
+   * place the tracks differently; and §7.5's fourth check compares this against the
+   * *timeline's* duration, so a `mvhd` inflated by the priming spends 44 ms of a
+   * 100 ms budget on a difference that is not in the picture. Do not "fix" one of
+   * these back to the untrimmed number without the other.
+   */
   #durationSec(): number {
     const video = this.#video.durationUnits / this.#options.video.timescale;
-    const audio =
-      this.#options.audio === undefined
-        ? 0
-        : this.#audio.durationUnits / this.#options.audio.sampleRate;
-    return Math.max(video, audio);
+    return Math.max(video, this.#audioPresentedSec());
   }
 
   /**
@@ -389,10 +421,8 @@ export class FastStartWriter {
         audioSpecificConfig: audio.audioSpecificConfig,
         ...(audio.bitrate === undefined ? {} : { bitrate: audio.bitrate }),
       };
-      const delaySamples = Math.max(0, Math.round(audio.encoderDelaySamples ?? 0));
-      const audioMovieUnits = Math.round(
-        ((this.#audio.durationUnits - delaySamples) / audio.sampleRate) * MOVIE_TIMESCALE,
-      );
+      const delaySamples = this.#audioDelaySamples;
+      const audioMovieUnits = Math.round(this.#audioPresentedSec() * MOVIE_TIMESCALE);
       traks.push(
         trackBox({
           trackId: AUDIO_TRACK_ID,
