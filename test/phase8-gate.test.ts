@@ -150,7 +150,21 @@ function electronBinary(): string {
   return require('electron') as string;
 }
 
-async function runGate(): Promise<{ report: GoldenReport; exitCode: number | null }> {
+/**
+ * How much of Electron's own output a failing run prints.
+ *
+ * Chromium says why it took the GPU process down — the harness only ever sees the
+ * lights going out — so a run that reports `contextLost` with nothing about what died
+ * is a round trip wasted. Printed on a bad run only, for the reason
+ * `test/phase6-gate.test.ts` prints its log on one.
+ */
+const ELECTRON_TAIL_CHARS = 4000;
+
+async function runGate(): Promise<{
+  report: GoldenReport;
+  exitCode: number | null;
+  output: string;
+}> {
   const dir = await mkdtemp(join(tmpdir(), 'loom-golden-'));
   try {
     const harnessDir = join(dir, 'harness');
@@ -195,11 +209,11 @@ async function runGate(): Promise<{ report: GoldenReport; exitCode: number | nul
     });
 
     try {
-      return { report: JSON.parse(await readFile(out, 'utf8')) as GoldenReport, exitCode };
+      return { report: JSON.parse(await readFile(out, 'utf8')) as GoldenReport, exitCode, output };
     } catch {
       throw new Error(
         `the golden gate produced no report (electron exited ${String(exitCode)}).\n` +
-          `--- electron output ---\n${output.slice(-4000)}`,
+          `--- electron output ---\n${output.slice(-ELECTRON_TAIL_CHARS)}`,
       );
     }
   } finally {
@@ -217,7 +231,11 @@ async function runGate(): Promise<{ report: GoldenReport; exitCode: number | nul
  * returned either way, so the assertions below judge a real run, including one whose
  * context was lost twice — which they fail on, at the first line.
  */
-async function runGateUntilCompared(): Promise<{ report: GoldenReport; exitCode: number | null }> {
+async function runGateUntilCompared(): Promise<{
+  report: GoldenReport;
+  exitCode: number | null;
+  output: string;
+}> {
   let result = await runGate();
   for (
     let attempt = 2;
@@ -278,8 +296,10 @@ describe('phase 8 gate: preview and export are pixel-identical', () => {
   it(
     'agrees at 24 timestamps, and can see it when they disagree',
     async () => {
-      const { report, exitCode } = await runGateUntilCompared();
-      const detail = describeRun(report);
+      const { report, exitCode, output } = await runGateUntilCompared();
+      const detail =
+        describeRun(report) +
+        (report.ok ? '' : `electron output\n${output.slice(-ELECTRON_TAIL_CHARS)}\n`);
       // Printed unconditionally: a gate whose numbers appear only on a failure tells
       // you nothing about the margin you had while it passed.
       console.log(detail);

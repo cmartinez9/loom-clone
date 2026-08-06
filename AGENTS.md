@@ -801,7 +801,14 @@ was not a control.
   as phase 6's is), and its harness closes the preview, export and control paths
   _before_ the end-to-end pass rather than after it: three readers holding twenty
   1080p frames each, live under a fourth context and a `VideoEncoder`, is the peak the
-  run reaches and is where CI's GPU process went.
+  run reaches and is where CI's GPU process went. **Closing them is not releasing
+  them** — `Compositor.dispose()` deletes the program, the textures and the render
+  target, and the _context_ lives on until the canvas is collected, which is why the
+  GPU still had four to lose (one `CONTEXT_LOST_WEBGL` each) when it exited at that
+  moment on two consecutive runs. `disposePath` hands each one back with
+  `WEBGL_lose_context`, so the run encodes with the single context the shipping export
+  window has; a release the harness asked for is kept out of `contextLost` by name
+  rather than by inference.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the

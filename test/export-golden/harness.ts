@@ -123,6 +123,15 @@ function checkContext(gl: WebGL2RenderingContext, where: string): void {
   throw new Error(`the WebGL context was lost (noticed at ${lost.where}); nothing can be compared`);
 }
 
+/**
+ * The canvases {@link disposePath} handed back on purpose.
+ *
+ * A context this harness released is not a context the driver took away, and the two
+ * arrive as the same `webglcontextlost` event. Recorded before the release rather than
+ * inferred afterwards, so `contextLost` keeps meaning exactly one thing.
+ */
+const released = new WeakSet<OffscreenCanvas>();
+
 interface Path {
   canvas: OffscreenCanvas;
   gl: WebGL2RenderingContext;
@@ -154,6 +163,7 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
   // knowing, and knowing before the next thing reads. Same listener, same reason, as
   // `test/gate/harness.ts`.
   canvas.addEventListener('webglcontextlost', () => {
+    if (released.has(canvas)) return;
     lost.where ??= 'the webglcontextlost event';
   });
   const reader = await openVideoTrack({
@@ -162,9 +172,30 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
   return { canvas, gl, compositor: new Compositor(gl, OUTPUT_SIZE), reader };
 }
 
+/**
+ * Let a finished path go: its decoded frames, its GL objects, and **the context**.
+ *
+ * The last one is the one that matters here. `Compositor.dispose` deletes the program,
+ * the textures and the render target, but the context itself lives until the canvas is
+ * collected — and a live context is one the driver is still holding, whatever this
+ * harness has stopped asking of it. The export pass below opens a context of its own
+ * and runs a `VideoEncoder` over it, and on CI's virtualised GPU that moment is where
+ * the GPU process exited: `abnormal-exit`, then four `CONTEXT_LOST_WEBGL` — one per
+ * context, which is how it was clear all four were still there. The shipping export
+ * window has exactly one context (`createExportCanvas`), so this run has one too by
+ * the time it encodes, rather than one plus three nobody has any use for.
+ *
+ * `WEBGL_lose_context` is the only way a page can hand a context back; it is not
+ * available to a caller that has anything left to read, which is why this is the
+ * *dispose* path and why `released` exists to keep it out of `contextLost`.
+ */
 function disposePath(path: Path): void {
   path.reader.close();
   path.compositor.dispose();
+  // Marked before the call, not after: the event is the driver's to schedule.
+  released.add(path.canvas);
+  const release = path.gl.getExtension('WEBGL_lose_context');
+  if (release !== null) release.loseContext();
 }
 
 /**
@@ -474,11 +505,12 @@ async function run(): Promise<GoldenReport> {
   }
 
   // ---- everything the comparison needed is read; let it go ---------------------
-  // Before the export pass, not after it. These three readers hold a ring of twenty
-  // 1920x1080 frames each, and on a host with no hardware decoder those are CPU-backed
-  // copies uploaded into three live contexts. The export pass then opens a fourth
-  // context and a `VideoEncoder` on top of that, which is the peak this run reaches
-  // and exactly where CI's GPU process exited. Nothing below reads these paths.
+  // Before the export pass, not after it, and the contexts with it — see
+  // `disposePath`. These three readers hold a ring of twenty 1920x1080 frames each,
+  // and on a host with no hardware decoder those are CPU-backed copies uploaded into
+  // three live contexts. The export pass then opens one of its own and runs a
+  // `VideoEncoder` over it, which is the peak this run reaches and exactly where CI's
+  // GPU process exited. Nothing below reads these paths.
   const liveBefore =
     preview.reader.liveFrames + exporter.reader.liveFrames + control.reader.liveFrames;
   log(`live frames before the export pass: ${liveBefore}`);
