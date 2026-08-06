@@ -112,7 +112,25 @@ function confine(root: string, pathname: string): string | null {
 }
 
 registerLoomScheme();
-app.commandLine.appendSwitch('force-gpu-mem-available-mb', '2048');
+// `--force-gpu-mem-available-mb` is deliberately **not** set here, and that is the one
+// switch this gate does not copy from `test/gate/main.ts`.
+//
+// It overrides Skia's GPU resource-cache budget in the GPU process, so `2048` tells
+// the driver it may hold two gigabytes of textures before purging any of them. Phase
+// 6's gate can make that claim: it uploads a frame and draws it, and its Skia
+// residency is a handful of surfaces. This one cannot. Every composited frame here
+// costs a YUV→RGB conversion of a software-decoded 1920x1080 source *and* a
+// `new VideoFrame(canvas)` for the encoder, so the run accumulates Skia resources for
+// the whole comparison and then asks for more, at rate, the instant the export pass
+// starts. On a GitHub macOS runner — "Apple Paravirtual device", far short of two
+// gigabytes — the budget is never reached, so nothing is ever purged, and the first
+// allocation the device genuinely cannot serve is fatal rather than a cache miss:
+// observed on three consecutive runs as `Failed to allocate texture` inside
+// `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error`,
+// always within a second of `export writer open`. Left unset, Chromium sizes the cache
+// from the machine it is actually on and purges under pressure, which costs this gate
+// nothing: it measures pixels, not time.
+//
 // Same reasons as the phase-6 gate: this run composites 4K-class frames and must not
 // have the GPU process taken away from it, or be descheduled mid-encode, on a shared
 // host. Nothing here is timed — but a lost context makes every pixel comparison a

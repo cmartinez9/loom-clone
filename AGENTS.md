@@ -809,6 +809,22 @@ was not a control.
   `WEBGL_lose_context`, so the run encodes with the single context the shipping export
   window has; a release the harness asked for is kept out of `contextLost` by name
   rather than by inference.
+- **Do not copy `--force-gpu-mem-available-mb` from the phase-6 gate into anything that
+  also encodes.** It overrides Skia's GPU resource-cache budget in the GPU process, so
+  phase 6's `2048` tells the driver it may hold two gigabytes of textures before
+  purging one. Phase 6 can afford the claim — it uploads a frame and draws it. The
+  phase-8 golden harness cannot: every composite there is a YUV→RGB conversion of a
+  software-decoded 1920x1080 source _plus_ a `new VideoFrame(canvas)` for the encoder,
+  so on a GitHub runner's "Apple Paravirtual device" the budget is never reached,
+  nothing is ever purged, and the first allocation the device genuinely cannot serve is
+  fatal rather than a cache miss. Three consecutive CI runs died the same way, always
+  within a second of `export writer open`: `Failed to allocate texture` inside
+  `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error`.
+  Two earlier readings of that crash — the four live contexts, then the three readers'
+  sixty 1080p frames — were both real and neither closed it; the switch was the cause.
+  `test/export-golden/main.ts` therefore leaves it unset and says so, and a gate that
+  measures pixels rather than time loses nothing by letting Chromium size the cache
+  from the machine it is on.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
@@ -918,9 +934,17 @@ was not a control.
   hosts. Both runs of d26016c overlapped for the whole of both gates and each reported
   one frame over budget — 21.3 ms and 123.6 ms against p99s of 3.5 ms and 6.2 ms. A
   branch is now covered by its `pull_request` run alone (`synchronize` fires on every
-  push, and it measures the merge result); `push` is kept for `main`. Before adding a
-  second macOS job that runs concurrently with `verify`, note that these three gates
-  cannot tell a busy host apart from the defect they exist to catch.
+  push, and it measures the merge result); `push` is kept for `main`. The last overlap
+  was inside one run: `ci.yml`'s own `mutation` job started at the same instant as
+  `verify` and spends its life launching Electron — the crash gate ten times, A/V sync,
+  the camera unplug, both golden gates — against the same shared pool of macOS hosts.
+  It now carries `needs: verify`. Measured on 2026-08-06: it entered
+  `npm run verify:mutation` 17 s before the phase-6 gate's window and the gate reported
+  one frame at 29.10 ms, against a p99 of 1.80 ms and a 2.20 ms worst frame on the run
+  before it, with the gate's own pure-arithmetic host control stretched from 8.50 ms to
+  11.40 ms in those same frames. **Never add a second macOS job that runs concurrently
+  with `verify`**: these three gates cannot tell a busy host apart from the defect they
+  exist to catch, and a job we start on purpose is a busy host we chose.
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
