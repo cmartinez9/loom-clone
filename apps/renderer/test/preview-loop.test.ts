@@ -121,6 +121,10 @@ function fakeVideoFrame(timestampUs: number): VideoFrame {
  * leaves, which is `Compositor.render`'s contract. `present` publishes whatever the
  * target holds at that moment. The test can therefore look at both what a caller
  * could publish and what one actually did.
+ *
+ * It models §4.3's **hold** too — a `null` screen frame returns without drawing and
+ * leaves the target alone — because a held frame ran no pass and must not be read as
+ * evidence that a document-level failure has gone away.
  */
 class TargetCompositor implements PreviewCompositor {
   /** What a `present()` would publish right now. */
@@ -135,11 +139,17 @@ class TargetCompositor implements PreviewCompositor {
   skipText = false;
   renders = 0;
   presents = 0;
+  /** Renders that held instead of drawing, because `frameAt` missed. */
+  holds = 0;
   readonly annotations = { textSpansWithoutAtlas: 0 };
 
   render(frames: CompositorFrames): void {
     this.renders += 1;
     this.handed = frames;
+    if (frames.screen === null) {
+      this.holds += 1;
+      return;
+    }
     this.target = 'unredacted-screen';
     if (this.skipText) this.annotations.textSpansWithoutAtlas += 1;
     if (this.refuse) {
@@ -441,7 +451,10 @@ describe('PreviewLoop', () => {
 });
 
 describe('PreviewLoop and the annotation surface’s two failure modes', () => {
-  function refusingLoop(compositor: TargetCompositor): {
+  function refusingLoop(
+    compositor: TargetCompositor,
+    source: StubSource = stubSource({ frameAt: () => fakeVideoFrame(0) }),
+  ): {
     loop: PreviewLoop;
     scheduler: ManualScheduler;
     onError: ReturnType<typeof vi.fn>;
@@ -450,7 +463,7 @@ describe('PreviewLoop and the annotation surface’s two failure modes', () => {
     const onError = vi.fn();
     const loop = new PreviewLoop({
       compositor,
-      screen: stubSource({ frameAt: () => fakeVideoFrame(0) }),
+      screen: source,
       durationSec: 10,
       scheduler,
       now: () => scheduler.nowMs,
@@ -530,6 +543,50 @@ describe('PreviewLoop and the annotation surface’s two failure modes', () => {
     expect(scheduler.pending).toBe(0);
     loop.start();
     expect(scheduler.pending).toBe(1);
+    loop.stop();
+  });
+
+  it('does not re-report a persistent failure because decode missed in between', () => {
+    // §4.3's hold returns without drawing, so a held frame ran no pass and says
+    // nothing about whether the document can still be redacted or lettered. Reading
+    // one as a clean frame clears both latches, and a seek's alternating misses —
+    // the common case, since `prime` is fire-and-forget — then turn a single broken
+    // document into a report every other frame, which is the spam the latch exists
+    // to prevent.
+    const compositor = new TargetCompositor();
+    compositor.refuse = true;
+    compositor.skipText = true;
+    let missing = true;
+    let flip = false;
+    const source = stubSource({
+      frameAt: () => {
+        if (!missing) return fakeVideoFrame(0);
+        flip = !flip;
+        return flip ? fakeVideoFrame(0) : null;
+      },
+    });
+    const { loop, scheduler, onError } = refusingLoop(compositor, source);
+
+    loop.start();
+    for (let i = 0; i < 40; i++) scheduler.tick();
+
+    expect(compositor.holds, 'the source never missed, so nothing was held').toBeGreaterThan(15);
+    const messages = () => onError.mock.calls.map((call) => (call[0] as Error).message);
+    expect(messages().filter((m) => m.includes('center'))).toHaveLength(1);
+    expect(messages().filter((m) => m.includes('atlas'))).toHaveLength(1);
+
+    // And a miss does not forget in the other direction either: once both conditions
+    // genuinely clear on a frame that drew, a later run is still reported.
+    missing = false;
+    compositor.refuse = false;
+    compositor.skipText = false;
+    for (let i = 0; i < 3; i++) scheduler.tick();
+    expect(messages()).toHaveLength(2);
+    compositor.refuse = true;
+    compositor.skipText = true;
+    scheduler.tick();
+    expect(messages().filter((m) => m.includes('center'))).toHaveLength(2);
+    expect(messages().filter((m) => m.includes('atlas'))).toHaveLength(2);
     loop.stop();
   });
 });

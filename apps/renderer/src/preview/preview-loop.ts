@@ -386,8 +386,13 @@ export class PreviewLoop {
       // frame alive (§10.2).
       this.#frames.screen = null;
     }
-    if (composited) this.#refusalReported = false;
-    this.#watchTextAtlas();
+    // A held frame is not a clean frame. §4.3's hold makes `render` return without
+    // drawing when `frameAt` missed, so it composited nothing and is evidence of
+    // neither the condition nor its absence — clearing a latch on one would let a
+    // seek's alternating misses re-report a persistent document error at frame rate,
+    // which is the spam the latch exists to prevent.
+    const drew = composited && frame !== null;
+    if (drew) this.#refusalReported = false;
 
     const elapsed = this.#now() - started;
     this.metrics.record(elapsed);
@@ -395,7 +400,11 @@ export class PreviewLoop {
     const live = this.#screen.liveFrames;
     if (live > this.#peakLiveFrames) this.#peakLiveFrames = live;
 
+    // Every callback that can reach the caller sits below the measurement, for the
+    // reason `#prime` states: a handler of theirs must not be charged to a frame the
+    // phase-6 gate judges on the single worst one, with no allowance.
     this.#watchStall(frame !== null, t, started);
+    this.#watchTextAtlas(drew);
 
     // Off the critical path, after the budget has been measured (§4.3).
     this.#prime();
@@ -409,7 +418,13 @@ export class PreviewLoop {
     });
   }
 
-  /** The first refused frame of a run. Cleared by the next frame that composites. */
+  /**
+   * The first refused frame of a run.
+   *
+   * Cleared by the next frame that actually draws. A §4.3 hold is not one: it leaves
+   * the previous composite in the target without running a pass over it, so it says
+   * nothing about whether the document can still be redacted.
+   */
   #report(thrown: unknown): void {
     if (this.#refusalReported) return;
     this.#refusalReported = true;
@@ -423,13 +438,18 @@ export class PreviewLoop {
    * failing is invisible and publishes a secret — but not silent either: a caption
    * the user believes is in their video and is not is exactly the bug report this
    * count exists to pre-empt.
+   *
+   * A rising count is evidence wherever it comes from — a frame that refused still
+   * skipped its text on the way to refusing — so `drew` gates only the *clear*. A
+   * §4.3 hold ran no pass, so it cannot raise the count and must not be read as the
+   * condition having gone away.
    */
-  #watchTextAtlas(): void {
+  #watchTextAtlas(drew: boolean): void {
     const count = this.#compositor.annotations?.textSpansWithoutAtlas ?? 0;
     const skipped = count > this.#textSpansWithoutAtlas;
     this.#textSpansWithoutAtlas = count;
     if (!skipped) {
-      this.#atlasReported = false;
+      if (drew) this.#atlasReported = false;
       return;
     }
     if (this.#atlasReported) return;

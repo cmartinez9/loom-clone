@@ -200,14 +200,16 @@ float sdArrow(vec2 p) {
   float halfHead = u_params.w * 0.5;
   vec2 neck = tip - dir * head;
 
-  float shaft = sdSegment(p, tail, neck) - u_params.x * 0.5;
   // A head with no width, or none along the shaft, is three collinear points, and
   // \`sdTriangle\`'s winding sign is then \`sign(0.0)\` — zero, which makes its distance
   // \`-0.0\` at *every* fragment and fills the arrow's whole quad at half alpha.
   // \`headWidth\`/\`headLength\` are clamped at 0 rather than refused (a decoration
   // fails leniently), so a document may legitimately carry either as zero: a
-  // degenerate head is no head, and the shaft is the whole arrow.
-  if (halfHead <= 0.0 || head <= 0.0) return shaft;
+  // degenerate head is no head, and the shaft is then the whole arrow — measured to
+  // \`tip\`, not to \`neck\`, so a plain line reaches the \`to\` the document specified
+  // instead of stopping a head-length short of it.
+  if (halfHead <= 0.0 || head <= 0.0) return sdSegment(p, tail, tip) - u_params.x * 0.5;
+  float shaft = sdSegment(p, tail, neck) - u_params.x * 0.5;
   float barb = sdTriangle(p, tip, neck + side * halfHead, neck - side * halfHead);
   return min(shaft, barb);
 }
