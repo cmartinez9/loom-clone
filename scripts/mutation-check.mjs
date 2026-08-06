@@ -1682,8 +1682,8 @@ export const MUTATIONS = [
       'fills to `ENOSPC`. A safety net that switches itself off is worse than none, ' +
       'because the user is told nothing and believes they are covered.',
     file: 'apps/main/src/recorder/disk-monitor.ts',
-    find: '    const answer = await Promise.race([read(), deadline]);',
-    replace: '    const answer = await read();',
+    find: '    const answer = await Promise.race([work(), deadline]);',
+    replace: '    const answer = await work();',
     mustFail: [PHASE13_DISK],
   },
   {
@@ -1698,6 +1698,35 @@ export const MUTATIONS = [
     file: 'apps/main/src/recorder/session.ts',
     find: '      return this.libraryRate ?? REFERENCE_RATE;',
     replace: '      return REFERENCE_RATE;',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'abandoned-disk-reads-pile-up-on-the-threadpool',
+    breaks:
+      'the capture spine, through the instrument that is supposed to protect it. A read ' +
+      'that missed its deadline is *abandoned* and not cancelled — nothing in Node can ' +
+      'cancel an `fs` request — so without the single-flight guard a stalled volume ' +
+      "parks one more request on libuv's four-thread pool every 2 s. `ProjectStore`'s " +
+      'media writes are on that pool, so `appendMediaChunk` ends up queued behind the ' +
+      "monitor's dead reads: §7.2's accessory slowing the recording it is watching.",
+    file: 'apps/main/src/recorder/disk-monitor.ts',
+    find: '    if (this.pending !== null) return this.pending;',
+    replace: '    this.pending = null;',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-library-walk-is-awaited-before-the-recording-starts',
+    breaks:
+      "the Record button, on exactly the volume §7.2's monitor exists for. The capacity " +
+      "estimate's measurement is `store.list()` — `readdir` and `stat` over every bundle " +
+      '— and those hang on a wedged volume just as `statfs` does. Awaited on the start ' +
+      'path it re-creates, one line above the deadline that closed it, a `start()` that ' +
+      'never returns: no recording, no message, and a user who believes they pressed ' +
+      'record. A library that cannot be measured may cost the provenance of a number ' +
+      'and nothing else.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '    void this.measureLibrary();',
+    replace: '    await this.measureLibrary();',
     mustFail: [PHASE13_DISK],
   },
 ];

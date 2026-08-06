@@ -40,6 +40,13 @@
  * no net at all because the banner never appears and the user believes they are
  * covered. Same hazard, and the same answer, as `ENCODE_STALL_TIMEOUT_MS` and
  * `ExportRenderLoop.STALL_TIMEOUT_MS`.
+ *
+ * **5. An abandoned read is not a retired one, so there is a second guard under the
+ * first.** A deadline lets the *poll* go; the `fs` request it was waiting on stays on
+ * libuv's threadpool, which `ProjectStore`'s writes share. {@link
+ * SingleFlightDiskRead} is what stops those piling up, and the two guards are
+ * deliberately at different levels: the poll's flag must keep clearing on every
+ * deadline, or point 4 is undone.
  */
 
 import {
@@ -73,27 +80,32 @@ export function diskReadDeadlineMs(intervalMs: number): number {
   return Math.max(1, Math.round(intervalMs * READ_DEADLINE_FRACTION));
 }
 
-/** What {@link readSpaceBeforeDeadline} resolves to when the read did not. */
-const TIMED_OUT = Symbol('the disk read passed its deadline');
+/** What {@link beforeDeadline} resolves to when the work did not. */
+const TIMED_OUT = Symbol('the work passed its deadline');
 
 /**
- * One read of the volume, bounded. `null` for a read that did not answer in time,
- * which is `classifyDisk`'s `unknown` — refusing nothing and stopping nothing.
+ * Any wait this feature makes against the filesystem, bounded. `null` for work that
+ * did not answer in time — and it **says so**, because the defect this closes was
+ * silent in both halves: nothing published and no line anywhere saying why, so an
+ * instrument that had stopped watching looked exactly like a volume with nothing to
+ * report.
  *
- * **Shared by the monitor and by the preflight, because it is the same hazard in two
- * places.** A `statfs` that never returns is unbounded on both paths: on the poll it
- * wedges the in-flight guard and silently disables §7.2's stop, and on
- * `RecorderSession.start` it wedges the Record button with no recording and no
- * message. One deadline, so neither can be fixed without the other.
+ * **One of these, because it is one hazard in three places.** A syscall against a
+ * wedged volume never returns, and every path here runs one: the monitor's poll,
+ * where it wedges the in-flight guard and silently disables §7.2's stop; the
+ * preflight in `RecorderSession.start`, where it wedges the Record button with no
+ * recording and no message; and the library walk behind the capacity estimate, which
+ * is `readdir` and `stat` rather than `statfs` and hangs in exactly the same way.
  *
- * **A rejection is not caught here.** The caller logs it — the two callers already
- * have that line, and moving it in here would make "the volume errored" and "the
- * volume went quiet" one message when they are different things to read in a log.
+ * **A rejection is not caught here.** The callers log it — they already have that
+ * line, and folding it in would make "the volume errored" and "the volume went
+ * quiet" one message when they are different things to read in a log.
  */
-export async function readSpaceBeforeDeadline(
-  read: DiskReader,
+export async function beforeDeadline<T>(
+  work: () => Promise<T>,
   deadlineMs: number,
-): Promise<DiskSpace | null> {
+  timedOut: string,
+): Promise<T | null> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
     timer = setTimeout(() => {
@@ -102,18 +114,74 @@ export async function readSpaceBeforeDeadline(
     timer.unref?.();
   });
   try {
-    const answer = await Promise.race([read(), deadline]);
-    if (answer !== TIMED_OUT) return answer;
-    // Said out loud, because the defect this closes was silent in both halves: no
-    // reading published and no line anywhere saying why, so an instrument that had
-    // stopped watching looked exactly like a volume with nothing to report.
-    console.error(
-      `[recorder] free space did not answer within ${String(deadlineMs)} ms; the volume ` +
-        'reads as unknown and the recording continues',
-    );
-    return null;
+    const answer = await Promise.race([work(), deadline]);
+    if (answer === TIMED_OUT) {
+      console.error(timedOut);
+      return null;
+    }
+    return answer;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** One read of the volume, bounded. `null` is `classifyDisk`'s `unknown`. */
+export function readSpaceBeforeDeadline(
+  read: DiskReader,
+  deadlineMs: number,
+): Promise<DiskSpace | null> {
+  return beforeDeadline(
+    read,
+    deadlineMs,
+    `[recorder] free space did not answer within ${String(deadlineMs)} ms; the volume ` +
+      'reads as unknown and the recording continues',
+  );
+}
+
+/**
+ * At most one underlying read of the volume at a time: a caller arriving while one is
+ * outstanding **joins** it rather than issuing a second.
+ *
+ * **This exists for the capture spine, and it is a second guard rather than a
+ * replacement for the first.** {@link beforeDeadline} *abandons* a read that missed
+ * its deadline — it cannot cancel one, because nothing in Node can cancel an `fs`
+ * request — so without this a stalled volume would park one more request on libuv's
+ * shared threadpool every poll. That pool is four threads wide by default and
+ * `ProjectStore`'s media writes are on it too, so a few seconds of a stalled volume
+ * would put `appendMediaChunk` behind the monitor's dead reads: the instrument
+ * slowing the recording it is watching, which is the one thing §7.2's accessory rule
+ * forbids. The poll's own guard is untouched and must stay so — it still completes on
+ * its deadline, still publishes `unknown`, still logs.
+ *
+ * **Joining rather than skipping is what keeps §7.2's stop reachable.** A stalled
+ * `statfs` returns when the volume comes back, and the poll that is waiting on it
+ * gets that answer in the same tick, so the stop fires on the first real reading
+ * rather than an interval later.
+ *
+ * **What it cannot do**, recorded rather than papered over: if the volume's metadata
+ * stays wedged for ever while writes to it still succeed, this monitor stays blind,
+ * because there is no way to retire the request that is stuck. The alternative —
+ * a fresh read every two seconds — trades a blind instrument for a blocked capture
+ * spine, and the recording outranks the instrument.
+ */
+export class SingleFlightDiskRead {
+  private readonly source: DiskReader;
+  /** The read still on the threadpool, if any. */
+  private pending: Promise<DiskSpace> | null = null;
+
+  constructor(source: DiskReader) {
+    this.source = source;
+  }
+
+  read(): Promise<DiskSpace> {
+    if (this.pending !== null) return this.pending;
+    const attempt = this.source();
+    this.pending = attempt;
+    const settled = (): void => {
+      if (this.pending === attempt) this.pending = null;
+    };
+    void attempt.then(settled, settled);
+    return attempt;
   }
 }
 

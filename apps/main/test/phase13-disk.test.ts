@@ -43,7 +43,13 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHANNEL, DISK_THRESHOLDS, type DiskSpace, type RecorderStatus } from '@loom/ipc';
+import {
+  CHANNEL,
+  DISK_THRESHOLDS,
+  type DiskReading,
+  type DiskSpace,
+  type RecorderStatus,
+} from '@loom/ipc';
 import {
   validateFrameIndexDoc,
   validateRecordingDoc,
@@ -51,6 +57,7 @@ import {
   type RecordingDoc,
   type RecordingId,
 } from '@loom/format';
+import { LIBRARY_RATE_DEADLINE_MS } from '../src/disk.ts';
 import { ProjectStore } from '../src/project-store.ts';
 import { RecorderSession } from '../src/recorder/session.ts';
 import type { WindowRegistry, WindowRole } from '../src/windows.ts';
@@ -175,19 +182,33 @@ class FakeVolume {
  * off for good, silently, with no reading published and no line in the log.
  */
 class StalledVolume {
-  /** Every read the app asked for, answered or not. */
+  /** Every underlying read that was actually issued, answered or not. */
   calls = 0;
+  /** The most reads that were ever parked on this volume at one time. */
+  peakOutstanding = 0;
   private answer: DiskSpace | null = null;
+  private parked: ((space: DiskSpace) => void)[] = [];
 
   read = (): Promise<DiskSpace> => {
     this.calls += 1;
     const answer = this.answer;
-    return answer === null ? new Promise<DiskSpace>(() => undefined) : Promise.resolve(answer);
+    if (answer !== null) return Promise.resolve(answer);
+    return new Promise<DiskSpace>((resolve) => {
+      this.parked.push(resolve);
+      this.peakOutstanding = Math.max(this.peakOutstanding, this.parked.length);
+    });
   };
 
-  /** Start answering. Every read from here on resolves with this. */
+  /**
+   * The volume answers. Every read from here on resolves — **including the ones
+   * already parked**, which is what a stalled `statfs` does when the mount comes
+   * back, and what makes §7.2's stop reachable from a read that was already waiting.
+   */
   release(space: DiskSpace): void {
     this.answer = space;
+    const parked = this.parked;
+    this.parked = [];
+    for (const resolve of parked) resolve(space);
   }
 }
 
@@ -598,31 +619,54 @@ describe('the controls', () => {
 
 describe('a read that never answers', () => {
   /**
-   * The scenario both tests below run, so the only difference between them is
-   * whether the reads answered.
+   * The readings the recorder actually published, one per completed poll.
+   *
+   * By identity rather than by count of statuses: `publish()` also fires on a phase
+   * change and re-sends whatever `lastDisk` holds, and counting those would make "the
+   * monitor kept polling" true of a monitor that had stopped. Each poll classifies a
+   * fresh `DiskReading` object, and nothing here serializes, so a new object is a new
+   * poll.
+   */
+  function readings(contents: FakeContents): DiskReading[] {
+    const distinct: DiskReading[] = [];
+    for (const status of statuses(contents)) {
+      if (status.disk !== null && status.disk !== distinct[distinct.length - 1]) {
+        distinct.push(status.disk);
+      }
+    }
+    return distinct;
+  }
+
+  /**
+   * The two properties that must hold together, and which a future change must not be
+   * able to trade against each other.
    *
    * A monitor that has stopped polling is indistinguishable from a volume with
-   * nothing to report — that is what made this silent — so what is asserted is the
-   * three things a working monitor keeps doing: asking, publishing, and stopping the
-   * recording when the answer finally lands below §7.2's floor.
+   * nothing to report — that is what made the original defect silent — so (a) is that
+   * polls keep completing and readings keep reaching the HUD. But a poll that answers
+   * its own deadline abandons the `fs` request underneath it, and nothing in Node can
+   * retire one, so (b) is that those do not pile up on the threadpool `ProjectStore`'s
+   * media writes share.
    */
-  async function driveUntilTheFloor(volume: StalledVolume, level: 'unknown' | 'ok'): Promise<void> {
-    const { id, contents, frames } = await recordFrames(40);
-
-    // 1. It keeps asking. Without a deadline on the read the in-flight guard is
-    //    never released and the count stays where the first poll left it.
-    await until(() => volume.calls >= 4, 'the monitor to poll past the reads it was given');
-
-    // 2. It keeps publishing, and a read that did not answer is banded `unknown`
-    //    rather than as a fabricated zero — which is what stops every predicate
-    //    downstream from acting on it.
-    const published = statuses(contents).filter((s) => s.disk !== null);
-    expect(published.length).toBeGreaterThan(0);
-    expect(published.every((s) => s.disk?.level === level)).toBe(true);
+  async function expectStillWatching(
+    volume: StalledVolume,
+    contents: FakeContents,
+    level: 'unknown' | 'ok',
+  ): Promise<void> {
+    await until(() => readings(contents).length >= 4, 'the monitor to keep publishing readings');
+    expect(readings(contents).every((reading) => reading.level === level)).toBe(true);
+    expect(volume.peakOutstanding).toBeLessThanOrEqual(1);
     expect(recorder.status().phase).toBe('recording');
     expect(recorder.status().diskStop).toBeNull();
+  }
 
-    // 3. And §7.2's stop still fires the moment an answer lands below the floor.
+  /** §7.2's stop, from the moment the volume finally answers below the floor. */
+  async function expectStopAtTheFloor(
+    volume: StalledVolume,
+    id: RecordingId,
+    contents: FakeContents,
+    frames: FixtureFrame[],
+  ): Promise<void> {
     volume.release(free(0.4 * GB));
     await until(() => stopCommands(contents) > 0, 'the capture page to be told to stop');
     emit(CHANNEL.captureEnded, contents, endedMessage(frames));
@@ -643,18 +687,28 @@ describe('a read that never answers', () => {
     // told nothing and believes they are covered.
     const volume = new StalledVolume();
     useReader(volume.read);
-    await driveUntilTheFloor(volume, 'unknown');
+    const { id, contents, frames } = await recordFrames(40);
+    await expectStillWatching(volume, contents, 'unknown');
+    // The read-level half, stated exactly: one request went to the volume and every
+    // later poll joined it rather than parking another beside it.
+    expect(volume.calls).toBe(1);
+    await expectStopAtTheFloor(volume, id, contents, frames);
   });
 
   it('does the same on a volume that answers — the control the stall is measured against', async () => {
     // Every assertion above is also true of an ordinary volume, so on its own the
-    // run says nothing about the deadline. This is that ordinary volume, driven
-    // through the identical helper: what is left over — readings banded `unknown`
-    // while the reads hung, against `ok` here — is the finding.
+    // run says nothing about either guard. This is that ordinary volume, driven
+    // through the identical helpers: what is left over — readings banded `unknown`
+    // while the reads hung, and one underlying read instead of many — is the finding.
     const volume = new StalledVolume();
     volume.release(free(40 * GB));
     useReader(volume.read);
-    await driveUntilTheFloor(volume, 'ok');
+    const { id, contents, frames } = await recordFrames(40);
+    await expectStillWatching(volume, contents, 'ok');
+    // And the control for the line above: a volume that answers is read afresh every
+    // poll, so `calls === 1` there is the stall and not a guard that stopped reading.
+    expect(volume.calls).toBeGreaterThan(1);
+    await expectStopAtTheFloor(volume, id, contents, frames);
   });
 });
 
@@ -675,7 +729,10 @@ describe("the capacity estimate's provenance", () => {
     // 1.3 s, well under `MEASURED_RATE_FLOOR_SEC`.
     useVolume(new FakeVolume(free(40 * GB)));
     const second = await recordFrames(40);
-    await until(() => recorder.status().disk !== null, 'the monitor to publish a reading');
+    await until(
+      () => recorder.status().disk?.rate.source === 'measured',
+      "the estimate to be answered from the user's own library",
+    );
     const rate = recorder.status().disk?.rate;
     expect(rate?.source).toBe('measured');
     expect(rate?.sampleCount).toBeGreaterThan(0);
@@ -700,6 +757,40 @@ describe("the capacity estimate's provenance", () => {
     emit(CHANNEL.captureEnded, contents, endedMessage(frames));
     await stopping;
     await untilState(id, 'editable');
+  });
+
+  it('starts the recording anyway when the library walk never answers', async () => {
+    // The estimate's measurement is `store.list()` — `readdir` and `stat` over every
+    // bundle — and on the volume this whole feature is about those hang exactly as
+    // `statfs` does. Awaiting one on the start path is a Record button that never
+    // comes back, with no recording and nothing on screen saying why: strictly worse
+    // than the constant it was replacing. What a wedged library may cost is the
+    // *provenance* of a number and nothing else.
+    //
+    // Its control is the test two above: the same path, with a library that answers,
+    // reaches `measured` — so `reference` here is the hang rather than the wiring.
+    useVolume(new FakeVolume(free(40 * GB)));
+    const list = vi.spyOn(store, 'list').mockImplementation(() => new Promise(() => undefined));
+    try {
+      const startedAt = Date.now();
+      const { id, contents, frames } = await recordFrames(40);
+      // Bounded against the walk's *own* deadline rather than against a number picked
+      // here. A start that waits for the walk cannot come back before
+      // `LIBRARY_RATE_DEADLINE_MS`; one that does not lands in tens of milliseconds.
+      // Half the deadline sits between the two with two orders of magnitude of room
+      // on the side this host can affect.
+      expect(Date.now() - startedAt).toBeLessThan(LIBRARY_RATE_DEADLINE_MS / 2);
+      expect(recorder.status().phase).toBe('recording');
+      expect(recorder.status().disk?.rate.source).toBe('reference');
+
+      const stopping = recorder.stop();
+      emit(CHANNEL.captureEnded, contents, endedMessage(frames));
+      await stopping;
+      list.mockRestore();
+      await untilState(id, 'editable');
+    } finally {
+      list.mockRestore();
+    }
   });
 });
 

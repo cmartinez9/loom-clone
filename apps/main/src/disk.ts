@@ -23,7 +23,20 @@
  */
 
 import { classifyDisk, measureCaptureRate, type CaptureRate, type DiskReading } from '@loom/ipc';
+import { beforeDeadline } from './recorder/disk-monitor.ts';
 import type { ProjectStore } from './project-store.ts';
+
+/**
+ * How long the library walk is given before it is abandoned.
+ *
+ * Generous, because it is a recursive walk of every bundle on disk and nothing waits
+ * on it — but **finite**, because `readdir` and `stat` against a wedged volume hang
+ * exactly as `statfs` does, and a wait with no bound on it is how a surface stops
+ * answering with nothing in the log saying why. It is not derived from §7.2's poll
+ * interval: this is a different operation with a different cost, and tying it to a
+ * 2 s cadence would abandon a walk that was going to answer.
+ */
+export const LIBRARY_RATE_DEADLINE_MS = 10_000;
 
 /**
  * Free space and this user's own measured cost of a second, banded (§7.2).
@@ -40,7 +53,9 @@ export async function readDiskForPreflight(store: ProjectStore): Promise<DiskRea
     }),
     measureLibraryRate(store),
   ]);
-  return classifyDisk(space, rate);
+  // A walk that could not answer is the same state as a library with nothing in it:
+  // the reference figure, labelled `reference`, which is what we actually know.
+  return classifyDisk(space, rate ?? measureCaptureRate([]));
 }
 
 /**
@@ -58,15 +73,27 @@ export async function readDiskForPreflight(store: ProjectStore): Promise<DiskRea
  * the same question about the same library, and two implementations of "what has a
  * second cost this user" is a number that can disagree with itself between the HUD
  * and the library window.
+ *
+ * **`null` when it could not be measured, and a *hang* is one of the ways.** A walk
+ * that throws was already survivable; a walk that never returns was not, and it is
+ * the likelier of the two on the volume this whole feature is about. Both now land
+ * on the same answer, which every caller reads as "we do not know" and none reads as
+ * a number.
  */
-export async function measureLibraryRate(store: ProjectStore): Promise<CaptureRate> {
+export async function measureLibraryRate(
+  store: ProjectStore,
+  deadlineMs: number = LIBRARY_RATE_DEADLINE_MS,
+): Promise<CaptureRate | null> {
   try {
-    return measureCaptureRate(await store.list());
+    const summaries = await beforeDeadline(
+      () => store.list(),
+      deadlineMs,
+      `[disk] the library did not answer within ${String(deadlineMs)} ms; the capacity ` +
+        "estimate falls back to a typical recording's size",
+    );
+    return summaries === null ? null : measureCaptureRate(summaries);
   } catch (error) {
     console.error('[disk] the capture rate could not be measured:', error);
-    // Not a fabricated number: `measureCaptureRate` of nothing is the reference
-    // figure, labelled `reference`, which is exactly what an unreadable library
-    // leaves us knowing.
-    return measureCaptureRate([]);
+    return null;
   }
 }

@@ -73,6 +73,7 @@ import {
 } from '@loom/ipc';
 import {
   DiskMonitor,
+  SingleFlightDiskRead,
   diskReadDeadlineMs,
   readSpaceBeforeDeadline,
   type DiskReader,
@@ -107,7 +108,7 @@ import {
   startInputSampler,
   type HelperClockReading,
 } from '../input-sampler.ts';
-import { measureLibraryRate } from '../disk.ts';
+import { LIBRARY_RATE_DEADLINE_MS, measureLibraryRate } from '../disk.ts';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
@@ -501,19 +502,30 @@ export class RecorderSession {
    * recording it describes has been finalized and `active` is `null`.
    */
   private readonly diskMonitor: DiskMonitor;
+  /**
+   * The one reader both §7.2's poll and {@link start}'s preflight go through.
+   *
+   * Shared rather than one each, because the guard it carries is about how many `fs`
+   * requests this feature can leave parked on libuv's threadpool at once, and two
+   * instances would be two.
+   */
+  private readonly diskRead: SingleFlightDiskRead;
   private lastDisk: DiskReading | null = null;
   private diskStop: DiskStopNotice | null = null;
   /**
-   * What a second has cost this user across their own library, resolved **once per
-   * recording** in {@link start} and reused by every poll below
+   * What a second has cost this user across their own library, measured **once per
+   * recording** from {@link start} and reused by every poll below
    * {@link MEASURED_RATE_FLOOR_SEC}.
    *
    * Once, and never on a poll, because `measureLibraryRate` is a recursive walk of
    * every bundle on disk: §7.2's monitor runs every 2 s for the length of a
    * recording, and that walk on that path would sit in the store's queues beside the
    * media appends — and what is queued in memory is exactly what a crash costs.
-   * `null` before the first recording of the process, which is the only state
-   * {@link REFERENCE_RATE} answers.
+   * `null` until a walk has answered, which is the only state {@link REFERENCE_RATE}
+   * answers — and it is left holding the **last** measurement rather than being
+   * cleared by a walk that could not answer, because an earlier reading of this same
+   * library is still a measurement of it and the constant is still somebody else's
+   * screen.
    */
   private libraryRate: CaptureRate | null = null;
   /**
@@ -542,8 +554,9 @@ export class RecorderSession {
       diskIntervalMs: DISK_THRESHOLDS.pollIntervalMs,
       ...options,
     };
+    this.diskRead = new SingleFlightDiskRead(() => this.options.disk());
     this.diskMonitor = new DiskMonitor({
-      read: () => this.options.disk(),
+      read: () => this.diskRead.read(),
       rate: () => this.captureRate(),
       intervalMs: this.options.diskIntervalMs,
       onReading: (reading) => {
@@ -756,12 +769,17 @@ export class RecorderSession {
     // a global shortcut, `smoke-capture.mjs` — walks straight past. This runs
     // before `store.create`, so a refused start leaves no bundle behind.
     //
-    // The library rate is resolved first and here, because this recording has
-    // written nothing yet and its own bytes cannot answer §7.2's capacity estimate
-    // for another two seconds. It is one walk per recording rather than one per
-    // poll, and it is an accessory like everything else on this path: a library that
-    // could not be listed costs the *provenance* of a number, never the recording.
-    this.libraryRate = await measureLibraryRate(this.options.store);
+    // The library walk behind §7.2's capacity estimate is *started* here and
+    // deliberately not awaited. This recording has written nothing yet, so its own
+    // bytes cannot answer for another two seconds and the user's library is what can
+    // — but `store.list()` is a recursive walk of every bundle on disk, and neither
+    // its latency nor a `readdir` that hangs belongs between pressing Record and
+    // `store.create`. Awaiting it would put back, one line above the deadline that
+    // closed it, the exact wedge that deadline exists to prevent: a Record button
+    // that never comes back, with no recording and nothing on screen saying why.
+    // What a slow or wedged library costs instead is the *provenance* of a number —
+    // `captureRate()` falls through to `REFERENCE_RATE` — and never the recording.
+    void this.measureLibrary();
     const reading = await this.readDisk();
     this.lastDisk = reading;
     if (diskRefusesStart(reading)) {
@@ -2315,7 +2333,7 @@ export class RecorderSession {
   private async readDisk(): Promise<DiskReading> {
     try {
       const space = await readSpaceBeforeDeadline(
-        () => this.options.disk(),
+        () => this.diskRead.read(),
         diskReadDeadlineMs(this.options.diskIntervalMs),
       );
       return classifyDisk(space, this.captureRate());
@@ -2351,6 +2369,19 @@ export class RecorderSession {
       return this.libraryRate ?? REFERENCE_RATE;
     }
     return { bytesPerSec: active.bytesWritten / seconds, source: 'measured', sampleCount: 1 };
+  }
+
+  /**
+   * The library walk, off the start path. Never awaited, never able to throw.
+   *
+   * A walk that could not answer — because it errored, or because it hung and hit
+   * {@link LIBRARY_RATE_DEADLINE_MS} — leaves whatever the last one measured, which
+   * is still a reading of this user's own library. Only a process that has never had
+   * one falls to {@link REFERENCE_RATE}.
+   */
+  private async measureLibrary(): Promise<void> {
+    const rate = await measureLibraryRate(this.options.store, LIBRARY_RATE_DEADLINE_MS);
+    if (rate !== null) this.libraryRate = rate;
   }
 
   /**

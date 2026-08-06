@@ -1011,6 +1011,35 @@ mutation. `ProjectStore.diskSpace()` reads first and `mkdir`s only on `ENOENT` f
 same reason: on a path a data-loss safeguard polls, a reading `statfs` alone could have
 answered must not be lost to a write failing.
 
+**A deadline abandons a read; it does not retire one, so there is a second guard at a
+second level.** The `fs` request the poll walked away from is still on libuv's
+four-thread pool, which `ProjectStore`'s media writes share — so without
+`SingleFlightDiskRead` a stalled volume would park one more request every 2 s until
+`appendMediaChunk` queued behind them, the instrument slowing the recording it watches.
+It holds **at most one** underlying read and later callers **join** it rather than
+issuing a second, which is also what keeps the stop reachable: a stalled `statfs`
+returns when the mount comes back and the poll waiting on it gets that answer in the
+same tick. The two guards are at different levels **on purpose** — the poll's own flag
+must keep clearing on every deadline or the paragraph above is undone — and
+`apps/main/test/phase13-disk.test.ts` asserts both in one place so a future change
+cannot trade one for the other. What it cannot do is recorded rather than papered over:
+a volume whose metadata stays wedged while writes still succeed leaves the monitor
+blind, because nothing in Node can retire the stuck request, and a blind instrument
+beats a blocked capture spine. `abandoned-disk-reads-pile-up-on-the-threadpool` is the
+mutation.
+
+**The library walk behind the capacity estimate is started, never awaited.**
+`store.list()` is `readdir` plus `stat` over every bundle, and on the volume this
+feature is about those hang exactly as `statfs` does — so awaiting one in
+`RecorderSession.start` would put the wedge back one line above the deadline that
+closed it. It is `void this.measureLibrary()`, bounded by `LIBRARY_RATE_DEADLINE_MS`
+(10 s, its own constant rather than §7.2's poll interval, which would abandon a walk
+that was going to answer), and a walk that could not answer leaves whatever the last
+one measured. `measureLibraryRate` returns `CaptureRate | null` for that reason: a hang
+and a throw are the same "we do not know", and `captureRate()`'s
+`libraryRate ?? REFERENCE_RATE` is the only place that decides what to say instead.
+`the-library-walk-is-awaited-before-the-recording-starts` is the mutation.
+
 **The capacity estimate is measured, and says whose measurement it is.**
 `CaptureRate.source` is `measured` or `reference` and is never smoothed away: during a
 recording the rate is that recording's own bytes (counted at the `appendMediaChunk`
@@ -1038,13 +1067,22 @@ than one that is inert and says so; `packages/ipc/test/disk.test.ts` pins both h
 the real H.264 fixture through the real `ProjectStore`, with the volume's answer driven
 down past 5 GB and then past 1 GB, ending `editable` with a part marked `disk-full`, a
 `media/screen.000.mp4` `/usr/bin/avconvert` remuxes, and a frame index carrying every
-frame that went in. Four controls, because each assertion passes for a wrong reason
+frame that went in. **Seven controls**, because each assertion passes for a wrong reason
 without one: a volume that never drops must not stop the recording and must write no
 `disk-full`; that recording's file must play too, so playability is about the interrupted
 run rather than the fixture; a reader that throws on every poll must leave the recording
-running; and the banner must have been _published_ below 5 GB and absent above it. Six
-`disk`/`preflight`/`monitor` entries in `npm run verify:mutation` break the production
-source on disk, none of them guarded only by a gate that can withhold.
+running; the banner must have been _published_ below 5 GB and absent above it; a volume
+that _answers_ must be read afresh every poll, or the single read the stalled scenario
+asserts is a guard that stopped reading rather than the stall; a library with nothing in
+it must report `reference`, or `measured` is the label that path always carries; and a
+library that answers must reach `measured`, or the `reference` a wedged walk reports is
+the wiring rather than the wedge. **Ten** `disk`/`preflight`/`monitor` entries in
+`npm run verify:mutation` break the production source on disk — the six phase 13 shipped
+with, plus `a-stalled-disk-read-switches-the-monitor-off`,
+`the-first-seconds-of-a-recording-ignore-the-users-own-library`,
+`abandoned-disk-reads-pile-up-on-the-threadpool` and
+`the-library-walk-is-awaited-before-the-recording-starts` — none of them guarded only by
+a gate that can withhold.
 
 ## Crash recovery is told to the user, and where its numbers come from
 
