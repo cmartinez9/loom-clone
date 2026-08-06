@@ -1060,20 +1060,20 @@ was not a control.
   gate whose whole job is per-pixel identity materially worse at it. It is a weaker
   guarantee than it reads as. Turning this knob again is a change to what phase 8
   establishes and needs the same scrutiny as deleting one of its checks.
-  **What closes it is the third outcome, one gate over.** A run whose every launch lost
-  the context measured nothing, and a gate that calls that a failure is reporting a
-  verdict it never reached — exactly what `instrumentOutOfCalibration` answers for phase
-  6's frame budget. The same remedy for phase 8 — withhold the verdict when every launch
-  lost the GPU context — is in flight as its own task and is **not** phase 6's branch to
-  land. Until it does, a red `test/phase8-gate.test.ts` whose log carries
+  **What closes it is the third outcome, and it has landed.** A run whose every launch
+  lost the context measured nothing, and a gate that calls that a failure is reporting a
+  verdict it never reached — what `instrumentOutOfCalibration` answers for phase 6's
+  frame budget and now for phase 8's too, so this crash no longer turns the gate red: it
+  reports **skipped** under a `NOT JUDGED` banner. § The phase-8 gate has three outcomes,
+  below, owns that mechanism. So a `test/phase8-gate.test.ts` whose log carries
   `GPU process gone: abnormal-exit (exit 8704)` within a second of `export writer open`
-  on **both** launches is this known crash rather than a regression to chase, and the
-  answer is neither a smaller fixture nor a third launch. **Match on that pair and not
-  on the allocator**: this rule used to read `Failed to allocate texture`, which run
-  `31102224786` — the first run after the revert, and the one that turned this branch red
-  — does not contain anywhere in its log. A recognition rule that fails to recognise the
-  run it was written for sends the next reader chasing a regression, which is the one
-  thing this entry exists to prevent.
+  on **both** launches is this known crash rather than a regression to chase, and the run
+  now says so itself; the answer is still neither a smaller fixture nor a third launch.
+  **Match on that pair and not on the allocator**: this rule used to read
+  `Failed to allocate texture`, which run `31102224786` — the first run after the revert,
+  and the one that turned this branch red — does not contain anywhere in its log. A
+  recognition rule that fails to recognise the run it was written for sends the next
+  reader chasing a regression, which is the one thing this entry exists to prevent.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
