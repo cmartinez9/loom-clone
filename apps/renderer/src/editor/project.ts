@@ -270,9 +270,12 @@ export class EditorProject {
    * read an empty list against (`compileClips`: an empty list is the whole source,
    * and the only place a source length exists is `recording.json`).
    *
-   * The cursor and click streams are `null`. They are what the §6 generators read,
-   * and this phase runs none — `loom-p15` owns regenerate and bake, and the logs
-   * themselves are not written by any recording this app makes today.
+   * The cursor and click streams are `null`, and running a generator does not change
+   * that: `generators.ts` reads `events/*.ndjson` itself and hands the streams
+   * straight to `@loom/edl`, which answers with a track of ordinary keyframes that
+   * lands in the document. What the context's streams feed is `ResolvedState.cursor`
+   * — the cursor sprite, which no compositor pass draws yet (`Compositor.render`
+   * refuses a `cursor` frame outright) — so a stream here would be read by nothing.
    */
   #compileOf(document: EditDocument): CompiledTimeline {
     return compile(document, { recording: this.recording, cursor: null, clicks: null });
