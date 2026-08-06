@@ -844,14 +844,48 @@ describe('a control that missed its own budget yields no verdict', () => {
    * both runs, and it does; that half is untouched by anything the control measured.
    *
    * The deferred branch's own answer differs between them and each run asserts its own,
-   * because substituting a healthy control at a spin count neither phase could have
-   * produced is what made it look uniform. `HEALTHY`'s own 360 spins is more than either
-   * phase can yield — `framesPerSpin(60)` puts three frames to a spin on the slowest
-   * panel this gate meets, so 470 frames cannot carry more than about 157 of them and 310
-   * cannot carry more than about 103 — and that inflation bought run 31075861127 a
-   * resolution it never had, turning its one over-budget frame into a throw. A check
-   * exercised at conditions that cannot occur proves nothing about the conditions that
-   * can, so the share door is proved separately, at a reachable shape, in the test below.
+   * because substituting a healthy control at a spin count neither phase measured is what
+   * made it look uniform: `HEALTHY`'s own 360 spins bought run 31075861127 a resolution it
+   * never had, turning its one over-budget frame into a throw. A check exercised at
+   * conditions that cannot occur proves nothing about the conditions that can, so the
+   * share door is proved separately, at a reachable shape, in the test below.
+   *
+   * ## What a phase can carry: one invariant, and one argument that is only an argument
+   *
+   * **Structural, and asserted on the fixtures below: spins ≤ frames.** Not a reading of
+   * the pacing — an identity of the dispatch loop, which is why it can never reject a
+   * real measurement. `counting()` in `test/gate/harness.ts` runs
+   * `callback(nowMs); afterFrame(); frames += 1;`, so `afterFrame` fires exactly once per
+   * scheduler dispatch, unconditionally and after the callback. The gate's one
+   * `EnvironmentControl` is constructed in that same file and its only `afterFrame` is
+   * `gpuCost.sample(); control.tick();`; nothing else in the gate calls `tick()`, and
+   * `EnvironmentControl.tick()` holds a single `#metrics.record(#spin(targetMs))` with no
+   * loop, so it records **at most one** spin per call. On the other side,
+   * `PreviewLoop.#schedule()` requests
+   * `(nowMs) => { this.#handle = null; this.#frame(nowMs); this.#schedule(); }`, so one
+   * dispatch runs exactly one `#frame`, and `#frame` closes with an unconditional
+   * `this.metrics.record(elapsed)` — a render that threw is caught inside the frame body,
+   * so even a refused frame is counted. `stop()` cancels the in-flight handle and every
+   * snapshot/reset pair in the harness is one synchronous block, so no dispatch straddles
+   * a phase boundary. Dispatches therefore equal measured frames and spins never exceed
+   * them; a callback that threw would yield *fewer* spins, which is the safe direction.
+   *
+   * That settles run 31075861127 outright: `HEALTHY`'s 360 spins is more than that phase
+   * had frames at all, so it is not a healthier host but a control the phase could not
+   * have produced. It does **not** settle run 31074994194, where 360 is under 470, and
+   * the only thing claimed there is the plain one — 360 is not the number that phase
+   * measured, and the counter-case uses its own 158 either way. The arithmetic suggests a
+   * cap near 235 for it (360 spins need at least 15.0 s of phase, over which 470 frames
+   * average 31.9 ms, so only every second frame clears the 41.67 ms gate), and **nothing
+   * here checks that**.
+   *
+   * **`framesPerSpin` is not the bound to reach for, and this is why.** It caps
+   * frames-per-spin only where frames really are delivered at the panel's rate. On a
+   * stalled host — which is exactly what both of these runs are — they arrive further
+   * apart, so `CONTROL_TARGET_MS + CONTROL_PERIOD_MS` elapses in fewer of them and the
+   * control spins on a *larger* fraction. Both runs measured under three frames to a
+   * spin: 470 / 158 = 2.97 and 310 / 136 = 2.28. Nothing about that weakens its use in
+   * `test/phase6-gate.test.ts`, whose ratio cap and spin floors bound the other direction.
    *
    * If this test can be made to pass by a change to the withholding, the withholding has
    * become a tolerance and the gate has stopped being a gate.
@@ -866,10 +900,11 @@ describe('a control that missed its own budget yields no verdict', () => {
       expect(healthy.maxAt).toBe(run.control.maxAt);
       expect(healthy.maxMs).toBe(HEALTHY.maxMs);
       expect(healthy.overBudget).toBe(0);
-      // And why it has to be the run's own: `HEALTHY`'s default is not a healthier host
-      // but a control this phase could not have produced, at one spin per
-      // `framesPerSpin(60)` frames.
-      expect(HEALTHY.count).toBeGreaterThan(run.measured.count / framesPerSpin(60));
+      // And the fixture itself is held to the dispatch loop's own identity: one spin per
+      // dispatch at most, one measured frame per dispatch exactly, so a recorded phase
+      // claiming more spins than frames is impossible rather than merely unlikely. That
+      // is what `HEALTHY`'s 360 was beside run 31075861127's 310 frames.
+      expect(run.control.count).toBeLessThanOrEqual(run.measured.count);
 
       // The host held the budget in these frames — the same 8.4 ms spin the quiet
       // runners measure — so nothing is withheld and the phase is judged.
