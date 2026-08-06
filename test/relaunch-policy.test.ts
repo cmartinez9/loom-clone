@@ -25,8 +25,9 @@
  * `GATE_ATTEMPTS` times what a launch costs, so it is a consequence of the count and
  * belongs to the same policy. Checking the count's value while checking nothing it must
  * stay consistent with is what let the timeout be left behind when the count moved. The
- * second test below is that consistency, against the bound which actually encloses this
- * gate's run.
+ * three tests after the pin are that consistency, and they fail on three different
+ * things: the room the count needs, the declaration that still computes it, and the CI
+ * job that has to contain the result.
  *
  * **Two gates, two predicates, one rule.** Phase 8's golden-frame gate
  * (`test/export-golden/relaunch.ts`) runs on the same virtualised runners and loses
@@ -46,7 +47,6 @@ import {
   ATTEMPT_TIMEOUT_MS,
   GATE_ATTEMPTS,
   GATE_TIMEOUT_MS,
-  LAUNCH_OVERHEAD_MS,
   shouldRelaunch,
 } from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
@@ -80,6 +80,28 @@ async function verifyJobBudgetMs(): Promise<number> {
     );
   }
   return minutes * 60_000;
+}
+
+/**
+ * The declaration `test/gate/relaunch.ts` has to still carry, asserted against that
+ * file's source text.
+ *
+ * Reading the source is the only way to tell a computed number from a stated one:
+ * comparing the export against the same product the export is defined as re-evaluates a
+ * definition against itself and cannot fail while it stands, and the literal `450_000`
+ * passes it today.
+ *
+ * The same mechanism `apps/main/test/identity.test.ts` uses to pin the bundle identifier
+ * to `electron-builder.yml`, plus {@link collapseWhitespace} on both sides — so a
+ * prettier run, a wrapped line or a re-indent cannot fail it. That normalisation is
+ * load-bearing rather than tidy: a guard that fires on cosmetics is deleted by the third
+ * person it annoys, and then there is neither the guard nor the claim it made.
+ */
+const GATE_TIMEOUT_DECLARATION =
+  'export const GATE_TIMEOUT_MS = GATE_ATTEMPTS * (ATTEMPT_TIMEOUT_MS + LAUNCH_OVERHEAD_MS);';
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 const EMPTY_METRICS = {
@@ -188,10 +210,11 @@ describe('the gate relaunches only for a lost context', () => {
   });
 
   /**
-   * The count decides a timeout, and that timeout has to fit inside what contains it.
+   * The count decides a timeout, and the three tests below are what that timeout has to
+   * stay consistent with.
    *
-   * `GATE_TIMEOUT_MS` bounds the **whole** gate, every launch together, so it is
-   * arithmetic on {@link GATE_ATTEMPTS} rather than a number anybody chooses. It was
+   * `GATE_TIMEOUT_MS` bounds the **whole** gate, every launch together, so it is a
+   * consequence of {@link GATE_ATTEMPTS} rather than a number anybody chooses. It was
    * written down once instead, and then the count moved without it: `GATE_ATTEMPTS` went
    * from two to three and the timeout stayed at the 300 s that fitted two, against the
    * 360 s three launches may legitimately take.
@@ -205,38 +228,76 @@ describe('the gate relaunches only for a lost context', () => {
    * Electron child and a `mkdtemp` directory behind on the runner — leaked processes on a
    * shared machine being a cost this project has already paid once, for nine hours.
    *
-   * Deriving the number fixes that arithmetic. This test fixes the next one out: a derived
-   * timeout **grows** with the count, so raising it to four grows the timeout past
-   * whatever encloses the run, and vitest kills the test before the same assertion — the
-   * identical silent failure, one level up. The fence beside this one checks the count's
-   * *value* and nothing about what that value must stay consistent with, which is how the
-   * first version of this got through.
+   * The fence beside this one checks the count's *value* and nothing that value must stay
+   * consistent with, which is how that got through.
    *
-   * ## What this establishes, and what it does not
+   * ## What each of the three catches, in its own terms
    *
-   * **Necessary, not sufficient.** The `verify` job's budget covers the whole suite —
-   * typecheck, lint, format, every other test and the build — so a gate timeout fitting
-   * inside it does **not** say the run fits. It says only that this gate alone cannot
-   * exceed it, which is the part that answers to the count.
+   * They are three tests rather than one because they fail on three different things, and
+   * none of them subsumes another:
+   *
+   *  1. **The room the count allows for.** `GATE_TIMEOUT_MS` at least `GATE_ATTEMPTS *
+   *     ATTEMPT_TIMEOUT_MS` is the promise `ATTEMPT_TIMEOUT_MS`'s own docblock makes —
+   *     per launch, with room for the attempts after it — and it holds *however* the
+   *     number was produced, so a hand-written literal that is too small fails it. This is
+   *     the one that would have caught the two-to-three defect on the day it landed.
+   *  2. **The declaration still computes it.** Asserted against `test/gate/relaunch.ts`'s
+   *     source text, because the historical defect is exactly a number written down once
+   *     and then left behind when one of its three terms moved. Comparing the export
+   *     against the product it is defined as could not catch that: it re-evaluates a
+   *     definition against itself. What this establishes is only that *this* declaration
+   *     in *that* file is still that expression — not that the number is derived in
+   *     general.
+   *  3. **It fits inside the job that has to contain it.**
+   *
+   * ## How far the third one reaches, which is less than it looks
+   *
+   * It is **silent through seven launches and first fires at eight**. The derived timeout
+   * is 450 000 ms at three attempts, 600 000 at four, 750 000 at five, 900 000 at six,
+   * 1 050 000 at seven, and 1 200 000 at eight — where it finally meets the verify job's
+   * own 1 200 000 ms and the strictly-less-than comparison fails. So raising the count to
+   * four leaves this file green, and **that silence is not the fence having spoken**.
+   *
+   * **Necessary, not sufficient**, on top of that. The `verify` job's budget covers the
+   * whole suite — typecheck, lint, format, every other test and the build — so a gate
+   * timeout fitting inside it does not say the run fits. It says only that this gate alone
+   * cannot exceed it.
    *
    * **`vitest.config.ts`'s `testTimeout` is not a guard here.** It is 60 s, less than a
    * single launch, and it does not enclose this test at all: the third argument to `it()`
    * overrides it. It would have caught none of the above; do not read it as though it
    * might.
    */
-  it('keeps the gate’s derived timeout inside the CI job that has to contain it', async () => {
-    const budgetMs = await verifyJobBudgetMs();
-    const minutes = (ms: number): string => (ms / 60_000).toFixed(1);
-
-    // The derivation itself, so a hand-written GATE_TIMEOUT_MS that happens to fit
-    // cannot pass this: what is being fenced is that the number tracks the count.
+  it('leaves the gate room for every launch the count allows', () => {
     expect(
       GATE_TIMEOUT_MS,
-      'GATE_TIMEOUT_MS is no longer derived from the launch count. It bounds every ' +
-        'launch together, so it has to be GATE_ATTEMPTS x (ATTEMPT_TIMEOUT_MS + ' +
-        'LAUNCH_OVERHEAD_MS); written down as a literal it goes stale the next time the ' +
-        'count moves, which is exactly what happened when it went from two to three.',
-    ).toBe(GATE_ATTEMPTS * (ATTEMPT_TIMEOUT_MS + LAUNCH_OVERHEAD_MS));
+      `GATE_ATTEMPTS is ${GATE_ATTEMPTS} and one launch may take ${ATTEMPT_TIMEOUT_MS} ms, ` +
+        'so the gate has to be allowed at least their product. However GATE_TIMEOUT_MS is ' +
+        'produced, it no longer leaves room for the launches this policy allows, and the ' +
+        'last of them is killed by vitest mid-run: the run then reports `test timed out` ' +
+        'in place of the report.contextLost assertion and the gate log — the reading the ' +
+        "extra launch exists to obtain — and leaks runGate's Electron child and its temp " +
+        'directory on the way out.',
+    ).toBeGreaterThanOrEqual(GATE_ATTEMPTS * ATTEMPT_TIMEOUT_MS);
+  });
+
+  it('still computes that timeout in the gate source rather than stating it', async () => {
+    const source = await readFile(resolve(repoRoot, 'test/gate/relaunch.ts'), 'utf8');
+    expect(
+      collapseWhitespace(source),
+      'test/gate/relaunch.ts no longer declares GATE_TIMEOUT_MS as ' +
+        `\`${GATE_TIMEOUT_DECLARATION}\`. A literal there is the defect this fence exists ` +
+        'for: 300_000 was written down when two launches fitted it and stayed when the ' +
+        'count became three. Each of those three terms moves on evidence of its own, so ' +
+        'the bound they imply may not be a number somebody has to remember to update. ' +
+        'Whitespace is normalised on both sides, so this cannot be a re-wrap or a ' +
+        're-indent — the expression itself changed.',
+    ).toContain(collapseWhitespace(GATE_TIMEOUT_DECLARATION));
+  });
+
+  it('keeps that timeout inside the CI job that has to contain it', async () => {
+    const budgetMs = await verifyJobBudgetMs();
+    const minutes = (ms: number): string => (ms / 60_000).toFixed(1);
 
     expect(
       GATE_TIMEOUT_MS,
