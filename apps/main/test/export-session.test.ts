@@ -32,7 +32,7 @@ import {
   type RecordingId,
 } from '@loom/format';
 import { parseMovie } from '@loom/mux';
-import { ProjectStore } from '../src/project-store.ts';
+import { ExportDestinationBusyError, ProjectStore } from '../src/project-store.ts';
 import { ExportSession, bitrateFor, safeFileName } from '../src/export/session.ts';
 import { loadEncodedFixture } from '../../../packages/mux/test/helpers/fixture.ts';
 
@@ -619,6 +619,144 @@ describe('ExportSession', () => {
     const outcome = await settled();
     expect(outcome.phase).toBe('failed');
     expect(outcome.error).toMatch(/no VideoEncoder configuration/);
+  }, 60_000);
+});
+
+/**
+ * Two exports aimed at one destination.
+ *
+ * `ExportSession.start` mints a job id per press with no opinion about the output
+ * path, so two exports of one recording — or of two recordings whose `safeFileName`
+ * collides — arrive as different jobs on the same three scratch paths. They cannot
+ * share: `ExportMp4Writer.create` sweeps that scratch, `cancel()` unlinks the
+ * `.partial`, and both `rename(2)` over the same output, so the loser silently
+ * replaces a *verified* export with an unverified one.
+ *
+ * The refusal is only half of it. A guard that refused the second while corrupting
+ * the first would be worse than the collision, so what is asserted here is mostly
+ * about the export already in flight.
+ */
+describe('two exports aimed at one destination', () => {
+  const videoSpec = (): {
+    width: number;
+    height: number;
+    timescale: number;
+    avcC: Uint8Array;
+  } => ({
+    width: fixture.width,
+    height: fixture.height,
+    timescale: fixture.fps * 1000,
+    avcC: fixture.avcC,
+  });
+
+  async function appendFrames(jobId: string, from: number, to: number): Promise<void> {
+    for (const [i, frame] of fixture.frames.slice(from, to).entries()) {
+      await harness.store.appendExportSample(jobId, 'video', {
+        data: frame.data,
+        durationUnits: 1000,
+        isKey: frame.isKey,
+        timestampUs: Math.round(((from + i) * 1e6) / fixture.fps),
+      });
+    }
+  }
+
+  it('refuses the second and leaves the first writing', async () => {
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Busy.mp4');
+
+    // Both in the same turn — the shape two presses actually have, and the one the
+    // pre-`await` registration exists to cover.
+    const first = store.beginExport('job-a', { outputPath, video: videoSpec() });
+    const refusal: unknown = await store
+      .beginExport('job-b', { outputPath, video: videoSpec() })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    await first;
+
+    expect(refusal).toBeInstanceOf(ExportDestinationBusyError);
+    expect(refusal).toBeInstanceOf(Error);
+    if (!(refusal instanceof ExportDestinationBusyError)) return;
+    // Named, both halves: what is busy, and who has it.
+    expect(refusal.outputPath).toBe(outputPath);
+    expect(refusal.heldBy).toBe('job-a');
+    expect(refusal.message).toContain(outputPath);
+    expect(refusal.message).toContain('job-a');
+    // And refused *before* anything was registered, so the loser cannot later
+    // finalize, cancel or append against a writer it never opened.
+    expect(store.hasOpenExport('job-b')).toBe(false);
+    expect(store.hasOpenExport('job-a')).toBe(true);
+
+    await appendFrames('job-a', 0, fixture.frames.length);
+
+    // The first job's scratch survived the refusal — the whole point. A sweep run on
+    // job B's behalf would have unlinked this, and job A would have gone on writing
+    // into an inode with no name.
+    expect(await readdir(harness.exportsDir)).toContain('Busy.mp4.video.part');
+
+    const finished = await store.finalizeExport('job-a');
+    expect(finished.videoSampleCount).toBe(fixture.frames.length);
+
+    // ...and finalized to a file that is actually good, read back off the disk.
+    const movie = parseMovie(new Uint8Array(await readFile(outputPath)));
+    expect(movie.fastStart).toBe(true);
+    expect(movie.tracks.find((t) => t.handler === 'vide')?.samples).toHaveLength(
+      fixture.frames.length,
+    );
+    expect(await readdir(harness.exportsDir)).toEqual(['Busy.mp4']);
+  }, 60_000);
+
+  it('releases the destination when the job that held it is done', async () => {
+    // The claim is on the export in flight, not on the name. Without this, a guard
+    // that never released would pass the test above and make every second export of
+    // a recording fail for ever.
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Again.mp4');
+
+    await store.beginExport('job-a', { outputPath, video: videoSpec() });
+    await appendFrames('job-a', 0, 12);
+    await store.finalizeExport('job-a');
+
+    await expect(
+      store.beginExport('job-b', { outputPath, video: videoSpec() }),
+    ).resolves.toBeUndefined();
+    await appendFrames('job-b', 0, 12);
+    await store.finalizeExport('job-b');
+    expect(await readdir(harness.exportsDir)).toEqual(['Again.mp4']);
+  }, 60_000);
+
+  it('releases the destination when the job that held it is cancelled', async () => {
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Retry.mp4');
+
+    await store.beginExport('job-a', { outputPath, video: videoSpec() });
+    await appendFrames('job-a', 0, 8);
+    await store.cancelExport('job-a');
+    // A cancel leaves nothing — including the claim.
+    expect(await readdir(harness.exportsDir)).toEqual([]);
+
+    await expect(
+      store.beginExport('job-b', { outputPath, video: videoSpec() }),
+    ).resolves.toBeUndefined();
+    await store.cancelExport('job-b');
+  }, 60_000);
+
+  it('leaves an export to a different destination alone', async () => {
+    // Control. Without it, "it refuses a second export to the same path" and "it
+    // refuses a second export" read identically — and the second reading would make
+    // concurrent exports of two recordings impossible.
+    const { store } = harness;
+    await store.beginExport('job-a', {
+      outputPath: join(harness.exportsDir, 'One.mp4'),
+      video: videoSpec(),
+    });
+    await expect(
+      store.beginExport('job-b', {
+        outputPath: join(harness.exportsDir, 'Two.mp4'),
+        video: videoSpec(),
+      }),
+    ).resolves.toBeUndefined();
+    await store.cancelExport('job-a');
+    await store.cancelExport('job-b');
   }, 60_000);
 });
 

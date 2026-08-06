@@ -378,9 +378,24 @@ const MUTATIONS = [
       'long. Registering the open late loses the first chunk — which is the video’s ' +
       'keyframe, so the file cannot be decoded from the front.',
     file: 'apps/main/src/project-store.ts',
-    find: '    this.openExports.set(jobId, opening);',
-    replace: '    void opening.then(() => this.openExports.set(jobId, opening));',
+    find: '    this.openExports.set(jobId, entry);',
+    replace: '    void opening.then(() => this.openExports.set(jobId, entry));',
     mustFail: [PHASE8],
+  },
+  {
+    name: 'two-exports-share-one-destination',
+    breaks:
+      'one live export per output path. Two jobs aimed at one destination share all ' +
+      'three scratch paths: the second’s `create` sweeps the first’s scratch away, ' +
+      'either one’s cancel unlinks the other’s `.partial` mid-assembly, and both ' +
+      'rename over the same output — so a *verified* export is silently replaced by ' +
+      'an unverified one, which is what phase 9 deletes sources on the strength of. ' +
+      '`wx+` used to refuse this; the scratch sweep deletes the files it refused on, ' +
+      'so the check has to be real.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    if (holder !== null) throw new ExportDestinationBusyError(request.outputPath, holder);',
+    replace: '    void holder;',
+    mustFail: [EXPORT_SESSION],
   },
   {
     name: 'export-chunk-offsets-off-by-one',

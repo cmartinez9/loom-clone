@@ -221,6 +221,44 @@ export class UnknownExportError extends Error {
   }
 }
 
+/**
+ * A second export was aimed at a destination another live job already holds.
+ *
+ * Two writers on one output path do not produce one wrong file; they produce two
+ * that destroy each other. They share `<out>.video.part`, `<out>.audio.part` and
+ * `<out>.partial`, so the second's `ExportMp4Writer.create` sweeps the first's
+ * scratch out from under it, either one's `cancel()` removes the other's `.partial`
+ * mid-assembly, and both `rename(2)` over the same output — which silently replaces
+ * a *verified* export with an unverified one. That is the outcome phase 9 deletes
+ * sources on the strength of, so it is refused here rather than raced.
+ */
+export class ExportDestinationBusyError extends Error {
+  readonly outputPath: string;
+  /** The job that got there first. */
+  readonly heldBy: string;
+  constructor(outputPath: string, heldBy: string) {
+    super(
+      `export job ${JSON.stringify(heldBy)} is already writing to ${outputPath}; ` +
+        'two exports cannot share one destination',
+    );
+    this.name = 'ExportDestinationBusyError';
+    this.outputPath = outputPath;
+    this.heldBy = heldBy;
+  }
+}
+
+/**
+ * One live export: the writer being opened, and the destination it has claimed.
+ *
+ * The destination is held here rather than in a second map so there is one record
+ * of a live export and no pair to keep in step — `beginExport` scans this for a
+ * matching `outputPath`, and the map holds one entry per export in flight.
+ */
+interface OpenExport {
+  outputPath: string;
+  writer: Promise<ExportMp4Writer>;
+}
+
 /** What an export needs before its first sample. Shapes come from `@loom/mux`. */
 export interface ExportWriteRequest {
   /** Absolute path of the finished file. Its directory is created if it is missing. */
@@ -300,7 +338,7 @@ export class ProjectStore {
    * keyframe — a file that demuxes, reports the right duration, and cannot be
    * decoded from the front.
    */
-  private readonly openExports = new Map<string, Promise<ExportMp4Writer>>();
+  private readonly openExports = new Map<string, OpenExport>();
   private settings: SettingsDoc | null = null;
   /**
    * Settings writes, serialized — the same reason the per-project queue exists.
@@ -765,9 +803,26 @@ export class ProjectStore {
    * Not on the per-project queue, and for the same reason media appends are not: an
    * export writes a different file, shares no revision with `edit.json`, and must
    * not be able to queue behind a snapshot's recursive bundle-size walk.
+   *
+   * ## One live export per destination
+   *
+   * Refused by **output path**, not only by job id: `ExportSession.start` mints a
+   * fresh job id per press, so two exports of one recording — or of two recordings
+   * whose `safeFileName` collides — reach here as different jobs aimed at the same
+   * three scratch paths and the same output. See {@link ExportDestinationBusyError}
+   * for what that costs. The claim is released by {@link finalizeExport} and
+   * {@link cancelExport}, so it names the export in flight rather than the name.
+   *
+   * The check is **in-process, and deliberately so**. `app.requestSingleInstanceLock()`
+   * in `index.ts` means there is one of us, and every bundle is held under its own
+   * `.lock` (§2.1), so two exports aimed at one destination can only ever be started
+   * from this process. A lock file or a lease on the Exports folder would be new
+   * architecture for a case those two already exclude.
    */
   async beginExport(jobId: string, request: ExportWriteRequest): Promise<void> {
     if (this.openExports.has(jobId)) throw new Error(`export ${jobId} is already open`);
+    const holder = this.exportHolding(request.outputPath);
+    if (holder !== null) throw new ExportDestinationBusyError(request.outputPath, holder);
     const opening = (async (): Promise<ExportMp4Writer> => {
       await mkdir(dirname(request.outputPath), { recursive: true });
       return ExportMp4Writer.create({
@@ -777,14 +832,24 @@ export class ProjectStore {
       });
     })();
     // Registered before the first `await`, so a chunk that arrives while the file is
-    // being created queues rather than being refused.
-    this.openExports.set(jobId, opening);
+    // being created queues rather than being refused — and so the destination above
+    // is claimed against a second `beginExport` in the very same turn.
+    const entry: OpenExport = { outputPath: request.outputPath, writer: opening };
+    this.openExports.set(jobId, entry);
     try {
       await opening;
     } catch (error) {
       this.openExports.delete(jobId);
       throw error;
     }
+  }
+
+  /** The live job writing to `outputPath`, or `null`. */
+  private exportHolding(outputPath: string): string | null {
+    for (const [jobId, open] of this.openExports) {
+      if (open.outputPath === outputPath) return jobId;
+    }
+    return null;
   }
 
   /** Whether a job is still writing. */
@@ -826,13 +891,13 @@ export class ProjectStore {
    * {@link finalizeExport} — the finished file has been renamed by then.
    */
   async cancelExport(jobId: string): Promise<void> {
-    const opening = this.openExports.get(jobId);
-    if (opening === undefined) return;
+    const open = this.openExports.get(jobId);
+    if (open === undefined) return;
     this.openExports.delete(jobId);
     // A cancel that lands while the file is still being created still has to remove
     // it, so the open is awaited rather than abandoned — and an open that failed is
     // already cleaned up by `ExportMp4Writer.create`.
-    const writer = await opening.catch(() => null);
+    const writer = await open.writer.catch(() => null);
     await writer?.cancel();
   }
 
@@ -997,9 +1062,9 @@ export class ProjectStore {
   }
 
   private requireExport(jobId: string): Promise<ExportMp4Writer> {
-    const opening = this.openExports.get(jobId);
-    if (opening === undefined) return Promise.reject(new UnknownExportError(jobId));
-    return opening;
+    const open = this.openExports.get(jobId);
+    if (open === undefined) return Promise.reject(new UnknownExportError(jobId));
+    return open.writer;
   }
 
   // ------------------------------------------------------------------ recovery

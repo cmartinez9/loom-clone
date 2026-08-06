@@ -37,7 +37,8 @@
  * `wx+`, so without {@link sweepExportScratch} the *next* export to the same
  * destination fails with an opaque `EEXIST` and that recording can never be exported
  * under that name again. See that function for what it is and is not allowed to
- * touch.
+ * touch — and {@link ExportMp4Writer.create} for why the sweep means concurrency has
+ * to be refused by the caller rather than inferred from `wx+`.
  */
 
 import { open, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
@@ -149,15 +150,19 @@ export class ExportMp4Writer {
   /**
    * Open the scratch streams.
    *
-   * `wx+` on both scratch paths — exclusive create, so a second export aimed at the
-   * same destination is a refusal rather than two writers interleaving into one
-   * file, and readable because {@link finalize} copies back out of them.
+   * {@link sweepExportScratch} runs first, because a killed export leaves its scratch
+   * behind and an `EEXIST` on it would turn "the app was force-quit once" into "this
+   * recording can never be exported under this name again", reported against files
+   * the user has no reason to know exist.
    *
-   * That exclusivity is why {@link sweepExportScratch} runs first: a killed export
-   * leaves its scratch behind, and without the sweep the `wx+` would turn "the app
-   * was force-quit once" into "this recording can never be exported under this name
-   * again", reported as an `EEXIST` pointing at files the user has no reason to know
-   * about.
+   * **Two writers on one destination are refused above, not here.** The sweep is
+   * unconditional, so the `wx+` below cannot be the thing that keeps a second export
+   * off this one's files — it would delete them three lines earlier. That check lives
+   * in `ProjectStore.beginExport`, which owns the one map of live exports and refuses
+   * a second job aimed at an `outputPath` another still holds, before a writer is
+   * ever constructed. `wx+` stays as what it can honestly be: an assertion that
+   * nothing appeared between the sweep and the open, readable because {@link finalize}
+   * copies back out of these streams.
    */
   static async create(options: ExportMp4WriterOptions): Promise<ExportMp4Writer> {
     const writer = new ExportMp4Writer(options);
