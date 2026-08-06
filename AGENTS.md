@@ -38,8 +38,9 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
                           # generators, annotations, the drawing overlay, the event logs
-                          # and the phase-6 gate's judgement policy 93 ways; each must
-                          # fail a gate
+                          # and the phase-6 gate's judgement policy; one way per entry in
+                          # scripts/mutation-check.mjs's MUTATIONS registry, which is
+                          # where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
