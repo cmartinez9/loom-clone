@@ -67,7 +67,14 @@ import {
 import { movieHeaderLength, parseMovie, HEADER_PROBE_BYTES } from '../../packages/mux/src/index.ts';
 import { loadEncodedFixture } from '../../packages/mux/test/helpers/fixture.ts';
 import type { ExportProgress } from '../../packages/ipc/src/index.ts';
-import type { ControlsReport, ExportReading, FrameDelta, OnDisk, Reading } from './report.ts';
+import type {
+  ControlsReport,
+  ExportReading,
+  FrameDelta,
+  OnDisk,
+  Reading,
+  SliderGesture,
+} from './report.ts';
 
 interface Args {
   rendererRoot: string;
@@ -137,6 +144,7 @@ let report: ControlsReport = {
   disk,
   exports: exports_,
   deltas,
+  slider: null,
   notes,
 };
 
@@ -171,6 +179,18 @@ const CLICK_TIMES = [4.0, 4.5, 8.0, 8.6];
 const INSIDE_SEC = 5.0;
 /** Inside the **second** segment's hold — the generator's, all the way through. */
 const OUTSIDE_SEC = 8.8;
+
+/**
+ * The Amount slider's control step, and the drag measured against it.
+ *
+ * Both are multiples of the slider's own 0.05 above its floor of 1, so a browser that
+ * snaps a range value to its step changes nothing here. The step is clear of the
+ * magnification the generator resolves to at `INSIDE_SEC`, which is what the override
+ * seeds the region with — a "change" to the value that is already there produces no
+ * ops, and a control that measured zero would make the comparison beside it vacuous.
+ */
+const SLIDER_STEP = 3;
+const SLIDER_DRAG = [2.5, 2.9, 3.3, 3.6, 3.8, 4];
 
 /** §2.5's cursor log: a slow drift, at the sampler's own 120 Hz. */
 function cursorNdjson(seconds: number): { text: string; samples: number } {
@@ -592,19 +612,47 @@ async function clickByText(window: BrowserWindow, container: string, text: strin
   await wait(150);
 }
 
-/** Set a range input and fire the `input` its listener commits on. */
-async function setRange(window: BrowserWindow, name: string, value: number): Promise<void> {
-  const found = (await window.webContents.executeJavaScript(
+/**
+ * Drive a range input the way a pointer does: several `input` events, then `change`.
+ *
+ * One `input` is not a drag, and the difference is the whole reading. A slider that
+ * commits on `input` re-renders the panel it is in, `replaceChildren` removes the very
+ * `<input>` the pointer has hold of, and the gesture ends on its first step — an
+ * interaction that fails on first contact while a single synthetic `input` still
+ * reports the right number. So the identity of the element is checked **before** the
+ * `change`: a rebuild during the drag hands back a different node.
+ *
+ * `Event` rather than `sendInputEvent` deliberately, and it is the one control here
+ * driven that way: dragging a native range thumb by coordinates depends on where the
+ * user agent draws it, and what is under test is the listener's two phases rather than
+ * Chromium's hit testing. Everything that *is* about hit testing — the trim handles,
+ * the keyframe on the lane, the mask on the picture — goes through {@link drag}.
+ */
+async function dragRange(
+  window: BrowserWindow,
+  name: string,
+  values: readonly number[],
+): Promise<{ moves: number; survivedTheDrag: boolean }> {
+  const measured = (await window.webContents.executeJavaScript(
     `(() => {
-       const el = document.querySelector('input[name=' + JSON.stringify(${JSON.stringify(name)}) + ']');
-       if (el === null) return false;
-       el.value = ${JSON.stringify(String(value))};
-       el.dispatchEvent(new Event('input', { bubbles: true }));
-       return true;
+       const selector = 'input[name=' + JSON.stringify(${JSON.stringify(name)}) + ']';
+       const held = document.querySelector(selector);
+       if (held === null) return null;
+       const values = ${JSON.stringify([...values])};
+       for (const value of values) {
+         held.value = String(value);
+         held.dispatchEvent(new Event('input', { bubbles: true }));
+       }
+       // Asked while the gesture is still live. A rebuild afterwards is expected and
+       // correct — the panel has to come back in step with what was committed.
+       const survivedTheDrag = document.querySelector(selector) === held && held.isConnected;
+       held.dispatchEvent(new Event('change', { bubbles: true }));
+       return { moves: values.length, survivedTheDrag };
      })()`,
-  )) as boolean;
-  if (!found) throw new Error(`the inspector has no field named ${name}`);
-  await wait(200);
+  )) as { moves: number; survivedTheDrag: boolean } | null;
+  if (measured === null) throw new Error(`the inspector has no field named ${name}`);
+  await wait(400);
+  return measured;
 }
 
 /**
@@ -983,10 +1031,40 @@ void app.whenReady().then(async () => {
     await seekTo(editor, INSIDE_SEC);
     await clickByText(editor, '#zoom-panel', 'Take manual control');
     await wait(250);
-    // Tuned with the real slider, to a magnification the generator cannot produce:
-    // §6.5's `amountRange` tops out at 2.5, so 4.0 is unmistakably the user's.
-    await setRange(editor, 'zoom-amount', 4);
+    // Tuned with the real slider, dragged rather than nudged, to a magnification the
+    // generator cannot produce: §6.5's `amountRange` tops out at 2.5, so 4.0 is
+    // unmistakably the user's.
+    //
+    // The **control comes first**: one step and one `change`, which is what a keyboard
+    // nudge is, measured on the same control against the same document. Its cost is
+    // what one edit of this shape costs — read rather than written down, because a
+    // revision counts *ops* and `updateZoomOps` is a two-op batch, so a literal here
+    // would pin the batch's shape rather than the property. `readDisk` opens its own
+    // store and replays the journal, so the number is what is on disk.
+    const beforeStep = await readDisk(recordingsRoot, recording.id, 'before one slider step');
+    await dragRange(editor, 'zoom-amount', [SLIDER_STEP]);
+    const afterStep = await readDisk(recordingsRoot, recording.id, 'after one slider step');
+
+    const gesture = await dragRange(editor, 'zoom-amount', SLIDER_DRAG);
     await settled(editor);
+    const afterDrag = await readDisk(recordingsRoot, recording.id, 'after the slider drag');
+    const slider: SliderGesture = {
+      name: 'zoom-amount',
+      moves: gesture.moves,
+      survivedTheDrag: gesture.survivedTheDrag,
+      revisions: afterDrag.revision - afterStep.revision,
+      controlRevisions: afterStep.revision - beforeStep.revision,
+      asked: SLIDER_DRAG[SLIDER_DRAG.length - 1] ?? 0,
+      amount: (await editor.webContents.executeJavaScript(
+        `window.__loomEditor.regions[0]?.amount ?? 0`,
+      )) as number,
+    };
+    report = { ...report, slider };
+    note(
+      `slider: ${String(slider.moves)} moves, survived=${String(slider.survivedTheDrag)}, ` +
+        `revisions=${String(slider.revisions)} (one step costs ` +
+        `${String(slider.controlRevisions)}), amount=${slider.amount.toFixed(3)}`,
+    );
     await read(editor, 'manual, inside');
     await seekTo(editor, OUTSIDE_SEC);
     await read(editor, 'manual, outside');

@@ -41,9 +41,11 @@
  * `data/loom-scope/decision-editor-scope.md`, on the *Stack and blend tracks* row —
  * *"I don't think this is needed for MVP."* §3.5's engine is untouched and is what
  * makes the manual zoom beat the generated one; what is absent is a surface for
- * reordering tracks by hand. Every track this window writes goes to one of two
- * places, each argued at the site: a manual zoom to the top of the array
- * (`rewriteTrackOps`), a generated one to the bottom (`runGenerator`).
+ * reordering tracks by hand. Every track this window writes therefore goes where
+ * §3.5 says it goes without anyone being asked, and each site argues its own: a
+ * manual zoom to the top of the array (`rewriteTrackOps`), a generated one below
+ * every manual track and above every generator §3.5 ranks under it
+ * (`generators.ts`'s `GENERATOR_RANK`).
  */
 
 import '@loom/design/css';
@@ -102,6 +104,7 @@ import {
   setKeyValueOps,
   updateZoomOps,
   zoomKeysOf,
+  zoomRegionAt,
   zoomRegionsOf,
   DEFAULT_HOLD_SEC,
   DEFAULT_ZOOM_AMOUNT,
@@ -542,7 +545,7 @@ async function start(): Promise<void> {
           return;
         }
         project.commit(ops, 'Add zoom');
-        select({ kind: 'zoom', index: zoomRegionsOf(project.committed).length - 1 });
+        selectZoomAt(at0);
         return;
       }
       const ops = updateZoomOps(
@@ -577,7 +580,7 @@ async function start(): Promise<void> {
           return;
         }
         project.commit(ops, 'Add zoom');
-        select({ kind: 'zoom', index: zoomRegionsOf(project.committed).length - 1 });
+        selectZoomAt(at);
       },
       onOverrideZoom: () => {
         // The captain's row of the capability table, in one call. The seed is what
@@ -605,11 +608,17 @@ async function start(): Promise<void> {
           return;
         }
         project.commit(ops, 'Take manual control');
-        select({ kind: 'zoom', index: zoomRegionsOf(project.committed).length - 1 });
+        selectZoomAt(at);
       },
-      onUpdateZoom: (index, patch) => {
+      onUpdateZoom: (index, patch, phase) => {
+        // The same two-phase path a trim handle and a stage drag take: provisional
+        // while the thumb is down, one commit on release. `inspector.ts`'s `range`
+        // argues why a slider that committed per `input` is a control that does not
+        // work rather than one that costs too many undo steps.
         const ops = updateZoomOps(project.committed, index, patch, project.sourceDurationSec);
-        if (ops !== null) project.commit(ops, 'Adjust zoom');
+        if (ops === null) return;
+        if (phase === 'move') provisional(ops);
+        else project.commit(ops, 'Adjust zoom');
       },
       onRemoveZoom: (index) => {
         const ops = removeZoomOps(project.committed, index);
@@ -642,9 +651,11 @@ async function start(): Promise<void> {
         project.commit(ops, 'Delete keyframe');
         select(null);
       },
-      onStyleAnnotation: (spanId, patch) => {
+      onStyleAnnotation: (spanId, patch, phase) => {
         const ops = styleAnnotationOps(project.committed, spanId, patch);
-        if (ops !== null) project.commit(ops, 'Restyle note');
+        if (ops === null) return;
+        if (phase === 'move') provisional(ops);
+        else project.commit(ops, 'Restyle note');
       },
       onRetimeAnnotation: (spanId, times) => {
         const ops = retimeAnnotationOps(
@@ -716,12 +727,24 @@ async function start(): Promise<void> {
   }
 
   function regionAtPlayhead(): ZoomRegion | null {
-    const at = sourceTimeFor(host.loop.time);
-    return (
-      zoomRegionsOf(project.committed).find(
-        (region) => at >= region.startSec && at <= region.windowEndSec,
-      ) ?? null
-    );
+    return zoomRegionAt(project.committed, sourceTimeFor(host.loop.time));
+  }
+
+  /**
+   * Select the region that covers an instant — the one a *place* or an *override*
+   * just made.
+   *
+   * By what it covers, never by `zoomRegionsOf(...).length - 1`. `ZoomRegion.index` is
+   * a position in `activeRanges` and `placeZoomOps` keeps those sorted by start time,
+   * so the newest region is the last element only when it also happens to be the
+   * latest one in the recording: placing a zoom at 2 s after one at 10 s makes the new
+   * region index 0 and would have selected the 10 s one, leaving every field in the
+   * panel tuning a zoom nobody was looking at. `length - 1` is not the largest index
+   * either, since `zoomRegionsOf` skips a window whose keys it cannot read.
+   */
+  function selectZoomAt(atSec: Seconds): void {
+    const region = zoomRegionAt(project.committed, atSec);
+    select(region === null ? null : { kind: 'zoom', index: region.index });
   }
 
   function generate(type: RunnableGenerator): void {
@@ -798,8 +821,19 @@ async function start(): Promise<void> {
     renderFacts();
   }
 
+  /**
+   * Is what is selected still in the document — the **committed** one?
+   *
+   * Committed and not `project.document`, which is the provisional document while a
+   * drag is live. A keyframe drag selects its key on pointerdown and then previews the
+   * key at its *new* `t` on every pointermove, so asking the provisional document
+   * would find no key at the selected `t` and drop the selection on the first move —
+   * the panel and the lane's marker vanishing for the rest of the drag. The three
+   * things this guard is for — an edit that landed, an undo, a conflict reload — are
+   * all committed state.
+   */
   function selectionExists(): boolean {
-    const doc = project.document;
+    const doc = project.committed;
     const current = selection;
     if (current === null) return true;
     if (current.kind === 'zoom') {
@@ -915,22 +949,24 @@ async function start(): Promise<void> {
       el.playpause.title = playing ? 'Pause' : 'Play';
     }
 
-    // The handles are placed through the same `sourceSampleRect` the picture is
-    // sampled with, so a zoom that moves while the playhead runs moves them too. Only
-    // when something is selected, and only when the zoom actually changed: `resolve`
-    // is 0.08 µs and three number comparisons are nothing, but rebuilding the
-    // overlay's nodes sixty times a second at rest is exactly the allocation §4.3
-    // forbids on a frame path.
-    if (selection !== null) {
-      const zoom = resolve(project.compiled, timelineSec).zoom;
-      if (
-        zoom.amount !== paintedZoom[0] ||
-        zoom.center[0] !== paintedZoom[1] ||
-        zoom.center[1] !== paintedZoom[2]
-      ) {
-        paintedZoom = [zoom.amount, zoom.center[0], zoom.center[1]];
-        renderStage();
-      }
+    // The stage is re-placed whenever the zoom moves, and **not** only when something
+    // is selected. Two things ride on `StageState.mapping`: the handles over a
+    // selected annotation, and `outputToSource` — the map every pointer on the picture
+    // crosses. Nothing is selected for most of this window's life, so guarding on a
+    // selection left the map holding whatever zoom was resolved at the last document,
+    // selection or tool change; scrubbing into a 2.2× segment and then dragging a blur
+    // wrote the redaction at the coordinates it would have had at 1×, which is the
+    // privacy defect `annotations.ts` anchors geometry in source space to prevent. The
+    // per-frame cost is unchanged in shape: `resolve` is 0.08 µs and three number
+    // comparisons guard the only thing that allocates.
+    const zoom = resolve(project.compiled, timelineSec).zoom;
+    if (
+      zoom.amount !== paintedZoom[0] ||
+      zoom.center[0] !== paintedZoom[1] ||
+      zoom.center[1] !== paintedZoom[2]
+    ) {
+      paintedZoom = [zoom.amount, zoom.center[0], zoom.center[1]];
+      renderStage();
     }
   }
 

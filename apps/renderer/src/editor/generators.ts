@@ -64,6 +64,26 @@ export const GENERATOR_LABEL: Record<RunnableGenerator, string> = {
 };
 
 /**
+ * Where §3.5 puts each generator in the stack, as a **rank** rather than a literal
+ * index at the call site.
+ *
+ * §3.5 puts a generated cursor-follow track at the bottom and auto-zoom above it, and
+ * that order is load-bearing rather than tidy: cursor-follow emits a `center`-only
+ * channel with a single always-on `activeRange`, so a cursor-follow track sitting
+ * *above* auto-zoom outranks §6.5 step 3's edge-snapped cluster framing inside every
+ * click segment while auto-zoom's `amount` still applies — the shot zooms in on a
+ * click and frames somewhere else. `packages/edl/test/generator-stacking.test.ts`
+ * pins the arrangement and kept passing while this window inserted both at index 0,
+ * because what it exercises is what the *model* can express and not the order the
+ * editor inserts in. {@link runGenerator}'s own coverage is in
+ * `apps/renderer/test/editor-generators.test.ts`, over both invocation orders.
+ */
+export const GENERATOR_RANK: Record<RunnableGenerator, number> = {
+  'cursor-follow': 0,
+  'auto-zoom-on-click': 1,
+};
+
+/**
  * The logs, parsed, with the digests §3.5's fingerprint is made of.
  *
  * `clicks` is `null` when the recording has no click log — which is **not** an empty
@@ -278,7 +298,8 @@ export interface GeneratorRun {
  * this does is hand them the parsed logs and the digests, and turn the result into
  * `regenerateOps` — which is `track.remove` + `track.add` **at the same index**,
  * because track order is stacking order and a regeneration that appended would put the
- * cursor-follow track on top of the manual zoom above it.
+ * cursor-follow track on top of the manual zoom above it. Where a *first* run lands is
+ * {@link GENERATOR_RANK}, applied by {@link placementFor}.
  *
  * `generatedAt` is left to the generator (it stamps `new Date().toISOString()`), which
  * is right here and is why both take an override: a test needs a fixed one, and a
@@ -305,10 +326,7 @@ export function runGenerator(
       ...(generatedAt === undefined ? {} : { generatedAt }),
     });
     return {
-      // At the **bottom** of the stack when there is none yet — §3.5: *"A generated
-      // cursor-follow track sits at the bottom"* — so a manual zoom placed earlier
-      // keeps winning over a generator run afterwards.
-      ops: regenerateOps(doc, result.track, { type, at: 0 }),
+      ops: regenerateOps(doc, result.track, placementFor(doc, type)),
       warning: result.warning,
       keyCount: countKeys(result.track),
     };
@@ -331,7 +349,7 @@ export function runGenerator(
   });
   if (!result.ok) return { error: result.message };
   return {
-    ops: regenerateOps(doc, result.track, { type, at: 0 }),
+    ops: regenerateOps(doc, result.track, placementFor(doc, type)),
     // `empty` is a real answer and not a failure: the tap was live and nobody clicked,
     // so the track is legitimately a track with no segments in it. Saying so beats a
     // silent no-op, which is indistinguishable from a button that does not work.
@@ -370,6 +388,50 @@ export function describeStaleness(state: GeneratorState): string {
     return `The ${report.changedInputs.join(' and ')} log has changed since this was generated.`;
   }
   return 'This was generated with different settings.';
+}
+
+/**
+ * §3.5's placement for one generator's track, as the options `regenerateOps` takes.
+ *
+ * `at` is named **only when there is no track to replace**. On the replacement path
+ * `regenerateOps` reads `options.at ?? existing`, and its docblock exists precisely to
+ * keep a regenerated track at the index it already had — so naming one there would let
+ * a *Regenerate* silently re-order the two generated tracks against each other, which
+ * is the same wrong picture with a valid document that §3.5's own rule is about.
+ */
+function placementFor(
+  doc: EditDocument,
+  type: RunnableGenerator,
+): { type: RunnableGenerator; at?: number } {
+  const trackId = GENERATOR_TRACK_ID[type];
+  const replaces = doc.tracks.some(
+    (track) =>
+      track.id === trackId || (track.origin === 'generated' && track.generator?.type === type),
+  );
+  return replaces ? { type } : { type, at: insertionIndexFor(doc, type) };
+}
+
+/**
+ * Where a **new** generated track of this rank goes: above every generated track of a
+ * lower rank, and below everything else — which is every manual track, because
+ * `rewriteTrackOps` puts one at the end of the array.
+ */
+function insertionIndexFor(doc: EditDocument, type: RunnableGenerator): number {
+  const rank = GENERATOR_RANK[type];
+  let at = 0;
+  doc.tracks.forEach((track, index) => {
+    const other = rankOfTrack(track);
+    if (other !== null && other < rank) at = index + 1;
+  });
+  return at;
+}
+
+/** The stacking rank of a track this editor generated, or `null` for anything else. */
+function rankOfTrack(track: Track): number | null {
+  for (const type of RUNNABLE_GENERATORS) {
+    if (track.id === GENERATOR_TRACK_ID[type]) return GENERATOR_RANK[type];
+  }
+  return null;
 }
 
 function pick(from: Record<string, string>, names: readonly string[]): Record<string, string> {

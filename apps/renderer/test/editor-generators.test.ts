@@ -35,6 +35,7 @@ import {
   readEventLogs,
   runGenerator,
   type EventLogs,
+  type RunnableGenerator,
 } from '../src/editor/generators.ts';
 
 const DURATION = 20;
@@ -264,6 +265,94 @@ describe('running a generator from the editor', () => {
     // §6.5 step 1's `clusterGapSec` is 2.6 s, so 4 and 4.4 are one cluster and 12 is
     // its own — two segments, which is the `activeRanges` the track carries.
     expect(track?.activeRanges.length).toBe(2);
+  });
+});
+
+/**
+ * Run one generator through the **editor's** entry point and apply what it produced.
+ *
+ * Deliberately `runGenerator` and not `regenerateOps`: `packages/edl` already pins
+ * §3.5's stacking arrangement over the model, and it went on passing while this window
+ * inserted both generators at index 0 — because what it exercises is what the model
+ * can *express*, and the defect was in the index the editor asked for.
+ */
+function generateInto(doc: EditDocument, type: RunnableGenerator, logs: EventLogs): EditDocument {
+  const run = runGenerator(type, doc, logs, {
+    durationSec: DURATION,
+    recording: recordingWith({ clicks: true }),
+    generatedAt: '2026-08-06T00:00:00.000Z',
+  });
+  if ('error' in run) throw new Error(`${type}: ${run.error}`);
+  return apply(doc, run.ops);
+}
+
+const BOTH_ORDERS = [
+  ['cursor-follow', 'auto-zoom-on-click'],
+  ['auto-zoom-on-click', 'cursor-follow'],
+] as const;
+
+describe('§3.5’s stacking rank, as the editor inserts it', () => {
+  it('puts auto-zoom ABOVE cursor-follow, whichever button is pressed first', async () => {
+    const logs = await logsFor([4, 4.4, 12]);
+    // §3.5 puts a generated cursor-follow track at the bottom and auto-zoom over it,
+    // and the order is load-bearing: cursor-follow's `center` channel is always
+    // active, so a cursor-follow track above auto-zoom outranks §6.5 step 3's
+    // edge-snapped cluster framing inside every segment while auto-zoom's `amount`
+    // still applies — the shot zooms in on a click and frames somewhere else.
+    for (const order of BOTH_ORDERS) {
+      let doc: EditDocument = newEditDocument();
+      for (const type of order) doc = generateInto(doc, type, logs);
+      expect(
+        doc.tracks.map((t) => t.id),
+        `pressed ${order.join(' then ')}`,
+      ).toEqual([GENERATOR_TRACK_ID['cursor-follow'], GENERATOR_TRACK_ID['auto-zoom-on-click']]);
+    }
+  });
+
+  it('keeps both of them under a manual zoom the user placed first', async () => {
+    const logs = await logsFor([4, 4.4, 12]);
+    for (const order of BOTH_ORDERS) {
+      let doc: EditDocument = { ...newEditDocument(), tracks: [{ ...MANUAL_STUB }] };
+      for (const type of order) doc = generateInto(doc, type, logs);
+      expect(
+        doc.tracks.map((t) => t.id),
+        `pressed ${order.join(' then ')}`,
+      ).toEqual([
+        GENERATOR_TRACK_ID['cursor-follow'],
+        GENERATOR_TRACK_ID['auto-zoom-on-click'],
+        MANUAL_STUB.id,
+      ]);
+    }
+  });
+
+  it('leaves each generated track at ITS OWN index on a REGENERATE', async () => {
+    const logs = await logsFor([4, 4.4, 12]);
+    let doc: EditDocument = { ...newEditDocument(), tracks: [{ ...MANUAL_STUB }] };
+    for (const type of BOTH_ORDERS[0]) doc = generateInto(doc, type, logs);
+
+    // A document some other build wrote, whose two generated tracks are not in rank
+    // order. `regenerateOps` reads `options.at ?? existing` precisely so a replacement
+    // stays where it is — a *Regenerate* rewrites one track's keys and is not a licence
+    // to re-sort somebody's document, which is the same wrong-picture-with-a-valid-
+    // document §3.5's own rule is about. Asserted against a document that disagrees
+    // with the rank, because in rank order the two answers coincide and prove nothing.
+    const generated = doc.tracks.filter((t) => t.origin === 'generated');
+    const rest = doc.tracks.filter((t) => t.origin !== 'generated');
+    doc = { ...doc, tracks: [...generated.reverse(), ...rest] };
+    const before = doc.tracks.map((t) => t.id);
+    expect(before).toEqual([
+      GENERATOR_TRACK_ID['auto-zoom-on-click'],
+      GENERATOR_TRACK_ID['cursor-follow'],
+      MANUAL_STUB.id,
+    ]);
+
+    for (const type of ['auto-zoom-on-click', 'cursor-follow'] as const) {
+      doc = generateInto(doc, type, logs);
+      expect(
+        doc.tracks.map((t) => t.id),
+        `regenerated ${type}`,
+      ).toEqual(before);
+    }
   });
 });
 
