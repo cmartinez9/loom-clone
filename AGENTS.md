@@ -1083,9 +1083,9 @@ was not a control.
   often it trips 16.67 ms says nothing about the compositor.
   **`FRAME_BUDGET_MS` and §8's four assertions are untouched, and strict on any host that
   can represent the product** — which is every machine a contributor runs `npm test` on. A
-  phase is refused them only where the host structurally cannot: no hardware-backed decode
-  **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch is not
-  a pass. It detects regressions by **rate** — the compositor may miss the budget no
+  phase is deferred instead only where the host structurally cannot: no hardware-backed
+  decode **and** a per-frame GPU composite above a tenth of §8's whole frame. That branch
+  is not a pass. It detects regressions by **rate** — the compositor may miss the budget no
   oftener than the host missed it in the same frames — and bounds single frames only by
   §8's frame scaled by the per-frame work this host was measured doing.
   **The derivations are not repeated here.** `test/gate/budget-control.ts`'s module
