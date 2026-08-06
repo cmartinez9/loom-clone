@@ -204,7 +204,7 @@ export function audioRuns(part: AudioPartTiming): AudioRun[] {
     if (runSamples <= 0 || firstSample + runSamples > totalSamples) continue;
     runs.push({ firstSample, sampleCount: runSamples, startSec });
     firstSample += runSamples;
-    startSec = gap.atSec;
+    startSec = gap.atSec + Math.max(0, gap.durationSec);
   }
   runs.push({ firstSample, sampleCount: Math.max(0, totalSamples - firstSample), startSec });
   return runs;
