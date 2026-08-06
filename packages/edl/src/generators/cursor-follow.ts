@@ -97,19 +97,25 @@ export const DEFAULT_FOLLOW_AMOUNT = 2;
  * speed limit on a fast flick. Neither alone reaches 10/10; together they do, with
  * margin.
  *
- * ## What this is a divergence from, and what it is not
+ * ## This is a settled divergence
  *
- * §6.3 calls its parameters *"**Default** parameters … Cap's `ScreenMovementSpring`"*,
- * and Cap drives that spring between discrete zoom *segments*, where 0.45 s of settling
- * after a step is exactly right. Cursor-follow is continuous tracking of a moving
- * target, where what matters is velocity bandwidth rather than step settling — a
- * different job for the same spring. `maxTargetSpeedUvPerSec` has no §6 counterpart at
- * all; `dead-zone.ts` says so at the field.
+ * **Accepted by captain decision, `data/loom-scope/decision-comfort-ladder.md`**, after
+ * being raised rather than taken. The architecture report carries a matching
+ * *Correction, 2026-08-05* which governs where §6 conflicts with it — §6's own text is
+ * preserved as designed, so it still reads as though this ladder were unnecessary. Do
+ * not "restore §6.3's defaults" on the strength of §6 alone.
  *
- * So: the report's numbers are the default and are what a passing recording gets, the
- * measured budget is the arbiter, and the ladder is the documented remedy — which is
- * §6.6's own structure, with more than one knob on the later rungs. This was raised
- * rather than taken: see `AGENTS.md` § Phase 10.
+ * What the decision accepts: rung 1 is §6.2/§6.3 exactly and is always tried first;
+ * later rungs additionally soften the spring and cap the follow target's speed, and
+ * **that cap has no §6 counterpart at all** (`dead-zone.ts` says so at the field). §6.5's
+ * `preRollSec`, `amountRange` and `edgeSnap` are implicated by the same geometry and are
+ * covered by the same acceptance.
+ *
+ * Why the spring is the right knob rather than a liberty: §6.3 calls its parameters
+ * *"**Default** parameters … Cap's `ScreenMovementSpring`"*, and Cap drives that spring
+ * between discrete zoom *segments*, where 0.45 s of settling after a step is exactly
+ * right. Cursor-follow is continuous tracking of a moving target, where what matters is
+ * velocity bandwidth rather than step settling — a different job for the same spring.
  *
  * `springScale` scales ω₀ and leaves ζ alone (`k ← k·s²`, `c ← c·s`, `m` unchanged), so
  * every rung keeps §6.3's *character* — 0.943, visually critically damped — and only

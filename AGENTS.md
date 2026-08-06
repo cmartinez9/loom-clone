@@ -21,6 +21,11 @@ compiling against it.
 | `~/firstmate/data/loom-design/`                | The approved "Pressroom" visual language, plus working mockups of every surface.                                                                     |
 | `~/firstmate/data/loom-scope/decision-*.md`    | Individual captain decisions with their reasoning.                                                                                                   |
 
+The architecture report carries a **Correction, 2026-08-05** at its end: §6 is internally
+inconsistent (§6.2/§6.3 cannot satisfy §6.6), and where §6 conflicts with that correction
+the correction governs. Read it before implementing anything against §6.2, §6.3, §6.5 or
+§6.6; the §6 text itself is deliberately preserved as designed.
+
 Section references in source comments (`§2.7`, `§7.1`) point at the architecture report.
 
 ## Commands
@@ -283,20 +288,20 @@ The corpus was recorded with Accessibility granted, so its `clicks.ndjson` are r
 without the grant, rather than quietly becoming "auto-zoom declines politely ten
 times".
 
-**The divergence, raised rather than taken.** §6.6's own remedy — _"widen the rest box
-by 20% … up to three attempts"_ — moves the failing metrics by under 5%, and 8 of the
-10 recordings fail. The cause is structural: §6.2's target sits at a fixed offset from
-the cursor, so **the target's velocity is the cursor's velocity**, and §6.3's spring
-passes it through nearly intact (velocity time constant `1/(ζω₀) = 0.11 s` against the
-`0.35/1.2 = 0.29 s` §6.6's own two limits imply — the budget's speed and acceleration
-numbers cannot both be met by that spring). `COMFORT_LADDER` in `cursor-follow.ts`
-therefore softens two more things on the later rungs: §6.3's spring (ω₀ scaled, ζ
-kept, so §6.4's lead follows automatically) and a **target speed cap that has no §6
-counterpart at all**. Rung 1 is §6.2 and §6.3 exactly and is what a passing recording
-gets — two of the ten. The measurements, the derivation and the "this is a reading"
-note live in `cursor-follow.ts`'s `COMFORT_LADDER` docblock and in
-`dead-zone.ts`'s `maxTargetSpeedUvPerSec`; **if the captain rules the other way, the
-revert is that one constant.**
+**The comfort ladder is a settled divergence, not an open one.**
+`data/loom-scope/decision-comfort-ladder.md` records the captain's decision and the
+contradiction in §6 that forced it; the architecture report carries a matching
+**Correction, 2026-08-05** which _governs where §6 conflicts with it_. Read both before
+touching §6.2, §6.3, §6.5 or §6.6 — the §6 text is preserved as designed, so it still
+reads as though the ladder were unnecessary.
+
+What that settles, in one line each: `COMFORT_LADDER` in `cursor-follow.ts` tries
+**§6.2/§6.3 exactly as rung 1** and only then softens the spring (ω₀ scaled, ζ kept, so
+§6.4's lead follows) and caps the follow target's speed at 0.30 / 0.25 UV/s — a cap with
+**no §6 counterpart**, and the accepted divergence. §6.5's `preRollSec`, `amountRange`
+and `edgeSnap` are implicated by the same geometry and covered by the same acceptance.
+The rung values and what each was measured to buy are at `COMFORT_LADDER` itself; do not
+re-derive them here.
 
 ## Sharp edges — the generators
 
@@ -343,9 +348,9 @@ revert is that one constant.**
   that _opens as the zoom tightens_, so a centre edge-snapped for the segment's full
   `amount` slides outward while the pre-roll zooms in — a real picture, correctly
   measured. Slowing it means changing `preRollSec`, `amountRange` or the edge snap, all
-  §6.5's specified numbers, so it is folded into the open §6.6-versus-§6 question above
-  rather than answered here. The budget is reported on `AutoZoomResult.budget` and not
-  gated, because §6.6's remedy is a rest box and this generator has none.
+  §6.5's specified numbers — covered by `data/loom-scope/decision-comfort-ladder.md`.
+  The budget is reported on `AutoZoomResult.budget` and not gated, because §6.6's remedy
+  is a rest box and this generator has none.
 - **§6.7 is not here.** The cursor _sprite_'s own stiffer spring belongs to whatever
   composites the sprite; `Track` already carries `smoothing` and `clickSpring` for it.
 - **The corpus driver warps, it does not post.** Measured on this machine with

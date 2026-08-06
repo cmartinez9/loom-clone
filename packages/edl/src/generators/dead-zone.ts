@@ -69,14 +69,16 @@ export interface DeadZoneOptions {
    * How fast the target itself may travel, UV per second, or `null` for §6.2 as
    * written.
    *
-   * **Not in §6.2, and it is not there by accident** — §6.2's rule places the target
-   * relative to the cursor and says nothing about a rate, which means the target's
-   * velocity *is* the cursor's velocity from the instant the cursor leaves the box.
-   * Measured on the ten real recordings in `packages/edl/test/corpus/`: that puts the
-   * camera at 0.28–1.18 UV/s against §6.6's budget of 0.35, and only the two calmest
-   * sessions come in under it. `cursor-follow.ts`'s comfort ladder is where this is
-   * turned on and why; the rung that carries it is the one §6.6's own "widen the rest
-   * box" rung could not reach.
+   * **This has no counterpart in §6**, and it is the deliberate divergence accepted in
+   * `data/loom-scope/decision-comfort-ladder.md` (see also the architecture report's
+   * *Correction, 2026-08-05*, which governs where §6 conflicts with it). §6.2's rule
+   * places the target relative to the cursor and says nothing about a rate, which means
+   * the target's velocity *is* the cursor's velocity from the instant the cursor leaves
+   * the box. Measured on the ten real recordings in `packages/edl/test/corpus/`: that
+   * puts the camera at 0.28–1.18 UV/s against §6.6's budget of 0.35, and only the two
+   * calmest sessions come in under it. `cursor-follow.ts`'s `COMFORT_LADDER` is where
+   * this is turned on; the rung that carries it is the one §6.6's own "widen the rest
+   * box" remedy could not reach.
    *
    * What it costs is exactly what a calm camera costs: on a fast flick the camera
    * arrives late and the cursor can leave the visible viewport for a moment. It

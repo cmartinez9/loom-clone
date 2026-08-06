@@ -74,9 +74,13 @@
  * during the pre-roll is the framing sliding outward as the zoom makes the corner
  * reachable. That is a real picture, correctly measured; making it slower means a
  * longer `preRollSec`, a lower `amountRange[1]`, or a centre that is not snapped to the
- * edge — all of them §6.5's specified numbers. It is the same open question as
- * `cursor-follow.ts`'s `COMFORT_LADDER` (§6.6's budget against §6's parameters), it is
- * recorded in `AGENTS.md`, and it is not answered here unilaterally.
+ * edge — all of them §6.5's specified numbers.
+ *
+ * Those three were raised rather than changed here, and are **covered by the same
+ * captain decision as the comfort ladder**:
+ * `data/loom-scope/decision-comfort-ladder.md`, with the architecture report's
+ * *Correction, 2026-08-05* governing where §6 conflicts with it. So the numbers above
+ * stand as §6.5 specifies them, and the figure is reported rather than gated.
  *
  * ## Why the centre keys start and end at the frame centre
  *
