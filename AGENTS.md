@@ -1209,15 +1209,15 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   its own log on a bad run for the same reason: how far it got is the difference
   between a host that took the instrument away and a defect that always will.
   **That note has since earned its keep, and it moved `GATE_ATTEMPTS` from two to
-  three.** On CI run 31084636446 both launches lost the context at the same place —
-  the first scrub readback, on one runner inside 35 s — and the note named the
-  mechanism the earlier occurrence could only guess at: `abnormal-exit (exit 8704)`,
-  Chromium's GPU process _exiting_ on a context loss rather
-  than the watchdog killing it. A launch that starts seconds after that exit is a
-  second reading of one host in one state, not the independent sample "a second loss
-  in a row" was read as, so two launches were one sample. The predicate did not move
-  and must not: `shouldRelaunch` is `report.contextLost` and nothing else, and three
-  consecutive losses still fail the gate.
+  three.** The mechanism it named — `abnormal-exit (exit 8704)`, Chromium's GPU process
+  _exiting_ on a context loss rather than the watchdog killing it — makes a launch that
+  starts seconds after it a second reading of one host in one state rather than the
+  independent sample "a second loss in a row" was read as. The count lives beside the
+  predicate in `test/gate/relaunch.ts`, whose docblock owns the derivation and the
+  measurement it rests on, and `test/relaunch-policy.test.ts` pins the value — so raising
+  it again fails a test and costs a measured demonstration of the same kind rather than a
+  nudge in a gate file. The predicate did not move and must not: `shouldRelaunch` is
+  `report.contextLost` and nothing else, and three consecutive losses still fail the gate.
 - **A pre-empted renderer is not a slow frame, and the instrument cannot tell them
   apart.** The frame budget is `performance.now()` around the frame body, so anything
   the OS scheduler takes away lands on whichever frame it interrupted. Chromium
