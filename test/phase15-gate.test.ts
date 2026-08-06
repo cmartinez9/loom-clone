@@ -199,6 +199,13 @@ function describeRun(report: ControlsReport): string {
             `(one step costs ${String(report.slider.controlRevisions)}) ` +
             `asked=${report.slider.asked.toFixed(2)} amount=${report.slider.amount.toFixed(3)}`,
         ]),
+    ...(report.settled === null
+      ? ['  return trip never driven']
+      : [
+          `  return trip showing=${report.settled.shownAmount.toFixed(3)} ` +
+            `committed=${report.settled.committedAmount.toFixed(3)} ` +
+            `revisions=${String(report.settled.revisions)}`,
+        ]),
     '',
   ].join('\n');
 }
@@ -311,8 +318,9 @@ describe('the editor’s controls', () => {
       // precisely what a slider destroyed by its own first event still survives.
       expect(slider.moves, detail).toBeGreaterThan(3);
 
-      // The control the captain named by hand has to be usable, and "usable" here is
-      // a mechanical claim: the `<input type="range">` the gesture is holding is still
+      // This is the control on the one capability the captain named himself, so it has
+      // to be usable — and "usable" here is a mechanical claim rather than a matter of
+      // taste: the `<input type="range">` the gesture is holding is still
       // the one in the document when the gesture ends. Committing on `input` rebuilt
       // the panel over it, so the thumb stopped after one step — an interaction that
       // fails on first contact while every cheaper check still reports the right
@@ -334,6 +342,29 @@ describe('the editor’s controls', () => {
       // The drag actually landed on what it asked for last, rather than on some
       // intermediate value a dropped `change` would have left behind.
       expect(slider.amount, detail).toBeCloseTo(slider.asked, 2);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
+    'and a gesture that ends where it started leaves nothing provisional behind',
+    async () => {
+      const report = await gate();
+      const detail = describeRun(report);
+      const settled = report.settled;
+      expect(settled, detail).not.toBeNull();
+      if (settled === null) return;
+
+      // The branch no other gesture in this gate reaches: the last `input` and the
+      // `change` both ask for a document that is already committed, so both produce no
+      // ops. Returning early there would leave the moves on the way out showing — a
+      // magnification that is in no `edit.json`, in the preview and in the panel, until
+      // some later commit or undo happened by. Both numbers are measured: the second is
+      // what the previous gesture actually committed, not a value written here.
+      expect(settled.shownAmount, detail).toBeCloseTo(settled.committedAmount, 6);
+
+      // And it is not an edit, because it changed nothing.
+      expect(settled.revisions, detail).toBe(0);
     },
     GATE_TIMEOUT_MS,
   );

@@ -28,6 +28,20 @@ the correction governs. Read it before implementing anything against §6.2, §6.
 
 Section references in source comments (`§2.7`, `§7.1`) point at the architecture report.
 
+**A captain decision and a firstmate decision are not the same kind of thing, and this
+file should always say which it is quoting.** The `decision-*.md` files and the numbered
+decisions in `loom-clone-decisions.md` are the captain's: settled, expensive to revisit,
+and to be diverged from only in writing (`decision-comfort-ladder.md` is what that looks
+like). Everything else that was _decided_ rather than derived — including the calls
+firstmate takes in a review round while the captain is asleep — is a judgement someone
+should argue with the moment they hold better evidence, and one of them being overturned
+is the process working rather than a defect. Phase 15's own history is the example:
+firstmate's first answer to a keyframe drag corrupting its region was a bound on where
+the key may go, and a reviewer's evidence retired it in favour of fixing the reader
+(§ Sharp edges — the editor). So attribute precisely: do not promote a firstmate call to
+a captain decision by writing "the captain" over it, and do not quietly demote one of
+his.
+
 ## Commands
 
 ```bash
@@ -760,9 +774,12 @@ invocation orders**.
 
 **A slider is provisional on `input` and committed on `change`, and the panel does not
 rebuild while one is mid-gesture.** Both halves of `inspector.ts`'s `range`, and each
-closes a different defect that the Amount slider — the captain's own named control —
-had. Committing on `input` ran `replaceChildren` over the very `<input type="range">`
-the pointer was holding, so the drag ended on **first contact**: the focus/caret
+closes a different defect the Amount slider had. It is the control on the one
+capability the captain named himself — _"Manual option too."_ — so a slider that does
+not work is that capability not working; the two-phase shape below is firstmate's
+answer to it and not a captain decision. Committing on `input` ran `replaceChildren`
+over the very `<input type="range">` the pointer was holding, so the drag ended on
+**first contact**: the focus/caret
 restore in `Inspector.render` can put focus back and cannot put a pointer capture
 back. And it made every step of the thumb an op, a revision and an undo entry, so
 undoing a drag would take as many undos as the pointer moved. The two-phase shape is
@@ -801,7 +818,10 @@ nudged** — several `input`s and one `change` — and that is the only shape th
 what one synthetic `input` cannot: the element the gesture is holding is still the
 document's when it ends, and the whole gesture cost `edit.json` **one** revision. A
 single `input` passes over a slider that is destroyed by its own first event, because
-the last value it was given still lands. Twelve entries in `npm run verify:mutation`
+the last value it was given still lands. It also drives one gesture that **ends where
+it started**, which is the only shape that reaches the "this changes nothing" branch
+every two-phase callback has, and asks the editor what it is showing against what it
+committed. Fourteen entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the one worth
 knowing is `an-annotation-is-placed-in-output-space`, whose guard is deliberately the
 unit test and **not** this gate, which was tried and measured surviving it (the gate
@@ -837,6 +857,16 @@ flag that writes a PNG beside each reading — the way to _look_ at this window,
   tunes a zoom nobody is looking at. `main.ts`'s `selectZoomAt` picks the region that
   _covers_ the instant that was just placed. (`length - 1` is not the largest index
   either — `zoomRegionsOf` skips a window whose keys it cannot read.)
+- **A gesture that ends where it started must cancel its preview, not return.** Every
+  op builder answers `null` for "this changes nothing", and every drag can reach that —
+  a slider taken away and back, a keyframe returned to where it was. Returning early
+  leaves the _previous_ move's provisional document on `EditorProject` with nothing to
+  clear it, so the preview shows a value that is not in `edit.json` and the inspector,
+  which reads `project.document`, shows it too until the next commit or undo happens
+  by. `main.ts`'s `edit(ops, phase, label)` is the one boundary all six two-phase
+  callbacks end at, so a seventh cannot be written without it. Only a gesture that ends
+  on the value it started from reaches the branch, which is why the phase-15 gate
+  drives one rather than trusting that six call sites each remembered.
 - **A selection is checked against `project.committed`, never `project.document`.** The
   latter is the _provisional_ document while a drag is live, and a keyframe drag
   previews its key at the new `t` on every pointermove — so a guard reading it finds no
@@ -852,6 +882,22 @@ flag that writes a PNG beside each reading — the way to _look_ at this window,
   intersects the two, inclusively at both ends because `zoomRegionsOf`'s own filter is
   inclusive: the first key of a region sits _on_ its window start, and a bound that
   disagreed with the reader by one float would drop a key from its own region.
+  **That bound is right and it is not what closes the class** — see the entry below.
+- **A region's centre is identified structurally, and a position in a list is not
+  identity.** `zoomRegionsOf` used to take the middle element of the `center` keys
+  filtered by the **`amount`** channel's extent, which assumed a shape nobody
+  guarantees: the moment that set gained a second member, the middle of two was the
+  identity ramp-out key and the region read back `[0.5, 0.5]` — then the next
+  region-level edit rebuilt the track from `asInput(current)` and wrote the frame
+  centre in over the user's framing, silently. Two ordinary drags reach it, and this is
+  the half worth inheriting: **one of them is not a window question at all.** The last
+  `amount` key dragged later pushes `endSec` past the ramp-out centre key so the filter
+  admits it; the last `center` key dragged _earlier_ does the same while never leaving
+  its own window, so no bound on where a key may go can close it. `regionCenter` asks
+  the writer's question instead — exclude the keys `buildManualZoomTrack` puts at the
+  region's ends, take the candidate nearest `startSec + ZOOM_RAMP_SEC`, and answer
+  `[0.5, 0.5]` when a region has no centre of its own left rather than refusing a
+  document this editor did not write.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —

@@ -73,6 +73,7 @@ import type {
   FrameDelta,
   OnDisk,
   Reading,
+  SettledGesture,
   SliderGesture,
 } from './report.ts';
 
@@ -145,6 +146,7 @@ let report: ControlsReport = {
   exports: exports_,
   deltas,
   slider: null,
+  settled: null,
   notes,
 };
 
@@ -191,6 +193,14 @@ const OUTSIDE_SEC = 8.8;
  */
 const SLIDER_STEP = 3;
 const SLIDER_DRAG = [2.5, 2.9, 3.3, 3.6, 3.8, 4];
+/**
+ * The way out and back for a gesture that ends where it started.
+ *
+ * The value it returns to is not written here — it is whatever the drag above actually
+ * committed, appended at the call site — because the whole point of this reading is
+ * the comparison between what the editor shows and what it committed.
+ */
+const SLIDER_RETURN = [3.2, 2.8];
 
 /** §2.5's cursor log: a slow drift, at the sampler's own 120 Hz. */
 function cursorNdjson(seconds: number): { text: string; samples: number } {
@@ -1064,6 +1074,28 @@ void app.whenReady().then(async () => {
       `slider: ${String(slider.moves)} moves, survived=${String(slider.survivedTheDrag)}, ` +
         `revisions=${String(slider.revisions)} (one step costs ` +
         `${String(slider.controlRevisions)}), amount=${slider.amount.toFixed(3)}`,
+    );
+
+    // ---- and a gesture that ends where it started ---------------------------
+    // Out and back to the value the drag above committed. The last `input` and the
+    // `change` both ask for a document that is already the committed one, so both
+    // produce no ops at all — the branch no other gesture in this gate reaches. What
+    // must not survive it is the provisional document the moves on the way out left
+    // behind: nothing commits, so the editor has to be showing what it committed.
+    const beforeReturn = await readDisk(recordingsRoot, recording.id, 'before the return trip');
+    await dragRange(editor, 'zoom-amount', [...SLIDER_RETURN, slider.amount]);
+    const afterReturn = await readDisk(recordingsRoot, recording.id, 'after the return trip');
+    const returnTrip: SettledGesture = {
+      shownAmount: (await editor.webContents.executeJavaScript(
+        `window.__loomEditor.regions[0]?.amount ?? 0`,
+      )) as number,
+      committedAmount: slider.amount,
+      revisions: afterReturn.revision - beforeReturn.revision,
+    };
+    report = { ...report, settled: returnTrip };
+    note(
+      `return trip: showing ${returnTrip.shownAmount.toFixed(3)} against a committed ` +
+        `${returnTrip.committedAmount.toFixed(3)}, revisions=${String(returnTrip.revisions)}`,
     );
     await read(editor, 'manual, inside');
     await seekTo(editor, OUTSIDE_SEC);

@@ -141,8 +141,9 @@ export function manualZoomTrackOf(doc: EditDocument): Track | null {
  * Read out of the keys rather than remembered beside them: `edit.json` is the
  * authority, an undo rewrites it through the ordinary op path, and a cache of "what
  * the user meant" beside the document is a second state to keep correct. The four
- * keys per region are §6.5's shape, so the hold's amount is the second key's and the
- * centre is the middle `center` key's.
+ * keys per region are §6.5's shape, so the hold's amount is the largest inside the
+ * window and the centre is {@link regionCenter}'s — the key at the hold, identified
+ * structurally rather than by its position in a list.
  */
 export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
   const track = manualZoomTrackOf(doc);
@@ -164,17 +165,76 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
       const v = typeof key.v === 'number' ? key.v : (key.v[0] ?? MIN_ZOOM_AMOUNT);
       if (v > amount) amount = v;
     }
-    const centres = centerKeys.filter(
-      (key) => key.t > startSec + 1e-9 && key.t < endSec - 1e-9 && Array.isArray(key.v),
-    );
-    const middle = centres[Math.floor(centres.length / 2)]?.v;
-    const center: Vec2 =
-      Array.isArray(middle) && middle.length >= 2
-        ? [middle[0] ?? 0.5, middle[1] ?? 0.5]
-        : [0.5, 0.5];
+    const center = regionCenter(centerKeys, { startSec, endSec, windowStart, windowEnd });
     out.push({ index, startSec, endSec, windowEndSec: windowEnd, amount, center });
   });
   return out;
+}
+
+/**
+ * The centre one region means, identified by the layout {@link buildManualZoomTrack}
+ * writes rather than by a position in a filtered list.
+ *
+ * ## Why a position was the wrong question
+ *
+ * The writer puts exactly three `center` keys on a region — identity at `startSec`,
+ * the user's framing at the **hold start**, identity at `endSec` — and the reader used
+ * to take the middle element of a set filtered by the *`amount`* channel's extent.
+ * That index was a positional heuristic standing in for identity, and it returned the
+ * identity ramp-out key the instant the set's shape changed. Two ordinary drags reach
+ * that, and only one of them is a window question:
+ *
+ *  - the **last `amount` key** dragged later pushes `endSec` past the ramp-out centre
+ *    key, which the filter then admits — two candidates, and the middle of two is the
+ *    second;
+ *  - the **last `center` key** dragged earlier lands it inside the filter with the
+ *    same result, and no bound on where a key may go closes it, because the key is
+ *    inside its own window the whole time.
+ *
+ * Either way the region reads back `[0.5, 0.5]`, and the next region-level edit —
+ * {@link updateZoomOps} or {@link removeZoomOps}, which rebuild the track from
+ * `asInput(current)` — writes the frame centre in over the user's framing, silently.
+ *
+ * ## What it asks instead
+ *
+ * The centre a region *means* is the one at its hold, so this excludes the keys the
+ * writer puts at the region's own ends and takes the candidate nearest
+ * `startSec + ZOOM_RAMP_SEC` — which is where {@link buildManualZoomTrack} put it, so
+ * the ordinary case is an exact match at distance zero. Nearest rather than exact
+ * because a document this editor did not write, or one whose keys a person has nudged,
+ * is not obliged to have one there: a defensible answer beats a refusal, and
+ * `[0.5, 0.5]` is the honest one when a region has no centre of its own left.
+ *
+ * `moveKeyOps` cannot reorder keys ({@link neighbourBounds} keeps `KEY_GAP_SEC`
+ * between them), so on a track this editor wrote the user's key stays strictly between
+ * the two identity keys however far either end is dragged.
+ */
+function regionCenter(
+  keys: readonly Keyframe[],
+  region: {
+    startSec: Seconds;
+    endSec: Seconds;
+    windowStart: number;
+    windowEnd: number;
+  },
+): Vec2 {
+  const holdStart = region.startSec + ZOOM_RAMP_SEC;
+  let best: number[] | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const key of keys) {
+    const value = key.v;
+    if (!Array.isArray(value) || value.length < 2) continue;
+    if (key.t < region.windowStart - 1e-9 || key.t > region.windowEnd) continue;
+    if (Math.abs(key.t - region.startSec) <= 1e-9) continue;
+    if (Math.abs(key.t - region.endSec) <= 1e-9) continue;
+    const distance = Math.abs(key.t - holdStart);
+    if (distance < bestDistance) {
+      best = value;
+      bestDistance = distance;
+    }
+  }
+  if (best === null) return [0.5, 0.5];
+  return [best[0] ?? 0.5, best[1] ?? 0.5];
 }
 
 /** The region covering `atSec`, or `null`. Windows never overlap, so there is at most one. */

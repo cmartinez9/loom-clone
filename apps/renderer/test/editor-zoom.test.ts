@@ -57,6 +57,7 @@ import {
   zoomRegionAt,
   zoomRegionsOf,
   ZOOM_RAMP_SEC,
+  type KeyView,
 } from '../src/editor/zoom.ts';
 
 const DURATION = 60;
@@ -618,5 +619,163 @@ describe('keyframe editing', () => {
     const centre = zoomKeysOf(two).filter((k) => k.channel === 'center');
     expect(centre).toHaveLength(2);
     expect(removeKeyOps(two, centre[0] ?? { trackId: '', channel: '', t: 0 })).toBeNull();
+  });
+});
+
+/**
+ * Which `center` key a region *means*, and the corruption a positional answer causes.
+ *
+ * `buildManualZoomTrack` writes three centre keys per region — identity at `startSec`,
+ * the user's framing at the hold, identity at `endSec` — and the reader used to take
+ * the middle of the set filtered by the **`amount`** channel's extent. That index was a
+ * position standing in for identity: the moment the set gained a second member the
+ * middle of two was the identity ramp-out key, the region read back `[0.5, 0.5]`, and
+ * the next region-level edit rebuilt the whole track from `asInput(current)` and wrote
+ * the frame centre in over the user's framing.
+ *
+ * Two ordinary drags reach it and **only one of them is a window question**, which is
+ * why `keyBounds` could not close the class on its own.
+ */
+describe('a region reports the centre the user framed', () => {
+  /** Comfortably inside the legal centre interval at 2× ([0.25, 0.75]) and at 3×. */
+  const FRAMED: [number, number] = [0.6, 0.4];
+
+  function framed(startSec = 10, endSec = 18): EditDocument {
+    return place(empty(), { startSec, endSec, amount: 2, center: [FRAMED[0], FRAMED[1]] });
+  }
+
+  function centreOf(document_: EditDocument): [number, number] {
+    const region = zoomRegionsOf(document_)[0];
+    expect(region, 'the region stopped being readable at all').toBeDefined();
+    return [region?.center[0] ?? -1, region?.center[1] ?? -1];
+  }
+
+  function expectFramed(document_: EditDocument, why: string): void {
+    const [x, y] = centreOf(document_);
+    expect(x, why).toBeCloseTo(FRAMED[0], 6);
+    expect(y, why).toBeCloseTo(FRAMED[1], 6);
+  }
+
+  /**
+   * The consequence, not the intermediate reading: a region-level edit rebuilds the
+   * track from `asInput(current)`, so a misread centre is written into the document.
+   */
+  function expectFramingSurvivesAnEdit(document_: EditDocument): void {
+    const tuned = apply(document_, updateZoomOps(document_, 0, { amount: 3 }, DURATION));
+    expect(zoomRegionsOf(tuned)[0]?.amount).toBeCloseTo(3, 6);
+    expectFramed(tuned, 'a region-level edit wrote the frame centre over the user’s framing');
+    const written = tuned.tracks[0]?.channels['center']?.keys ?? [];
+    const kept = written.find(
+      (key) => Array.isArray(key.v) && Math.abs((key.v[0] ?? 0) - FRAMED[0]) < 1e-9,
+    );
+    expect(kept, 'the rebuilt track carries no key with the user’s framing on it').toBeDefined();
+  }
+
+  function keysOn(document_: EditDocument, channel: string): KeyView[] {
+    return zoomKeysOf(document_).filter((key) => key.channel === channel);
+  }
+
+  function last(views: readonly KeyView[]): KeyView {
+    const view = views[views.length - 1];
+    expect(view, 'the channel under test has no keys').toBeDefined();
+    return (
+      view ?? {
+        trackId: '',
+        channel: '',
+        t: 0,
+        key: { t: 0, v: 0, ease: { kind: 'hold' } },
+        editable: false,
+      }
+    );
+  }
+
+  it('reads it back from a region nobody has touched', () => {
+    expectFramed(framed(), 'a freshly placed region');
+  });
+
+  it('SIBLING 1: the last `amount` key dragged later — `endSec` passes the ramp-out key', () => {
+    const doc = framed();
+    const moved = apply(doc, moveKeyOps(doc, last(keysOn(doc, 'amount')), 18.2));
+    // The precondition: the drag landed and `endSec` is now past the centre key at 18,
+    // which is exactly what let the old filter admit a second candidate.
+    expect(zoomRegionsOf(moved)[0]?.endSec).toBeGreaterThan(18 + 1e-6);
+    expectFramed(moved, 'dragging the last `amount` key later lost the framing');
+    expectFramingSurvivesAnEdit(moved);
+  });
+
+  it('SIBLING 2: the last `center` key dragged earlier — and no bound reaches this one', () => {
+    const doc = framed();
+    const moved = apply(doc, moveKeyOps(doc, last(keysOn(doc, 'center')), 12));
+    // The key never leaves its own `activeRanges` window, so `keyBounds` permits it and
+    // always will: the reader is the only thing that can be right here.
+    expect(keysOn(moved, 'center').map((key) => key.t)).toContain(12);
+    expect(zoomRegionsOf(moved)[0]?.endSec).toBeCloseTo(18, 6);
+    expectFramed(moved, 'dragging the last `center` key earlier lost the framing');
+    expectFramingSurvivesAnEdit(moved);
+  });
+
+  describe('attacking the reader on purpose', () => {
+    it('keeps the framing when the START ramp’s centre key is deleted', () => {
+      const doc = framed();
+      const next = apply(doc, removeKeyOps(doc, keysOn(doc, 'center')[0]!));
+      expectFramed(next, 'deleting the ramp-in centre key lost the framing');
+    });
+
+    it('keeps the framing when the END ramp’s centre key is deleted', () => {
+      const doc = framed();
+      const next = apply(doc, removeKeyOps(doc, last(keysOn(doc, 'center'))));
+      expectFramed(next, 'deleting the ramp-out centre key lost the framing');
+    });
+
+    it('keeps the framing when the hold’s `amount` key is deleted', () => {
+      // The case that rules out deriving the hold from the `amount` channel: with that
+      // key gone the largest amount sits at `holdEnd`, near the far end of the region.
+      const doc = framed();
+      const next = apply(doc, removeKeyOps(doc, keysOn(doc, 'amount')[1]!));
+      expectFramed(next, 'deleting the hold’s `amount` key lost the framing');
+    });
+
+    it('answers identity when the user deleted their OWN centre key', () => {
+      // Honest rather than clever: the framing is gone from the document, so the
+      // region has no centre of its own and `[0.5, 0.5]` is what it means.
+      const doc = framed();
+      const next = apply(doc, removeKeyOps(doc, keysOn(doc, 'center')[1]!));
+      expect(centreOf(next)).toEqual([0.5, 0.5]);
+    });
+
+    it('keeps the framing on the shortest region the model allows', () => {
+      // Both ramps and the minimum hold, so every key is as close to every other as
+      // this editor can place them. A region whose hold has no length at all is not on
+      // the list: `buildManualZoomTrack` writes `holdEnd` at `max(holdStart +
+      // MIN_HOLD_SEC, …)`, so the two can never coincide however short the request.
+      const shortest = framed(10, 10 + 2 * ZOOM_RAMP_SEC + 0.2);
+      const holdKeys = keysOn(shortest, 'amount').map((key) => key.t);
+      expect(holdKeys[2] ?? 0).toBeGreaterThan(holdKeys[1] ?? 0);
+      expectFramed(shortest, 'the shortest legal region');
+    });
+
+    it('degrades rather than throwing on a track with no `center` channel at all', () => {
+      // A hand-edited or older document is not obliged to carry the shape this editor
+      // writes, and refusing to read one would take the whole panel down with it.
+      const doc = framed();
+      const track = doc.tracks[0];
+      expect(track).toBeDefined();
+      const { center: _center, ...channels } = track?.channels ?? {};
+      const stripped: EditDocument = {
+        ...doc,
+        tracks: [{ ...track!, channels }],
+      };
+      expect(centreOf(stripped)).toEqual([0.5, 0.5]);
+    });
+
+    it('never reads a baked generator track through this path at all', () => {
+      // Out of reach rather than covered: `zoomRegionsOf` reads `manualZoomTrackOf`,
+      // which is the one track this editor writes. A baked generated track keeps its
+      // own id, so its keys are never decoded as regions.
+      const { generator, ...rest } = generatedZoom([[8, 14]], 2);
+      const baked: Track = { ...rest, origin: 'manual', generatedFrom: generator! };
+      expect(baked.id).not.toBe(MANUAL_ZOOM_TRACK_ID);
+      expect(zoomRegionsOf({ ...empty(), tracks: [baked] })).toEqual([]);
+    });
   });
 });
