@@ -41,12 +41,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertsAbsoluteBudget,
+  deferredBoundsOutcome,
   environmentSustainsBudget,
   expectTracksControl,
   framesPerSpin,
   hostRepresentsTarget,
+  instrumentOutOfCalibration,
   REPRESENTATIVE_GPU_MS,
   scaledFrameEnvelope,
+  withheldJudgement,
   type BudgetEvidence,
   type HostProfile,
 } from './gate/budget-control.ts';
@@ -76,6 +79,14 @@ const GATE = join(here, 'gate');
  * where the same code composites in 0.30 ms. So the run now measures what the host
  * itself can sustain, in the same frames, and asserts this number exactly as it stands
  * wherever that control clears it: `test/gate/budget-control.ts`.
+ *
+ * It has since been taken a second time, and this number was again not what changed.
+ * Where the control does *not* clear it — where the host stretched a fixed span of
+ * arithmetic past a whole frame, which those runners have done with no other job of
+ * ours on the machine — the phase is now **not judged at all**, loudly, rather than
+ * measured against a ceiling derived from the same stalled number.
+ * {@link instrumentOutOfCalibration} is the condition and the argument; the branch is
+ * below, and the run reports as skipped rather than as a pass.
  */
 const FRAME_BUDGET_MS = 1000 / 60;
 const GATE_TIMEOUT_MS = 300_000;
@@ -380,19 +391,50 @@ function describeRun(report: GateReport): string {
  * Which of the two happened is worth recording — a bound that still caught the slowed
  * path on a stalled host is the deferred branch working — but neither outcome is a
  * verdict on this commit, so both come back as a line rather than a thrown assertion.
+ *
+ * It is `deferredBoundsOutcome` itself, named here for what this call site uses it for.
+ * The withheld verdict below wants the same thing for the same reason, so there is one
+ * account of what the deferred bounds would have said rather than two that can drift.
  */
-function trackingOutcome(evidence: BudgetEvidence): string {
-  try {
-    return `those bounds did not reach it: ${expectTracksControl(evidence)}`;
-  } catch (error) {
-    return `they caught it anyway: ${error instanceof Error ? error.message : String(error)}`;
-  }
+const trackingOutcome = deferredBoundsOutcome;
+
+/**
+ * The withheld verdict, printed where nobody can skim past it.
+ *
+ * A vitest line reading `✓ holds the 16 ms frame budget at 1440p` is a claim, and on a
+ * run whose own instrument was out of calibration it is a claim nothing established. So
+ * a run that gets here says so in a block of its own at the end of the output, and the
+ * test is then marked **skipped** rather than passed — see the call site. The two
+ * together are the requirement that this must never read as a pass: a reader skimming
+ * the summary sees a test that did not report, and a reader reading the output sees why,
+ * with the control's own measured overrun in the first line of each phase.
+ */
+function notJudgedBanner(withheld: readonly string[]): string {
+  const rule = '='.repeat(78);
+  return [
+    '',
+    rule,
+    '  PHASE 6 GATE — NO VERDICT. §8’s frame budget was NOT JUDGED on this run.',
+    '  This is not a pass. Nothing here says the compositor held the budget, and',
+    '  nothing here says it did not: the instrument that decides was out of',
+    '  calibration in the same frames, so there was no stopwatch to read.',
+    '',
+    '  Everything this gate asserts that is not a per-frame time WAS asserted and',
+    '  did hold — the frame-for-frame scrub readbacks, the ring cap and the live',
+    '  frame count, the settle window, the playback hit rate, and §8’s own number',
+    '  against the deliberately-slowed compositor. Only the two judged phases’',
+    '  frame-budget verdicts are withheld, and only the ones named below.',
+    rule,
+    ...withheld.map((line) => `  ${line}`),
+    rule,
+    '',
+  ].join('\n');
 }
 
 describe('phase 6 gate: 4K scrub and play', () => {
   it(
     'holds the 16 ms frame budget at 1440p and never exceeds the ring cap',
-    async ({ annotate }) => {
+    async ({ annotate, skip }) => {
       const { report, exitCode } = await runGateUntilMeasured();
       const detail = describeRun(report);
       // Printed unconditionally: a gate whose numbers are only visible when it
@@ -484,15 +526,39 @@ describe('phase 6 gate: 4K scrub and play', () => {
         host: playHost,
       };
 
+      // And a third outcome, ahead of the deferred branch and keyed on one measured
+      // fact: a phase whose own control missed the budget is **not judged at all**.
+      // `instrumentOutOfCalibration` is that fact and nothing else — not CI, not an env
+      // var, not the renderer string, and not the frame comparison having failed, which
+      // would be circular. When a fixed span of arithmetic with none of this code in it,
+      // handed 33.33 ms of free clock after every spin, cannot finish 8.33 ms of work
+      // inside 16.67 ms, the host was not scheduling the process and the frame times
+      // sampled from those same windows are not measurements. The deferred branch's own
+      // bounds cannot rescue that reading either: its ceiling is a multiple of the
+      // stalled number itself, and its share is counted over the windows the stall
+      // landed in. So nothing is inferred in either direction, the figures are printed,
+      // and the run reports no verdict rather than a verdict it did not earn.
+      //
+      // What keeps this honest is that a slow compositor cannot reach it: the spin runs
+      // *after* the measured frame body in the same synchronous dispatch on the one
+      // renderer thread, so a compositor that takes longer delays the spin and cannot
+      // lengthen it — and the slow-compositor phase below measures exactly that claim on
+      // every run, burning four whole budgets inside `render` beside a control that stays
+      // at target. `instrumentOutOfCalibration` carries the argument and the readings.
+      const withheld: string[] = [];
       if (assertsAbsoluteBudget(scrubEvidence)) {
         expect(report.scrub.overBudget, detail).toBe(0);
         expect(report.scrub.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+      } else if (instrumentOutOfCalibration(report.control.scrub, FRAME_BUDGET_MS)) {
+        withheld.push(withheldJudgement(scrubEvidence));
       } else {
         shortfalls.push(expectTracksControl(scrubEvidence));
       }
       if (assertsAbsoluteBudget(playEvidence)) {
         expect(report.play.overBudget, detail).toBe(0);
         expect(report.play.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+      } else if (instrumentOutOfCalibration(report.control.play, FRAME_BUDGET_MS)) {
+        withheld.push(withheldJudgement(playEvidence));
       } else {
         shortfalls.push(expectTracksControl(playEvidence));
       }
@@ -580,6 +646,7 @@ describe('phase 6 gate: 4K scrub and play', () => {
       }
 
       for (const shortfall of shortfalls) await annotate(shortfall, 'warning');
+      for (const line of withheld) await annotate(line, 'warning');
 
       // ---- half two: the live VideoFrame count never exceeds the ring cap ---
       expect(report.ringCapacity, detail).toBe(20);
@@ -624,6 +691,33 @@ describe('phase 6 gate: 4K scrub and play', () => {
       const total = report.playHits + report.playMisses;
       expect(total, detail).toBeGreaterThan(0);
       expect(report.playHits / total, detail).toBeGreaterThan(0.9);
+
+      // Last, and last for a reason: a withheld verdict must never be able to suppress
+      // a real one. `skip` throws, so everything above it has already been asserted and
+      // any genuine failure — including §8 on the *other* phase, whose control may have
+      // been perfectly healthy — has already thrown and failed this test. Only a run
+      // that had nothing left to fail on reaches here.
+      //
+      // Skipped rather than passed, because "not judged" and "judged and fine" must not
+      // print the same. This test's name is a claim about the frame budget; a green tick
+      // beside it asserts something a run with a broken stopwatch did not establish, and
+      // the annotations and the banner are underneath a line a reader skims past. A
+      // skipped test is the honest summary of an instrument that yielded no reading, and
+      // the banner immediately above it is the whole of why.
+      if (withheld.length > 0) {
+        console.log(notJudgedBanner(withheld));
+        // Named phase by phase, from the line each one wrote, so the one-line summary a
+        // reporter shows says *which* was not judged rather than only that something
+        // was not.
+        const phases = withheld.map((line) => line.split(':')[0] ?? '?').join(' and ');
+        skip(
+          `§8's frame budget was NOT JUDGED and this is not a pass: the environment ` +
+            `control missed the ${FRAME_BUDGET_MS.toFixed(2)} ms budget in the same ` +
+            `frames it was measuring ${phases} in, so those frame times are not ` +
+            `measurements of the compositor. Everything else this gate asserts was ` +
+            `asserted and did hold; see the output above.`,
+        );
+      }
     },
     GATE_TIMEOUT_MS,
   );

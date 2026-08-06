@@ -1094,6 +1094,27 @@ was not a control.
   threshold tuned to a run. Read it before touching any of them;
   `test/budget-control.test.ts` pins the policy — including that a real regression fails on
   both branches — and `test/phase6-gate.test.ts` judges the run.
+  **A control that missed its own budget yields no verdict at all**, which is a third
+  outcome beside strict and deferred rather than a widening of either:
+  `instrumentOutOfCalibration` keys it on the control's own measured overrun and on
+  nothing else, the phase is reported through `withheldJudgement`, and the gate reports
+  **skipped** — never passed, because this test's name is a claim and a green tick beside
+  it asserts what a broken stopwatch did not establish. Its load-bearing assumption is
+  that a slow compositor cannot cause it: the spin runs _after_ the measured frame body in
+  the same synchronous scheduler dispatch (`counting()` in `harness.ts` —
+  `callback(nowMs); afterFrame();`) on the one renderer thread, and `burn` reads its own
+  clock, so a slower compositor delays the spin and cannot lengthen it. The harness
+  measures exactly that on every run — the slow-compositor phase burns four whole budgets
+  inside `render` beside this same control — and the readings are at
+  `instrumentOutOfCalibration`.
+  **A stalled control cannot be reproduced on this machine, so do not try to get there
+  with load.** `scripts/gate-load.mjs` at 20 and at 64 spinners (load average 18.5 on 18
+  cores) left the control at 8.40 ms both times, unchanged from quiet: macOS keeps
+  scheduling the Electron renderer whatever else is asked of the box, which is precisely
+  why the paravirtual runner's 22–26 ms spins are a statement about that host. To exercise
+  the withheld branch end to end, widen the control's own target for one run
+  (`new EnvironmentControl(FRAME_BUDGET_MS * 1.5, CONTROL_PERIOD_MS)` in `harness.ts`) and
+  revert it — the same shape as overriding `gpuCost` for the deferred branch below.
   **Two facts no file owns.** The deferred branch **cannot be exercised end to end on
   Apple Silicon**: `--disable-accelerated-video-decode` flips the decode probe, but
   ANGLE-Metal binds decoded frames as IOSurfaces whatever the decode preference, and four

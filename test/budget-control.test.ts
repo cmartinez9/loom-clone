@@ -27,6 +27,7 @@ import {
   CLEARS_BUDGET,
   CONTROL_PERIOD_MS,
   CONTROL_TARGET_MS,
+  deferredBoundsOutcome,
   EnvironmentControl,
   environmentSustainsBudget,
   expectTracksControl,
@@ -34,6 +35,8 @@ import {
   GpuCostProbe,
   gpuProfile,
   hostRepresentsTarget,
+  instrumentOutOfCalibration,
+  withheldJudgement,
   NO_CONTROL,
   NO_GPU_PROFILE,
   overBudgetRate,
@@ -705,6 +708,203 @@ describe('the frame budget is enforced against a measured environment', () => {
     // so a control that silently stopped fails loudly there instead of here.
     expect(environmentSustainsBudget(NO_CONTROL, FRAME_BUDGET_MS)).toBe(true);
     expect(environmentSustainsBudget(control({ count: 0, maxMs: 0 }), FRAME_BUDGET_MS)).toBe(true);
+  });
+});
+
+/**
+ * **An instrument out of calibration yields no verdict.**
+ *
+ * The control is a fixed span of arithmetic with none of the compositor's code in it,
+ * given {@link CONTROL_PERIOD_MS} of free clock after every spin. When that cannot finish
+ * {@link CONTROL_TARGET_MS} of work inside one 60 Hz refresh, the host was not scheduling
+ * the process, and a frame time sampled from the same windows is scheduler noise carrying
+ * a number. There is nothing left to judge it against — the ceiling the deferred branch
+ * used to fall to is a multiple of the stalled number itself, and the share beside it is
+ * counted over the very windows the stall landed in — so the phase reports **no verdict**.
+ *
+ * Measured, on `main` and on the branch behind it. Five of the last fifteen CI runs on
+ * `main` went red, every one of them on this gate and on nothing else. Run 31074994194
+ * (`main`): the play control was pre-empted to 22.60 ms doing 8.33 ms of arithmetic, one
+ * spin of 158 over the budget, and the phase failed on a 52.90 ms frame against the
+ * 33.90 ms ceiling that same stalled number earned. Run 31075861127
+ * (`fm/loom-p14-editor-shell`) rules out the obvious confounder — the repository's other
+ * macOS job was *skipped* on that run and only started after `verify` had finished, so
+ * nothing of ours shared the host — and the control was still pre-empted to 26.00 ms with
+ * two spins of 136 over budget, failing the phase on a 40.10 ms frame against a 39.00 ms
+ * ceiling, 1.03× it.
+ *
+ * The two tests that matter here are the second and the third. The second constructs the
+ * case this must never stop failing — a clean control beside a frame over budget — from
+ * those same two runs, by changing the control and nothing else. The third pins that the
+ * withholding keys on the control's own overrun and on nothing else at all.
+ */
+interface RedRun {
+  control: ControlPhase;
+  measured: BudgetEvidence['measured'];
+  host: HostProfile;
+  /** The bound of the deferred branch that catches this phase once its control is healthy. */
+  cleanControlCaughtBy: RegExp;
+}
+
+describe('a control that missed its own budget yields no verdict', () => {
+  /** `budget-control.ts`'s own `fmt`, so these assertions read the line it really writes. */
+  const figure = (value: number): string =>
+    Number.isInteger(value) ? String(value) : value.toFixed(2);
+
+  /**
+   * The play phase of CI run 31074994194: `main`, red on this gate at the time of writing.
+   *
+   * `cleanControlCaughtBy` is what door two — a healthy control on a host that is not the
+   * product's machine — catches this same phase with once the control is replaced. It is
+   * the scaled envelope here (16.67 × 2.878 / 1.67 = 28.78 ms, against a 52.90 ms frame)
+   * and the share on the run below, whose deeper GPU cost earns an envelope the frame
+   * fits inside. Both bounds, from two real runs, and neither of them withheld.
+   */
+  const RED_MAIN = {
+    control: control({ count: 158, maxMs: 22.6, maxAt: 149, meanMs: 8.5, overBudget: 1 }),
+    measured: { count: 470, maxMs: 52.9, maxAt: 330, overBudget: 1 },
+    host: { hardwareDecode: 'no', gpu: { count: 238, medianMs: 2.878, maxMs: 27.062 } },
+    cleanControlCaughtBy: /this host's own workload earns/,
+  } satisfies RedRun;
+  /** The play phase of CI run 31075861127, measured with no concurrent macOS job of ours. */
+  const RED_ALONE = {
+    control: control({ count: 136, maxMs: 26, maxAt: 132, meanMs: 8.71, overBudget: 2 }),
+    measured: { count: 310, maxMs: 40.1, maxAt: 28, overBudget: 1 },
+    host: { hardwareDecode: 'no', gpu: { count: 121, medianMs: 4.509, maxMs: 17.917 } },
+    cleanControlCaughtBy: /a larger share than this host missed it on of its own spins/,
+  } satisfies RedRun;
+
+  it('reports the two runs that turned this gate red as not judged, naming the overrun', () => {
+    for (const run of [RED_MAIN, RED_ALONE]) {
+      const stalled = evidence(run.measured, run.control, run.host);
+      // What used to happen, and what still happens to everything else on this door:
+      // the ceiling is `TRACKS_CONTROL` × the stalled number, and the frame is over it.
+      expect(run.measured.maxMs).toBeGreaterThan(run.control.maxMs * TRACKS_CONTROL);
+      expect(() => expectTracksControl(stalled)).toThrow(/ceiling this host earned/);
+
+      // And what happens now: the instrument is judged first, and it failed.
+      expect(instrumentOutOfCalibration(run.control, FRAME_BUDGET_MS)).toBe(true);
+      const line = withheldJudgement(stalled);
+      expect(line).toContain('NOT JUDGED');
+      expect(line).toContain('this is not a pass');
+      // The control's own measured overrun, in the line, because that is what this
+      // verdict keys on and a reader must not have to take it on trust.
+      expect(line).toContain(`took up to ${figure(run.control.maxMs)} ms`);
+      expect(line).toContain(`${String(run.control.overBudget)} over the 16.67 ms budget`);
+      // The frames are named too — as unjudged, so nothing here can be read as either
+      // the compositor holding the budget or the compositor missing it.
+      expect(line).toContain(`worst frame ${run.measured.maxMs.toFixed(2)} ms`);
+      // And what the withheld bounds would have said is still printed, so a compositor
+      // that really was slow on a stalled host leaves its evidence in the log.
+      expect(line).toContain('ceiling this host earned');
+      // The last thing read says the same as the first. That borrowed line ends in the
+      // deferred branch's vocabulary, and where those bounds happen to clear it ends in
+      // something that reads like a verdict — so the withheld line closes on its own
+      // terms rather than on theirs.
+      expect(line.endsWith('this run is not a pass on it.')).toBe(true);
+    }
+    // Including the shape where the borrowed bounds cleared, which is the one a reader
+    // could otherwise skim to the end of and come away reassured by.
+    const cleared = withheldJudgement(evidence({ maxMs: 0.3, overBudget: 0 }, STALLED));
+    expect(cleared).toContain('missed the budget no oftener than this host missed it');
+    expect(cleared.endsWith('this run is not a pass on it.')).toBe(true);
+  });
+
+  /**
+   * **The one that proves this is not a way out.**
+   *
+   * Constructed deliberately, and from the failing runs above rather than from a
+   * convenient fiction: the same frames, the same hosts, the same everything — with the
+   * control replaced by a healthy one. Both doors that still judge must still fail.
+   *
+   * If this test can be made to pass by a change to the withholding, the withholding has
+   * become a tolerance and the gate has stopped being a gate.
+   */
+  it('CONTROL: a clean control beside a frame over budget still fails, on both doors', () => {
+    for (const run of [RED_MAIN, RED_ALONE]) {
+      // The host held the budget in these frames — the same 8.4 ms spin the quiet
+      // runners measure — so nothing is withheld and the phase is judged.
+      expect(instrumentOutOfCalibration(HEALTHY, FRAME_BUDGET_MS)).toBe(false);
+
+      // Door one: a host that runs the product's own workload. §8's number applies
+      // exactly as written, and these are the gate's two assertions verbatim.
+      const strict = evidence(run.measured, HEALTHY, TARGET_HOST);
+      expect(assertsAbsoluteBudget(strict)).toBe(true);
+      expect(() => {
+        expect(strict.measured.overBudget).toBe(0);
+      }).toThrow();
+      expect(() => {
+        expect(strict.measured.maxMs).toBeLessThanOrEqual(FRAME_BUDGET_MS);
+      }).toThrow();
+
+      // Door two: a host that is a different machine, judged by the deferred branch.
+      // Still a throw, and the assertion names *which* of that branch's bounds caught
+      // it, so this stays a positive proof that a specific bound fired rather than a
+      // matcher that would accept any throw at all: the scaled envelope on the first
+      // run, and — where this host's deeper GPU cost earns an envelope the frame fits
+      // inside — the over-budget share on the second.
+      const deferred = evidence(run.measured, HEALTHY, run.host);
+      expect(assertsAbsoluteBudget(deferred)).toBe(false);
+      expect(instrumentOutOfCalibration(deferred.control, FRAME_BUDGET_MS)).toBe(false);
+      expect(() => expectTracksControl(deferred)).toThrow(run.cleanControlCaughtBy);
+    }
+  });
+
+  it('CONTROL: keys on the control’s own overrun and on nothing else', () => {
+    // Nothing about the frames can withhold a verdict. A phase 100× over budget, on
+    // every host profile this gate knows, beside a control that held: judged, every time.
+    for (const host of [TARGET_HOST, RUNNER_HOST, UNKNOWN_HOST]) {
+      for (const measured of [
+        { count: 470, maxMs: 0.3, overBudget: 0 },
+        { count: 470, maxMs: 1667, maxAt: 12, overBudget: 470 },
+      ]) {
+        expect(
+          instrumentOutOfCalibration(evidence(measured, HEALTHY, host).control, FRAME_BUDGET_MS),
+        ).toBe(false);
+      }
+    }
+
+    // And the verdict flips exactly at the budget, because `CLEARS_BUDGET` is 1: a
+    // control that reached the budget held it, and one that passed it did not. No
+    // margin, no tolerance, and no percentile — the same boundary
+    // `environmentSustainsBudget` already draws, which is the point of defining this
+    // from it rather than beside it.
+    const atBudget = control({ maxMs: FRAME_BUDGET_MS });
+    const justPast = control({ maxMs: FRAME_BUDGET_MS * (1 + Number.EPSILON), overBudget: 1 });
+    expect(instrumentOutOfCalibration(atBudget, FRAME_BUDGET_MS)).toBe(false);
+    expect(instrumentOutOfCalibration(justPast, FRAME_BUDGET_MS)).toBe(true);
+    expect(CLEARS_BUDGET).toBe(1);
+    for (const c of [HEALTHY, STALLED, JUST_OVER, atBudget, justPast, NO_CONTROL]) {
+      expect(instrumentOutOfCalibration(c, FRAME_BUDGET_MS)).toBe(
+        !environmentSustainsBudget(c, FRAME_BUDGET_MS),
+      );
+    }
+  });
+
+  it('CONTROL: a control that measured nothing is judged, never withheld', () => {
+    // The one shape that must not reach this branch. A dead instrument has shown
+    // nothing, and "shown nothing" must never buy a compositor a withheld verdict —
+    // otherwise "the control stopped running" and "the gate has no opinion" become the
+    // same event, silently, forever. The gate asserts the spin count separately, so an
+    // empty control fails there with its own number in the message.
+    expect(instrumentOutOfCalibration(NO_CONTROL, FRAME_BUDGET_MS)).toBe(false);
+    expect(instrumentOutOfCalibration(control({ count: 0, maxMs: 0 }), FRAME_BUDGET_MS)).toBe(
+      false,
+    );
+    expect(assertsAbsoluteBudget(evidence({ maxMs: 20.2, overBudget: 1 }, NO_CONTROL))).toBe(true);
+  });
+
+  it('reports what the withheld bounds would have said, without acting on it', () => {
+    // A line either way, never a throw: this is the log's record of a judgement that
+    // was not made, and the gate prints it beside the withheld verdict.
+    const caught = deferredBoundsOutcome(
+      evidence(RED_MAIN.measured, RED_MAIN.control, RED_MAIN.host),
+    );
+    expect(caught).toContain('they caught it anyway');
+    expect(caught).toContain('ceiling this host earned');
+    const cleared = deferredBoundsOutcome(evidence({ maxMs: 0.3, overBudget: 0 }, STALLED));
+    expect(cleared).toContain('those bounds did not reach it');
+    expect(cleared).toContain('this environment cannot sustain');
   });
 });
 
