@@ -159,49 +159,8 @@ const FIXTURE_SIZE: [number, number] = [1024, 576];
  * roughly 61% of the GPU bytes the pass used to move. Not one assertion changes — the
  * gate compares per-pixel deltas, counts samples and reads frame codes, and none of
  * those is a statement about resolution.
- *
- * ## The third reduction, and why only this constant moved
- *
- * It came back again, and this time it was counted rather than described. Across the
- * 27 CI runs between that reduction landing and this one, the gate lost its GPU process
- * on **six** runs and on **a third of all launches**: two of those runs got a reading on
- * the relaunch and passed, four lost it on both launches and failed. Every one of the
- * six is the same three lines in Chromium's own log — `Failed to allocate texture`
- * inside `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable
- * error`, then `abnormal-exit (exit 8704)` — and every one is inside the export pass,
- * within a second or two of `export writer open` (observed at output frames 11, 15, 49
- * and 112 of 168). Run 31094399329 is the one this reduction was taken against.
- *
- * The comparison above it has never once crashed, and it is the *heavier* half by every
- * measure this file controls: two contexts rather than one, two readers rather than one,
- * and around 150 composites against the export pass's 168. So the marginal cost is not
- * the composite and not the number of live contexts — both of those are already smaller
- * here than in the phase that survives. It is what the export pass adds on top: a
- * `new VideoFrame(canvas)` snapshot of the drawing buffer and the RGB→YUV conversion
- * that feeds it to a software H.264 encoder, which is the allocation the crash names.
- *
- * That cost scales with the **output** area and nothing else, so that is the only
- * constant that moves: 512x288 is 44% of 768x432's pixels, which takes the export
- * pass's per-frame GPU bytes to roughly 63% of what they were — the same order of
- * relief as the reduction above, aimed at the half of the per-frame cost that is
- * actually marginal. {@link FIXTURE_SIZE} is deliberately left alone: the source upload
- * is paid by the phase that does not crash, and shrinking the fixture would shrink the
- * moving content the divergence controls have to see a difference in.
- *
- * Still 16:9 on a macroblock — `256k x 144k` at k = 2, the rung below the one above —
- * so the frame-code band still lands on the row {@link readFrameCode} samples, with
- * 12 cells across 512 px and the sample point 21 px from the nearest cell edge. And
- * again not one assertion changes.
- *
- * **If it returns, the next term is the one this leaves untouched: how many of those
- * conversions are in flight at once.** §5.3's backpressure lets the encoder queue reach
- * eight, so the export pass can have nine canvas snapshots and nine conversions
- * outstanding — while `generate4kPart`, which encodes 90 frames of the same size
- * through the same software encoder and drains fully between them, has never crashed
- * here. That is a mechanism rather than a dial, and it is written down rather than
- * acted on because it would cost this gate its coverage of §5.3's line.
  */
-const OUTPUT_SIZE: [number, number] = [512, 288];
+const OUTPUT_SIZE: [number, number] = [768, 432];
 const FIXTURE_FRAMES = 90;
 const GOP = 30;
 const FPS = 30;
