@@ -38,7 +38,7 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
                           # generators, annotations, the drawing overlay, the event logs
-                          # and the phase-6 gate's judgement policy; one way per entry in
+                          # and both gates' judgement policies; one way per entry in
                           # scripts/mutation-check.mjs's MUTATIONS registry, which is
                           # where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
@@ -1419,6 +1419,40 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   than a frame number for exactly that reason. They also declare separate window
   globals — `window.exportGolden` and `window.golden` — because both harnesses are in
   one TypeScript program and one name cannot hold two shapes.
+- **The phase-8 gate has three outcomes, and the third is not a pass.** Where **every**
+  launch had its WebGL contexts taken away before anything was compared, §4.5's
+  per-pixel zero was neither met nor missed — it was not measured — so the run reports
+  **skipped** under a `NOT JUDGED` banner rather than failing on
+  `expect(report.contextLost).toBe(false)` over a report reading `samples n=0`,
+  `identity max delta=-1`, `export did not run`. `instrumentOutOfCalibration` in
+  `test/export-golden/verdict.ts` is the condition, and it borrows phase 6's vocabulary
+  on purpose while staying a separate, differently-typed function for the reason
+  `relaunch.ts` gives about the two gates' relaunch predicates.
+  **`shouldRelaunchGolden` is untouched and still `report.contextLost` alone, and
+  `GATE_ATTEMPTS` is still two** — more retries around a crash is the move this project
+  keeps refusing.
+  **The branch runs before every assertion, which is the opposite of phase 6's ordering
+  and needs its own safety.** Phase 6's `skip()` is the last statement in its test, so a
+  withheld verdict is structurally unable to suppress a real one; here a lost context
+  empties the report, so everything below would fail on the absence and the branch has to
+  come first. The safety is therefore the predicate's: `readingsTaken` enumerates every
+  reading a `GoldenReport` can carry, field by field, and **one of them refuses to
+  withhold** — `mayDeleteSources`'s discipline applied to a verdict instead of a
+  deletion. `test/golden-verdict.test.ts` is the fence, `test/relaunch-policy.test.ts`'s
+  sibling; three `verdict.ts` entries in `npm run verify:mutation` break it on disk.
+  **The hazard it would be unsound without is a defect in the export path provoking the
+  context loss itself**, and it is ruled out structurally rather than statistically:
+  `Compositor` allocates in its constructor and nowhere else, `GpuTimer` reuses one
+  query, `ExportRenderLoop.renderAt` allocates nothing, `VideoExportEncoder.encode`
+  closes its `new VideoFrame(canvas)` in a `finally` in the same statement, and a decode
+  leak trips `FrameLedger` in JavaScript on the _first_ frame past the ring cap. The
+  argument, the three CI readings that agree with it, and what would re-open it are at
+  `instrumentOutOfCalibration`'s docblock — do not re-derive them here.
+  **All five outcomes were observed end to end** against the real gate on 2026-08-06
+  (deliberate injections, reverted): agree → pass; disagree → **fail**; lost once then
+  agree → pass; lost once then disagree → **fail**; lost on both launches → skipped with
+  the banner. The recipe is in the PR; the point of recording it is that a branch on
+  which an acceptance gate does not go red is worth watching go red first.
 - **Phase 8's `delta 0` covers two of §4.5's four "must be identical" rows, and says
   so.** Frame selection and the zoom state are each perturbed by a control that must go
   non-zero; **the webcam bubble and the cursor are not exercised at all**, because

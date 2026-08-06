@@ -20,6 +20,7 @@ import { registerLoomScheme } from '../../apps/main/src/protocol.ts';
 import { serveFile } from '../../apps/main/src/media-reader.ts';
 import { ProjectStore } from '../../apps/main/src/project-store.ts';
 import { verifyExport } from '../../apps/main/src/export/verify.ts';
+import { COVERAGE_PROBE_NOT_REACHED } from './report.ts';
 import type { GoldenReport } from './report.ts';
 
 interface Args {
@@ -61,6 +62,15 @@ let finished = false;
  * GPU is *no reading*, not *phase 8 is broken*. Never true on a healthy run.
  */
 let gpuGone = false;
+/**
+ * Chromium's own words for the GPU process's death, kept for the report.
+ *
+ * The reason and the exit code are the difference between *"the lights went out"* and
+ * *"the GPU process aborted"*, and the withheld verdict in `verdict.ts` prints it as the
+ * measured evidence of the instrument's failure. It never decides anything — see
+ * {@link GoldenReport.gpuProcessGone}.
+ */
+let gpuGoneDetail: string | null = null;
 
 function note(message: string): void {
   logs.push(message);
@@ -73,7 +83,13 @@ async function finish(report: GoldenReport, code: number): Promise<void> {
   await mkdir(dirname(args.out), { recursive: true });
   await writeFile(
     args.out,
-    JSON.stringify({ ...report, logs: [...report.logs, ...logs] }, null, 2),
+    // `gpuProcessGone` is stamped here and only here: it is main's reading, the harness
+    // cannot take it, and `finish` is the one funnel every report goes through.
+    JSON.stringify(
+      { ...report, gpuProcessGone: gpuGoneDetail, logs: [...report.logs, ...logs] },
+      null,
+      2,
+    ),
   );
   app.exit(code);
 }
@@ -89,7 +105,7 @@ function failureReport(error: string): GoldenReport {
       tripwire: {
         webcamPassStillAbsent: false,
         cursorPassStillAbsent: false,
-        detail: 'the run did not reach the coverage probe',
+        detail: COVERAGE_PROBE_NOT_REACHED,
       },
     },
     environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },
@@ -439,10 +455,14 @@ app.on('window-all-closed', () => {
 });
 
 app.on('child-process-gone', (_event, details) => {
-  note(`${details.type} process gone: ${details.reason} (exit ${String(details.exitCode)})`);
+  const said = `${details.type} process gone: ${details.reason} (exit ${String(details.exitCode)})`;
+  note(said);
   // Chromium exits the GPU process on a context loss, so this is the loss itself
   // arriving by another route — and unlike `webglcontextlost`, it names what died.
-  if (details.type === 'GPU') gpuGone = true;
+  if (details.type === 'GPU') {
+    gpuGone = true;
+    gpuGoneDetail ??= said;
+  }
 });
 
 process.on('uncaughtException', (error: Error) => {

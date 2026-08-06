@@ -107,6 +107,15 @@ const EVENTS = 'apps/main/test/recorder-events.test.ts';
  * consumes it, and a hole here is a run reported as a pass that nothing established.
  */
 const BUDGET_POLICY = 'test/budget-control.test.ts';
+/**
+ * The phase-8 gate's own judgement policy: when it has a verdict on §4.5 and when it
+ * has none.
+ *
+ * The source under test is `test/export-golden/verdict.ts`, which is the gate's
+ * production code even though it lives under `test/` — a hole here is an acceptance
+ * gate that quietly declines to report a pixel divergence.
+ */
+const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -1318,6 +1327,50 @@ const MUTATIONS = [
       '  return evidence.control.count === 0 || ' +
       '!environmentSustainsBudget(evidence.control, evidence.budgetMs);',
     mustFail: [BUDGET_POLICY],
+  },
+
+  // ---- the phase-8 gate's own judgement policy ----------------------------
+  {
+    name: 'a-measured-run-can-still-be-withheld',
+    breaks:
+      'the one guard that makes the withheld verdict safe to take *before* the gate’s ' +
+      'assertions rather than after them. Phase 6 can put its `skip()` last, so a ' +
+      'withheld verdict is structurally unable to suppress a real one; this gate ' +
+      'cannot, because a lost context empties the report and every assertion would ' +
+      'fail on the absence. So the safety is `readingsTaken` being empty — a run that ' +
+      'compared anything is judged. Dropping it lets a run that measured 24 differing ' +
+      'timestamps report *skipped* if its context happened to go afterwards, which is ' +
+      'a §4.5 divergence the gate declines to report.',
+    file: 'test/export-golden/verdict.ts',
+    find: '  return attempts.every((report) => report.contextLost && readingsTaken(report).length === 0);',
+    replace: '  return attempts.every((report) => report.contextLost);',
+    mustFail: [GOLDEN_VERDICT],
+  },
+  {
+    name: 'one-lost-launch-withholds-the-verdict',
+    breaks:
+      'the floor under a withheld verdict. One lost context is a shared host having a ' +
+      'moment and is exactly what the single relaunch absorbs; withholding §4.5’s ' +
+      'verdict on it makes the second launch — the one that would have produced a ' +
+      'reading — never happen, so every gate run becomes at most one attempt from ' +
+      'reporting nothing at all.',
+    file: 'test/export-golden/verdict.ts',
+    find: '  if (attempts.length < MIN_LOST_LAUNCHES) return false;',
+    replace: '  if (attempts.length < 1) return false;',
+    mustFail: [GOLDEN_VERDICT],
+  },
+  {
+    name: 'a-crashed-run-withholds-the-verdict',
+    breaks:
+      'the rule that a withheld verdict keys on a lost *context* and on nothing else. ' +
+      'A harness that died any other way — a timeout, a renderer gone, a throw in the ' +
+      'gate’s own apparatus — also produced no reading, and reporting *that* as "no ' +
+      'verdict" makes a broken instrument and a busy host the same event: phase 8 ' +
+      'stops going red for defects in the gate itself, silently and forever.',
+    file: 'test/export-golden/verdict.ts',
+    find: '  return attempts.every((report) => report.contextLost && readingsTaken(report).length === 0);',
+    replace: '  return attempts.every((report) => readingsTaken(report).length === 0);',
+    mustFail: [GOLDEN_VERDICT],
   },
 ];
 

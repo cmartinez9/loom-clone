@@ -102,6 +102,7 @@ import { VideoExportEncoder } from '../../apps/renderer/src/export/encode.ts';
 import { verifyByDecoding } from '../../apps/renderer/src/export/verify-decode.ts';
 import { openVideoTrack, type TrackReader } from '../../apps/renderer/src/media/track-reader.ts';
 import { CODE_BIT_COUNT, codeCellCenter, generate4kPart } from '../gate/fixture.ts';
+import { COVERAGE_PROBE_NOT_REACHED } from './report.ts';
 import type {
   ControlOutcome,
   CoverageReport,
@@ -1095,7 +1096,7 @@ void run().then(
         tripwire: {
           webcamPassStillAbsent: false,
           cursorPassStillAbsent: false,
-          detail: 'the run did not reach the coverage probe',
+          detail: COVERAGE_PROBE_NOT_REACHED,
         },
       },
       environment: { glRenderer: '', electron: '', chrome: '', hardwareEncode: '' },
