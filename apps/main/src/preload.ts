@@ -24,6 +24,7 @@ import {
   LOOM_API_KEY,
   type AppInfo,
   type ApplyOpsResult,
+  type AudioPartEndMsg,
   type CaptureCommand,
   type CaptureEndReport,
   type CaptureOptions,
@@ -167,6 +168,9 @@ const api: LoomApi = {
     },
     partEnded: (message: PartEndMsg): void => {
       ipcRenderer.send(CHANNEL.capturePartEnded, message);
+    },
+    audioEnded: (message: AudioPartEndMsg): void => {
+      ipcRenderer.send(CHANNEL.captureAudioEnded, message);
     },
     cameraUnavailable: (reason: string): void => {
       ipcRenderer.send(CHANNEL.captureCameraUnavailable, reason);

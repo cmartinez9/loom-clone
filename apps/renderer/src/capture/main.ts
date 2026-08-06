@@ -148,6 +148,19 @@ const audioSink: AudioSink = {
     console.error(`[capture] no ${track} track: ${reason}`);
     noteUnavailable(reason);
   },
+  ended: (message) => {
+    // Only while the recording is still going. Every track is stopped as part of an
+    // ordinary `end()`, and `MediaStreamTrack.stop()` does not fire `ended` — but an
+    // encoder can still error inside the flush, and main reading that as "a track
+    // stopped on its own" would have it re-check TCC and, on a revoked grant, try to
+    // stop a recording that is already stopping.
+    // `undefined` when there is no session at all, which is also a reason not to
+    // report: a track that ends after the page has let go of its session belongs to
+    // a recording main has already finalized.
+    if (session?.ending !== null) return;
+    console.error(`[capture] the ${message.track} track stopped: ${message.detail ?? 'no detail'}`);
+    window.loom.capture.audioEnded(message);
+  },
 };
 
 /**

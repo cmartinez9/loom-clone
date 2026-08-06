@@ -389,7 +389,46 @@ export interface AudioTrackReport {
    */
   epochOffsetUs: number;
   endedEarly: boolean;
+  /**
+   * Why this track stopped, when main worked it out. **Absent from anything the
+   * capture page sends**, and that is the point of the field being optional here:
+   * telling a withdrawn permission apart from a device that vanished takes a TCC
+   * read, and reading TCC is main's alone (`apps/main/src/permissions.ts`'s header).
+   * A renderer that filled this in would be guessing — which is exactly the bug
+   * `decision-mic-revocation.md` was raised about.
+   */
   endReason?: PartEndReason;
+}
+
+/**
+ * An audio track that stopped **while the recording was still running**.
+ *
+ * The audio counterpart of {@link PartEndMsg}, and it exists for one reason: until
+ * this message, main learned that the microphone had gone only from the end report,
+ * which arrives when the recording is already over. A grant withdrawn at minute two
+ * of a twenty-minute recording could therefore not stop anything, and by the time
+ * anyone looked, the only distinguishing evidence — what TCC says *now* — was long
+ * gone.
+ *
+ * The capture page reports the shape of the failure and nothing more. Whether that
+ * shape is a revoked permission or a device that fell out is main's to decide, and
+ * `RecorderSession.audioEndReasonFor` is where it is decided.
+ */
+export interface AudioPartEndMsg {
+  track: AudioTrackKey;
+  part: number;
+  /**
+   * What the renderer actually observed.
+   *
+   * - `track-ended` — the `MediaStreamTrack` fired `ended`. This is the shape both a
+   *   revoked Microphone grant and an unplugged interface take, and the only cause
+   *   for which a TCC re-check answers anything.
+   * - `encoder-failed` — the `AudioEncoder` errored, or produced no decoder
+   *   configuration. The device is fine and the permission is not in question.
+   */
+  cause: 'track-ended' | 'encoder-failed';
+  /** One line for the log, from the renderer's point of view. */
+  detail?: string;
 }
 
 /**
@@ -482,6 +521,30 @@ export type RecorderPhase = 'idle' | 'starting' | 'recording' | 'finalizing' | '
  */
 export type CameraState = 'off' | 'starting' | 'live' | 'lost' | 'unavailable';
 
+/**
+ * A grant that was withdrawn while a recording was running (§7.3).
+ *
+ * Separate from {@link RecorderStatus.error} on purpose, and the separation is the
+ * whole of the captain's decision in `decision-mic-revocation.md`: the recording
+ * **stopped**, but it did not **fail**. It finalized to `editable` with everything
+ * captured up to that moment in it, and a user who is shown a red error line will
+ * reasonably assume it did not. So this is a notice about a permission, carrying the
+ * recording it belongs to, and it outlives the recording — the HUD is still showing
+ * it long after `phase` has gone back to `idle`, because that is when the user reads
+ * it.
+ *
+ * `null` whenever the recorder is not carrying one; `start()` clears it, so pressing
+ * record is what dismisses it.
+ */
+export interface RevocationNotice {
+  /** Which grant went away. The copy comes from `PERMISSIONS[kind]`, never from here. */
+  kind: PermissionKind;
+  /** The recording it stopped — finalized, not discarded. */
+  recordingId: RecordingId | null;
+  /** How much of that recording survived, so the HUD can say so with a number. */
+  recordedSec: number;
+}
+
 export interface RecorderStatus {
   phase: RecorderPhase;
   recordingId: RecordingId | null;
@@ -495,6 +558,12 @@ export interface RecorderStatus {
   camera: CameraState;
   /** Parts the camera has produced so far — 2 after one unplug and reconnect. */
   cameraParts: number;
+  /**
+   * A permission withdrawn mid-recording, and the recording it ended (§7.3).
+   *
+   * Survives the recording it describes — see {@link RevocationNotice}.
+   */
+  revoked: RevocationNotice | null;
 }
 
 /** What a crash-recovery pass found, so the app can say it out loud (§7.1). */
@@ -711,6 +780,16 @@ export interface CaptureApi {
   /** A video part that closed while the recording carried on (§7.4). */
   partEnded(message: PartEndMsg): void;
   /**
+   * An audio track that stopped while the recording carried on (§7.3).
+   *
+   * Deliberately **not** {@link partEnded}. That message says "a device came and
+   * went and the recording is fine", which is §7.4's story and is the wrong story
+   * for a microphone: whether the recording is fine depends on why the track
+   * stopped, and only main can find that out. So this reports the observation and
+   * main decides the consequence — the two paths that were sharing one.
+   */
+  audioEnded(message: AudioPartEndMsg): void;
+  /**
    * The camera could not be captured, and the recording is carrying on without it.
    *
    * The one camera fact main cannot derive from the parts it has opened: a
@@ -823,6 +902,8 @@ export const CHANNEL = {
   captureChunk: 'loom.capture.chunk',
   /** send-only, capture window -> main. A part closed; the recording continues. */
   capturePartEnded: 'loom.capture.partEnded',
+  /** send-only, capture window -> main. An audio track stopped; main decides why (§7.3). */
+  captureAudioEnded: 'loom.capture.audioEnded',
   /** send-only, capture window -> main. No camera; the recording continues. */
   captureCameraUnavailable: 'loom.capture.cameraUnavailable',
   /** send-only, capture window -> main */
@@ -860,6 +941,7 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.captureMeta,
   CHANNEL.captureChunk,
   CHANNEL.capturePartEnded,
+  CHANNEL.captureAudioEnded,
   CHANNEL.captureCameraUnavailable,
   CHANNEL.captureEnded,
   CHANNEL.captureFailed,

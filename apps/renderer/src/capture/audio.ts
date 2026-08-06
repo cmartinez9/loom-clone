@@ -39,6 +39,7 @@
 import { AudioCaptureMeter, TrackEpochEstimator } from '@loom/format';
 import {
   violatedLoopbackConstraints,
+  type AudioPartEndMsg,
   type AudioTrackFacts,
   type AudioTrackKey,
   type AudioTrackReport,
@@ -99,6 +100,18 @@ export interface AudioSink {
   }): void;
   /** A track that could not be captured at all. The recording continues without it. */
   unavailable(track: AudioTrackKey, reason: string): void;
+  /**
+   * A track that had started and then stopped, while the recording was still going.
+   *
+   * Reported the moment it happens rather than only in the end report, because the
+   * one fact that tells a revoked Microphone grant apart from an unplugged interface
+   * — what TCC says — is only true *now*, and by the end of a twenty-minute
+   * recording it says nothing about minute two (§7.3).
+   *
+   * What is reported is the observation, never the conclusion: this file cannot read
+   * TCC, and a renderer that named a cause would be guessing.
+   */
+  ended(message: AudioPartEndMsg): void;
 }
 
 /** `getSettings()`, reduced to the five fields trap 3 is about. */
@@ -223,8 +236,7 @@ export async function startAudioCapture(
       },
       error: (error: DOMException) => {
         console.error(`[capture] the ${track} encoder failed:`, error.message);
-        capture.endedEarly = true;
-        void stopAudioCapture(capture);
+        endTrack(capture, sink, 'encoder-failed', error.message);
       },
     }),
     stream,
@@ -234,11 +246,14 @@ export async function startAudioCapture(
   };
   capture.encoder.configure(config);
 
-  // §7.3: a microphone that goes away mid-recording must not end the recording.
-  // The part is marked and the screen keeps going.
+  // §7.3, and the one event this whole path turns on: an audio track that stops on
+  // its own. That is the shape a revoked Microphone grant takes *and* the shape an
+  // unplugged interface takes, and this file has no way to tell them apart — reading
+  // TCC is main's alone. So the observation is reported and main decides which it
+  // was; see {@link AudioSink.ended}, and `audioEndReasonFor` in
+  // `apps/main/src/recorder/session.ts` for what is done with it.
   mediaTrack.addEventListener('ended', () => {
-    capture.endedEarly = true;
-    void stopAudioCapture(capture);
+    endTrack(capture, sink, 'track-ended', `the ${track} track ended`);
   });
 
   capture.pump = pumpAudio(capture);
@@ -299,8 +314,7 @@ function onEncoded(
       // Without an AudioSpecificConfig there is no `esds`, and a part with no
       // `esds` is a file no decoder will open. Better no track than that.
       console.error(`[capture] the ${capture.track} encoder produced no decoder configuration`);
-      capture.endedEarly = true;
-      void stopAudioCapture(capture);
+      endTrack(capture, sink, 'encoder-failed', 'the encoder produced no decoder configuration');
       return;
     }
     capture.metaSent = true;
@@ -329,6 +343,27 @@ function onEncoded(
     durationUs: chunk.duration ?? null,
     data,
   });
+}
+
+/**
+ * This track has stopped on its own. Mark it, tell main, and wind it down.
+ *
+ * Idempotent on `endedEarly`, because the three ways a track can stop can arrive
+ * together — `ended` on the media track, an encoder error, and the flush that
+ * follows either — and main must be told once. The stop is not awaited: main is
+ * being told a fact, and a report that waits for an encoder to flush is a report
+ * that arrives after the thing it is about mattered.
+ */
+function endTrack(
+  capture: AudioCapture,
+  sink: AudioSink,
+  cause: AudioPartEndMsg['cause'],
+  detail: string,
+): void {
+  if (capture.endedEarly) return;
+  capture.endedEarly = true;
+  sink.ended({ track: capture.track, part: capture.part, cause, detail });
+  void stopAudioCapture(capture);
 }
 
 /**
@@ -364,12 +399,13 @@ export function reportOf(capture: AudioCapture): AudioTrackReport {
     summary: capture.meter.summary,
     epochOffsetUs: capture.epoch.offsetUs,
     endedEarly: capture.endedEarly,
-    // A microphone that stops on its own is most often a device that went away —
-    // a headset unplugged, a USB interface asleep. Telling that apart from a revoked
-    // grant takes a TCC read, which only main can do: phase 2 added that re-check for
-    // the screen track and not for this one (`endReasonFor` in `recorder/session.ts`),
-    // so this stays the likelier of the two, recorded rather than guessed at silently.
-    ...(capture.endedEarly ? { endReason: 'device-lost' as const } : {}),
+    // **No `endReason`, deliberately.** This used to say `device-lost` for every
+    // track that ended on its own, which is how a Microphone grant the user had just
+    // withdrawn was written into `recording.json` as a disconnected device —
+    // `decision-mic-revocation.md` is the captain's answer to that. Telling the two
+    // apart takes a TCC read and reading TCC is main's alone, so the reason is main's
+    // to fill in: `audioEndReasonFor` in `apps/main/src/recorder/session.ts`, from the
+    // {@link AudioSink.ended} report this file sends when it happens.
   };
 }
 

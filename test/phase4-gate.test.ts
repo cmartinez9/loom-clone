@@ -253,6 +253,12 @@ async function loadCapturePage(): Promise<void> {
     partEnded: (message: unknown) => {
       toMain(CHANNEL.capturePartEnded, message);
     },
+    // §7.3's message. Nothing in this gate ends an audio track — it is about the
+    // camera — but the fake stands in for the whole `CaptureApi`, and one missing
+    // method is a `TypeError` in the capture page rather than a failed assertion.
+    audioEnded: (message: unknown) => {
+      toMain(CHANNEL.captureAudioEnded, message);
+    },
     cameraUnavailable: (reason: unknown) => {
       toMain(CHANNEL.captureCameraUnavailable, reason);
     },

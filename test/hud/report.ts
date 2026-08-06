@@ -23,6 +23,21 @@ export interface Probe {
   /** The error line, which shares the shelf and had the same defect. */
   errorVisiblePx: number;
   errorText: string;
+  /**
+   * §7.3's revoked-permission shelf, which shares the same fold.
+   *
+   * A notice that names a withdrawn grant is only worth anything if the user reads
+   * it, and "the recording stopped and nobody was told why" is the same defect this
+   * gate was built for — measured the same way, in pixels, rather than by asserting
+   * that a `<p>` exists.
+   */
+  revokedVisiblePx: number;
+  revokedText: string;
+  revokedHidden: boolean;
+  revokedOnTop: boolean;
+  /** The label on the shelf's own button — what the user presses to re-grant. */
+  revokedButtonText: string;
+  revokedButtonVisiblePx: number;
   /** The button the user would press right now — `Record screen` or `Stop`. */
   controlText: string;
   controlVisiblePx: number;

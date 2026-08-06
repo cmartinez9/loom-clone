@@ -46,6 +46,7 @@ import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
   requestedCaptureOptions,
+  type AudioPartEndMsg,
   type AudioTrackFacts,
   type AudioTrackReport,
   type AudioTrackSettings,
@@ -58,6 +59,7 @@ import {
   type RecorderPhase,
   type RecorderStatus,
   type RecoveryReport,
+  type RevocationNotice,
   type VideoPartReport,
   type VideoTrackFacts,
 } from '@loom/ipc';
@@ -81,7 +83,7 @@ import {
   type VideoTrackKey,
 } from '@loom/format';
 import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
-import { toRecordingState } from '@loom/permissions';
+import { PERMISSIONS, toRecordingState, type PermissionKind } from '@loom/permissions';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
@@ -101,6 +103,21 @@ import {
  * track's `startTimeSec` is an offset from (§5.4 mechanism 2).
  */
 const REFERENCE_TRACK = 'screen';
+
+/**
+ * The macOS grant each audio track needs, or `null` where there is none.
+ *
+ * The microphone has a TCC grant of its own and the system loopback does not: the
+ * loopback rides on the display stream `getDisplayMedia` already handed over, so it
+ * is covered by Screen Recording and there is no Microphone answer to re-check for
+ * it. That distinction is the reason this is a table rather than an `if`: a loopback
+ * track that stops has lost a device, and asking TCC about a microphone would answer
+ * a question nobody asked.
+ */
+const AUDIO_TRACK_GRANT: Readonly<Record<AudioTrackKey, PermissionKind | null>> = {
+  mic: 'microphone',
+  system: null,
+};
 
 /** A chunk larger than this is not a frame; it is a bug or an attack. */
 const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
@@ -270,6 +287,17 @@ interface Active {
    * part carries a sample rate and gaps where a video part carries a frame index.
    */
   audio: Map<AudioTrackKey, ActiveAudio>;
+  /**
+   * Why an audio track stopped, decided at the moment it stopped (§7.3).
+   *
+   * Kept here rather than worked out at finalize because the evidence is perishable:
+   * the only thing that tells a revoked Microphone grant apart from an unplugged
+   * interface is what TCC says, and what TCC says at the end of a twenty-minute
+   * recording is not what it said at minute two. A grant that was withdrawn and then
+   * given back would otherwise be written into `recording.json` as a device that
+   * disconnected — which is the misreport this whole path exists to remove.
+   */
+  audioEnd: Map<AudioTrackKey, PartEndReason>;
   /** The first write that failed. A recording that cannot be written is over. */
   writeError: Error | null;
   /** What the camera is doing, for the §7.4 banner. */
@@ -282,6 +310,16 @@ export class RecorderSession {
   private phase: RecorderPhase = 'idle';
   private active: Active | null = null;
   private lastError: string | null = null;
+  /**
+   * A grant withdrawn mid-recording, and the recording it stopped (§7.3).
+   *
+   * On the session rather than on {@link Active} because it has to outlive the
+   * recording it describes: the notice is the *only* thing that tells the user why
+   * their recording stopped, and by the time they read it the recording has been
+   * finalized and `active` is `null`. Cleared by {@link start}, so pressing record
+   * is what dismisses it.
+   */
+  private revoked: RevocationNotice | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private captureContentsId: number | null = null;
   /** Set only between telling the capture page to start and handing it a source. */
@@ -360,6 +398,16 @@ export class RecorderSession {
       );
     });
 
+    // Not on `metaChain`, for the same reason `cameraUnavailable` is not: it changes
+    // no document and closes no file. Unlike that one it is *urgent* — the TCC read
+    // it performs is only meaningful while it is fresh (§7.3), so queueing it behind
+    // a `recording.json` write would be queueing the evidence behind the thing that
+    // makes it stale.
+    ipcMain.on(CHANNEL.captureAudioEnded, (event, raw: unknown) => {
+      if (!this.fromCaptureWindow(event)) return;
+      this.onAudioEnded(raw);
+    });
+
     // Not on `metaChain`: it changes no document and closes no file, and a camera
     // that will not open is exactly the case where nothing else is coming to carry
     // the news. §7.4's banner is no use once the recording has stopped.
@@ -395,6 +443,7 @@ export class RecorderSession {
       CHANNEL.captureMeta,
       CHANNEL.captureChunk,
       CHANNEL.capturePartEnded,
+      CHANNEL.captureAudioEnded,
       CHANNEL.captureCameraUnavailable,
       CHANNEL.captureEnded,
       CHANNEL.captureFailed,
@@ -424,6 +473,11 @@ export class RecorderSession {
     const options: CaptureOptions = { ...DEFAULT_CAPTURE_OPTIONS, ...requested };
     this.phase = 'starting';
     this.lastError = null;
+    // Pressing record is what dismisses the last recording's revocation notice. It is
+    // cleared here rather than when the user re-grants, because macOS does not tell an
+    // app that a grant came back and a notice that outlives its own truth is worse
+    // than one the next recording clears.
+    this.revoked = null;
     this.publish();
 
     const { store } = this.options;
@@ -453,6 +507,7 @@ export class RecorderSession {
         video: new Map(),
         originUs: null,
         audio: new Map(),
+        audioEnd: new Map(),
         writeError: null,
         // A camera that was asked for is *starting*, not missing: `getUserMedia`
         // and the first frame take a moment, and calling that `unavailable` would
@@ -1015,6 +1070,99 @@ export class RecorderSession {
   }
 
   /**
+   * An audio track stopped while the recording was still running (§7.3).
+   *
+   * **This is where the two situations that used to share a path are separated**, and
+   * the separation is the whole of `data/loom-scope/decision-mic-revocation.md`:
+   *
+   * - A **device that vanished** may come back and is worth waiting for. The
+   *   recording carries on with the tracks it still has — §7.4's rule for the camera,
+   *   applied to a microphone, which is what §7.3 already asks for.
+   * - A **permission the user withdrew** will not come back without their action. The
+   *   captain's answer, verbatim: *"stop recording and tell the user to re-grant"*.
+   *   So the recording is stopped — through the ordinary {@link stop}, which flushes
+   *   the capture page and finalizes the bundle, because everything captured up to
+   *   this moment is footage the user keeps and decision 5 deletes raw sources after
+   *   an export, so a partial recording discarded here is gone for good.
+   *
+   * This deliberately diverges from §7.3's own sentence for the microphone — *"keep
+   * recording screen and system audio"* — on the captain's authority and on the
+   * grounds §7.3 does not consider: the app was reporting the cause wrongly, and a
+   * user told "microphone disconnected" about a switch they just flipped has been
+   * told the wrong thing about what to do next.
+   */
+  private onAudioEnded(raw: unknown): void {
+    const active = this.active;
+    if (active === null) return;
+    let message: AudioPartEndMsg;
+    try {
+      message = audioEndMessage(raw);
+    } catch (error) {
+      console.error('[recorder] an audio-track end report could not be read:', error);
+      return;
+    }
+    // A track this recording never asked for cannot have lost anything. The renderer
+    // chooses the track key, and this message is the only one from a renderer that can
+    // end a recording, so a replayed or malformed one must not be able to stop a
+    // capture that has no microphone in it. Not `active.audio.has(...)`: a grant
+    // withdrawn before the encoder's first frame leaves no track state and is still a
+    // revocation.
+    if (message.track === 'mic' && active.options.micDeviceId === null) return;
+    // The first report is the one taken — it is the one whose TCC read was fresh.
+    if (active.audioEnd.has(message.track)) return;
+
+    const grant = AUDIO_TRACK_GRANT[message.track];
+    const reason = audioEndReasonFor(
+      message.cause,
+      grant === null ? true : this.stillGranted(grant),
+    );
+    active.audioEnd.set(message.track, reason);
+
+    if (
+      grant === null ||
+      reason !== 'permission-revoked' ||
+      !PERMISSIONS[grant].revocationStopsRecording
+    ) {
+      // §7.3's own rule, unchanged: an audio track that goes away costs its own track
+      // and nothing else. The screen is what the user pressed record for.
+      console.log(
+        `[recorder] the ${message.track} track stopped (${reason}): ` +
+          `${message.detail ?? 'no detail'}. The screen is still recording.`,
+      );
+      return;
+    }
+
+    this.revoked = {
+      kind: grant,
+      recordingId: active.id,
+      recordedSec: this.elapsedSec(),
+    };
+    console.error(
+      `[recorder] ${PERMISSIONS[grant].title} was revoked during the recording. ` +
+        PERMISSIONS[grant].whenRevokedMidRecording,
+    );
+    this.publish();
+    // The ordinary stop, on the ordinary queue: the capture page is told to stop,
+    // every encoder flushes what it holds, and the bundle finalizes to `editable`
+    // with the media it has. Nothing here discards anything.
+    void this.enqueue(() => this.stop()).catch((error: unknown) => {
+      console.error('[recorder] stopping after a revoked permission failed:', error);
+    });
+  }
+
+  /**
+   * Whether macOS still grants us one of the media permissions, **right now**.
+   *
+   * A method rather than a direct call so the one place that reads a grant mid-
+   * recording is named, and so a test can drive both branches without a TCC database
+   * — the same reason `endReasonFor` takes its answer as an argument.
+   */
+  private stillGranted(kind: PermissionKind): boolean {
+    if (kind === 'accessibility') return readAxTrusted();
+    return readMediaStatus(kind) === 'granted';
+  }
+
+  /**
    * The capture page could not capture the camera at all (§7.4).
    *
    * The one camera state main cannot derive from its own parts: a `getUserMedia`
@@ -1273,7 +1421,12 @@ export class RecorderSession {
 
       const measured = report?.audio?.find((entry) => entry.track === track);
       if (measured !== undefined) {
-        out[track] = this.alignedAudio(active, measured, report?.epochOffsetUs ?? 0);
+        out[track] = this.alignedAudio(
+          active,
+          measured,
+          report?.epochOffsetUs ?? 0,
+          this.audioEndReason(active, track, measured.endedEarly),
+        );
         continue;
       }
       const fromBytes = writtenAudio(state, written);
@@ -1285,7 +1438,12 @@ export class RecorderSession {
         `[recorder] ${track} produced media but no measurements; it is described from the ` +
           'bytes that were written, at the nominal rate and starting with the screen',
       );
-      out[track] = fromBytes;
+      // A track classified while it was stopping keeps that answer on this branch
+      // too: it came from a live TCC read at the moment the track ended, and a
+      // missing end report says nothing about why the track went. `writtenAudio`'s
+      // `crash` is for the tracks nobody has an answer for (see {@link Active.audioEnd}).
+      const decided = active.audioEnd.get(track);
+      out[track] = decided === undefined ? fromBytes : { ...fromBytes, endReason: decided };
     }
     return out;
   }
@@ -1299,10 +1457,34 @@ export class RecorderSession {
    * from the system's uptime. `TrackEpochEstimator` is what relates them, and
    * without it `startTimeSec` is a subtraction of two unrelated numbers.
    */
+  /**
+   * Why one audio track ended early — the field the capture page deliberately does
+   * not fill in.
+   *
+   * The answer decided while it was happening wins, because that is the only moment
+   * TCC's answer was about the event (see {@link Active.audioEnd}). Failing that, a
+   * track that ended early with no report is classified here on a fresh read — the
+   * same arrangement `endReasonFor` uses for the screen, and for the same reason: a
+   * grant withdrawn in the last seconds of a recording is a real case, and a stale
+   * guess written into `recording.json` is worse than a late measurement.
+   */
+  private audioEndReason(
+    active: Active,
+    track: AudioTrackKey,
+    endedEarly: boolean,
+  ): PartEndReason | undefined {
+    const decided = active.audioEnd.get(track);
+    if (decided !== undefined) return decided;
+    if (!endedEarly) return undefined;
+    const grant = AUDIO_TRACK_GRANT[track];
+    return audioEndReasonFor('track-ended', grant === null ? true : this.stillGranted(grant));
+  }
+
   private alignedAudio(
     active: Active,
     measured: AudioTrackReport,
     videoEpochOffsetUs: number,
+    endReason: PartEndReason | undefined,
   ): FinalizedAudioFacts {
     const timing = alignAudioPart(measured.summary, {
       // `clock.t0Us` is the first screen frame; every other track's start is an
@@ -1319,7 +1501,7 @@ export class RecorderSession {
     return {
       timing,
       endedEarly: measured.endedEarly,
-      ...(measured.endReason === undefined ? {} : { endReason: measured.endReason }),
+      ...(endReason === undefined ? {} : { endReason }),
     };
   }
 
@@ -1474,10 +1656,18 @@ export class RecorderSession {
 
   // -------------------------------------------------------------------- status
 
-  private publish(): void {
+  /**
+   * What the HUD is seeing right now.
+   *
+   * Public because more than one thing needs to observe a recording without owning
+   * a window: the phase 2 verification harness drives a real recording from inside
+   * the packaged app and has no renderer to receive a push. It is the *same* object
+   * {@link publish} sends, so an observer and the HUD cannot disagree.
+   */
+  status(): RecorderStatus {
     const active = this.active;
     const webcam = active?.video.get('webcam');
-    const status: RecorderStatus = {
+    return {
       phase: this.phase,
       recordingId: active?.id ?? null,
       elapsedSec: this.elapsedSec(),
@@ -1492,7 +1682,14 @@ export class RecorderSession {
       // Parts closed, plus the one open. The HUD shows this so a recording that
       // survived an unplug says so while it is still going.
       cameraParts: webcam === undefined ? 0 : webcam.parts.length + (webcam.part === null ? 0 : 1),
+      // Not derived from `active`: the notice has to survive the recording it stopped,
+      // because that is when the user reads it. See {@link RecorderSession.revoked}.
+      revoked: this.revoked,
     };
+  }
+
+  private publish(): void {
+    const status = this.status();
     for (const window of this.options.windows.all()) {
       if (!window.isDestroyed()) window.webContents.send(CHANNEL.recorderStatus, status);
     }
@@ -1751,6 +1948,34 @@ function partEndMessage(raw: unknown): PartEndMsg {
     framesDropped: Math.max(0, finite(input['framesDropped'])),
     endedEarly: input['endedEarly'] === true,
     ...(reason === undefined ? {} : { endReason: reason }),
+  };
+}
+
+/**
+ * An audio track's mid-recording end, shape-checked like every other renderer
+ * message.
+ *
+ * A malformed one is refused rather than acted on: this message can stop a
+ * recording, which makes it the only capture-page message with that power, and a
+ * `cause` nobody sent must never be read as `track-ended`.
+ */
+function audioEndMessage(raw: unknown): AudioPartEndMsg {
+  if (raw === null || typeof raw !== 'object') throw new Error('audioEnded must be an object');
+  const input = raw as Record<string, unknown>;
+  const track = input['track'];
+  if (track !== 'mic' && track !== 'system') {
+    throw new Error(`track must be one of ${AUDIO_TRACK_KEYS.join(' | ')}`);
+  }
+  const cause = input['cause'];
+  if (cause !== 'track-ended' && cause !== 'encoder-failed') {
+    throw new Error("cause must be 'track-ended' or 'encoder-failed'");
+  }
+  const detail = shortString(input['detail'], 500);
+  return {
+    track,
+    part: requirePart(input['part']),
+    cause,
+    ...(detail === null ? {} : { detail }),
   };
 }
 
@@ -2078,4 +2303,35 @@ function endReasonFor(
   if (report.reason === 'stopped') return null;
   if (report.reason !== 'source-ended') return 'crash';
   return screenStillGranted ? 'device-lost' : 'permission-revoked';
+}
+
+/**
+ * Why an audio track that stopped on its own stopped — {@link endReasonFor}'s
+ * counterpart, and the piece phase 2 left out.
+ *
+ * The screen has had this re-check since phase 2; the microphone did not, so a
+ * withdrawn Microphone grant reached `recording.json` as `device-lost` — the same
+ * word an unplugged camera gets. `data/loom-scope/decision-mic-revocation.md` is the
+ * captain's answer to that, and this function is the only place the distinction is
+ * drawn.
+ *
+ * - **`track-ended` → `permission-revoked` *or* `device-lost`.** The
+ *   `MediaStreamTrack` firing `ended` is the shape both take, exactly as it is for
+ *   the screen. TCC is what separates them, and only if the track *has* a grant of
+ *   its own — a loopback track that ends has lost a device, whatever the Microphone
+ *   pane says.
+ * - **`encoder-failed` → `crash`.** The device is fine and the permission is not in
+ *   question; the thing writing the track stopped, which is what `crash` means here
+ *   (see {@link endReasonFor}).
+ *
+ * `stillGranted` is passed rather than read so this stays a pure function over the
+ * two facts it decides between, and so the test can drive both branches without a TCC
+ * database.
+ */
+function audioEndReasonFor(
+  cause: AudioPartEndMsg['cause'],
+  stillGranted: boolean,
+): 'permission-revoked' | 'device-lost' | 'crash' {
+  if (cause !== 'track-ended') return 'crash';
+  return stillGranted ? 'device-lost' : 'permission-revoked';
 }

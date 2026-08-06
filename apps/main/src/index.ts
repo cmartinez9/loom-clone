@@ -314,6 +314,12 @@ async function runVerifyMode(permissions: PermissionManager): Promise<void> {
       windows,
       appVersion: app.getVersion(),
       clickStream: observeClicks,
+      // The shipping recorder and store, so the §7.3 revocation check drives a real
+      // recording rather than a stand-in. It only runs when a person opted in, for
+      // the reason `checkMicrophoneRevocation` states: a TCC grant cannot be revoked
+      // programmatically, so the check waits for somebody to do it.
+      recorderDrive: { recorder, store },
+      micRevocation: process.argv.includes('--mic-revocation'),
     });
     console.log(formatReport(report));
     console.log(VERIFY_JSON_BEGIN);

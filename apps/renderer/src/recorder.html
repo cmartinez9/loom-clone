@@ -53,6 +53,18 @@
     -->
     <p class="hud-notice t-label" id="camera" hidden></p>
 
+    <!--
+      §7.3's revoked-permission notice, and the captain's
+      `decision-mic-revocation.md`. Its own shelf rather than the error line,
+      because the recording stopped but did not fail — everything captured up to
+      that moment is saved — and its own button, because "re-grant it" is the whole
+      of what the user is being asked to do.
+    -->
+    <div class="hud-revoked" id="revoked" hidden>
+      <p class="t-label" id="revoked-text"></p>
+      <button class="btn btn-sm" id="revoked-settings" type="button">Open System Settings</button>
+    </div>
+
     <p class="hud-error t-label" id="error" hidden></p>
   </body>
 </html>

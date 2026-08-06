@@ -22,6 +22,7 @@
 import '@loom/design/css';
 import './recorder.css';
 import { formatDuration } from '@loom/design';
+import { PERMISSIONS } from '@loom/permissions';
 import type { RecorderStatus } from '@loom/ipc';
 
 const loom = window.loom;
@@ -34,6 +35,9 @@ const recordButton = must('record') as HTMLButtonElement;
 const stopButton = must('stop') as HTMLButtonElement;
 const errorLine = must('error');
 const cameraLine = must('camera');
+const revokedShelf = must('revoked');
+const revokedText = must('revoked-text');
+const revokedSettings = must('revoked-settings') as HTMLButtonElement;
 
 /** The last shelf height main was told about. `-1` so the first report is sent. */
 let reportedNoticeHeight = -1;
@@ -69,6 +73,20 @@ stopButton.addEventListener('click', () => {
   });
 });
 
+/**
+ * The one thing the §7.3 notice asks the user to do, made pressable.
+ *
+ * The kind is read off the notice main sent rather than hard-coded: `openSettings`
+ * takes a {@link PermissionKind} and main looks up the one URL it is allowed to open
+ * (see `PermissionsApi.openSettings`), so a second revocable grant needs no change
+ * here.
+ */
+revokedSettings.addEventListener('click', () => {
+  const kind = revokedSettings.dataset['kind'];
+  if (kind === undefined) return;
+  loom.permissions.openSettings(kind as Parameters<typeof loom.permissions.openSettings>[0]);
+});
+
 loom.recorder.onStatus(render);
 
 render({
@@ -80,6 +98,7 @@ render({
   error: null,
   camera: 'off',
   cameraParts: 0,
+  revoked: null,
 });
 
 function render(status: RecorderStatus): void {
@@ -101,6 +120,7 @@ function render(status: RecorderStatus): void {
   counts.textContent = live || status.phase === 'finalizing' ? parts.join(' · ') : '';
 
   renderCamera(status);
+  renderRevoked(status);
 
   if (status.error !== null) {
     errorLine.textContent = status.error;
@@ -124,7 +144,7 @@ function render(status: RecorderStatus): void {
  * second for the length of a recording, and the answer is the same every time.
  */
 function reportNoticeHeight(): void {
-  const height = cameraLine.offsetHeight + errorLine.offsetHeight;
+  const height = cameraLine.offsetHeight + revokedShelf.offsetHeight + errorLine.offsetHeight;
   if (height === reportedNoticeHeight) return;
   reportedNoticeHeight = height;
   loom.recorder.noticeHeight(height);
@@ -163,6 +183,39 @@ function renderCamera(status: RecorderStatus): void {
       ? 'Camera disconnected — still recording screen and audio.'
       : 'Camera unavailable — still recording screen and audio.';
   cameraLine.hidden = false;
+}
+
+/**
+ * The revoked-permission notice. Architecture report §7.3, and the captain's
+ * `decision-mic-revocation.md`.
+ *
+ * Three things this gets right that the camera banner deliberately does not need:
+ *
+ * 1. **It names the cause.** The whole point of the decision is that "microphone
+ *    disconnected" told a user who had just switched the permission off the wrong
+ *    thing. The sentence comes from `PERMISSIONS[kind]`, which is where every other
+ *    surface reads its permission copy from, so the recorder and the first-run window
+ *    cannot describe the same grant differently.
+ * 2. **It says the footage survived**, with the length of it. A recording that stops
+ *    by itself reads as a recording that was lost, and this one was not — it
+ *    finalized to the library with everything up to the moment the grant went away.
+ * 3. **It outlives the recording.** Unlike the camera banner it is not gated on the
+ *    phase: by the time anyone reads it, the recorder is back to `idle`. Pressing
+ *    record clears it, which is main's doing (`RecorderSession.revoked`).
+ */
+function renderRevoked(status: RecorderStatus): void {
+  const revoked = status.revoked;
+  if (revoked === null) {
+    revokedShelf.hidden = true;
+    return;
+  }
+  const facts = PERMISSIONS[revoked.kind];
+  revokedText.textContent =
+    `${facts.whenRevokedMidRecording} ` +
+    `${formatDuration(revoked.recordedSec)} is in your library.`;
+  revokedSettings.dataset['kind'] = revoked.kind;
+  revokedSettings.textContent = `Open ${facts.settingsPaneName.split('›').pop()?.trim() ?? 'Settings'} settings`;
+  revokedShelf.hidden = false;
 }
 
 function showError(error: unknown): void {

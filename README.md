@@ -18,7 +18,10 @@ declining the other three leaves a recorder that still records, with the feature
 needed them switched off. Accessibility is used to detect clicks and nothing else, and
 because macOS does not hand that grant to a running process, the setup window offers to
 relaunch once it is switched on. The library keeps a route back to that screen, so a
-permission answered "no" is not a reinstall.
+permission answered "no" is not a reinstall. Switching the Microphone off _while a
+recording is running_ stops that recording and the HUD says the permission was
+revoked, rather than reporting a device that disconnected — everything captured up to
+that moment is saved and playable, not discarded.
 
 After setup the app records the screen with the microphone and the system's own audio
 output alongside it, and lists the recordings it finds under `~/Movies/Loom Clone` —
@@ -120,12 +123,15 @@ and only they, are answered from a signed bundle instead:
 npm run verify:permissions   # package, sign under the frozen bundle id, run the checks
 ```
 
-That gate has **no audio checks at all**. Whether macOS honours the AEC/NS/AGC-off
-stereo constraints on a real loopback track, and where a real microphone's
-`startTimeSec` actually lands, are phase 3's obligations and both are still open. The
-thing that would answer them is `node scripts/smoke-capture.mjs` **without**
-`--synthetic`, on a machine that has been granted Screen Recording and Microphone —
-not `npm run verify:permissions`.
+That gate's only audio check is §7.3's — that a Microphone grant withdrawn
+mid-recording stops the recording rather than being logged as a disconnected device —
+and it needs a person to flip the switch, so it runs only under
+`node scripts/verify-permissions.mjs --mic-revocation` and is otherwise `skipped`.
+Whether macOS honours the AEC/NS/AGC-off stereo constraints on a real loopback track,
+and where a real microphone's `startTimeSec` actually lands, are phase 3's obligations
+and both are still open. The thing that would answer them is
+`node scripts/smoke-capture.mjs` **without** `--synthetic`, on a machine that has been
+granted Screen Recording and Microphone — not `npm run verify:permissions`.
 
 `AGENTS.md` § Phase 2 gate status is the record of what that has closed and what is
 still waiting on a permission only System Settings can give.

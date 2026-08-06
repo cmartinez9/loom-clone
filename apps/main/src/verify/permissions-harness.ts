@@ -6,7 +6,9 @@
  * binary — dev inherits Terminal's TCC and lies to you (scout trap 6)."* Phase 1
  * shipped three things deliberately **unverified** because a dev binary could only
  * have produced a misleading pass, and the captain's Accessibility decision left a
- * fourth. This file is what turns all four into a command:
+ * fourth. Phase 2 then opened a fifth of its own — a revoked Microphone recorded as a
+ * lost device, settled by the captain in `data/loom-scope/decision-mic-revocation.md`.
+ * This file is what turns all five into a command:
  *
  * | # | Obligation                                                       | Check |
  * |---|------------------------------------------------------------------|-------|
@@ -14,6 +16,7 @@
  * | 2 | `setDisplayMediaRequestHandler` frame authorisation                | `frame-authorisation` |
  * | 3 | `setContentProtection(true)` keeps the HUD out of captured frames  | `content-protection` |
  * | 4 | post-grant click event rate and latency                            | `accessibility-clicks` |
+ * | 5 | a revoked Microphone recorded as a lost device (phase 2, item 8)   | `microphone-revocation` |
  *
  * ## Why it lives in the app rather than beside it
  *
@@ -37,10 +40,12 @@
 
 import { BrowserWindow, desktopCapturer, screen, type NativeImage } from 'electron';
 import { LOOM_BUNDLE_ID } from '../identity.ts';
-import type { PermissionManager } from '../permissions.ts';
+import { readMediaStatus, type PermissionManager } from '../permissions.ts';
+import type { ProjectStore } from '../project-store.ts';
+import type { RecorderSession } from '../recorder/session.ts';
 import type { WindowRegistry } from '../windows.ts';
 import { clickVerdict, sealReport, type CheckResult, type VerifyReport } from './checks.ts';
-import { appUrl } from '@loom/ipc';
+import { appUrl, type RecordingId } from '@loom/ipc';
 import { concludeAccessibility, describeAccessibility } from '@loom/permissions';
 
 /**
@@ -72,6 +77,21 @@ export interface ObservedClick {
  */
 export type ClickStreamProbe = (durationMs: number) => Promise<ObservedClick[]>;
 
+/**
+ * What the §7.3 microphone-revocation check needs, and nothing else.
+ *
+ * The shipping `RecorderSession` and `ProjectStore`, because the check has to drive
+ * a **real** recording from inside the packaged app: the whole point is that macOS
+ * is answering about *our* code identity, and a fake recorder would only prove that
+ * the fake stops. `index.ts` supplies both, the same way it supplies `clickStream`.
+ *
+ * `null` — which is the default — makes the check `skipped`, never a pass.
+ */
+export interface RecorderDrive {
+  recorder: RecorderSession;
+  store: ProjectStore;
+}
+
 export interface HarnessOptions {
   permissions: PermissionManager;
   windows: WindowRegistry;
@@ -84,6 +104,22 @@ export interface HarnessOptions {
    * default is short enough to be tolerable and long enough to measure a rate.
    */
   clickWindowMs?: number;
+  /**
+   * The shipping recorder, for `microphone-revocation`. `null` skips, never passes.
+   */
+  recorderDrive?: RecorderDrive | null;
+  /**
+   * Run the microphone-revocation check, which **needs a human**.
+   *
+   * Off unless `scripts/verify-permissions.mjs --mic-revocation` asked for it, and
+   * that is not shyness: the check waits for somebody to switch Microphone off in
+   * System Settings, so an ordinary run would sit there for a minute and then report
+   * a gap that was never a defect. Opting in is how the harness knows a person is
+   * standing there.
+   */
+  micRevocation?: boolean;
+  /** How long the check waits for the grant to be withdrawn. */
+  micRevocationWindowMs?: number;
 }
 
 /** A colour no part of the Pressroom palette contains, so a match is unambiguous. */
@@ -119,6 +155,7 @@ export async function runVerification(options: HarnessOptions): Promise<VerifyRe
   checks.push(await checkFrameAuthorisation(options.windows));
   checks.push(await checkContentProtection(options.windows));
   checks.push(await checkAccessibilityClicks(options, permissions));
+  checks.push(await checkMicrophoneRevocation(options));
 
   return sealReport({
     startedAt,
@@ -781,6 +818,208 @@ async function whenReady(window: BrowserWindow): Promise<void> {
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+// ------------------------------------ 5. a Microphone grant revoked mid-recording
+
+/**
+ * The captain's `data/loom-scope/decision-mic-revocation.md`, run against the real
+ * thing.
+ *
+ * `apps/main/test/recorder-session.test.ts` drives every branch of this with
+ * `systemPreferences` replaced, which is what makes it a test that runs on CI. What
+ * it cannot establish is the one thing this harness exists for: that **macOS is
+ * answering about us**, and that the answer changes when a person flips the switch.
+ * A dev binary inherits its terminal's grants (research §7, trap 6), so only a
+ * signed bundle launched by LaunchServices can watch a Microphone grant actually go
+ * away and see the shipping `RecorderSession` respond to it.
+ *
+ * So this check is deliberately **interactive** and deliberately **off by default**.
+ * There is no programmatic way to revoke a TCC permission — this file does not
+ * pretend otherwise, any more than the rest of the harness pretends it can grant
+ * one. What it automates is everything either side of the human step: opening a real
+ * recording, watching for the grant to move, and then asserting the three things the
+ * decision asks for at once — that the recording **stopped**, that it says
+ * **`permission-revoked`** rather than `device-lost`, and that what was already
+ * captured **survived**.
+ *
+ * `blocked`, not `fail`, when nobody revokes anything: "we could not look" and "we
+ * looked and it was broken" are different reports (see {@link CheckStatus}).
+ */
+async function checkMicrophoneRevocation(options: HarnessOptions): Promise<CheckResult> {
+  const id = 'microphone-revocation';
+  const title = 'A revoked Microphone grant stops the recording and keeps the footage';
+  const obligation =
+    'a Microphone revoked mid-recording is recorded as a lost device (phase 2, item 8)';
+  const drive = options.recorderDrive ?? null;
+
+  if (options.micRevocation !== true || drive === null) {
+    return {
+      id,
+      title,
+      obligation,
+      status: 'skipped',
+      detail:
+        'Needs a person: there is no way to revoke a TCC permission programmatically. Run ' +
+        '`node scripts/verify-permissions.mjs --mic-revocation`, then switch "Loom Clone" ' +
+        'off under Privacy & Security › Microphone while the recording it starts is running.',
+    };
+  }
+
+  const before = readMediaStatus('microphone');
+  if (before !== 'granted') {
+    return {
+      id,
+      title,
+      obligation,
+      status: 'blocked',
+      detail:
+        `Microphone is ${before}, so there is nothing to revoke. Grant it first — the check ` +
+        'is about a grant being withdrawn, not about one that was never given.',
+      data: { microphone: before },
+    };
+  }
+
+  const { recorder, store } = drive;
+  const windowMs = options.micRevocationWindowMs ?? 90_000;
+  let recordingId: RecordingId | null = null;
+  try {
+    // A real recording of the real screen, with the microphone and nothing else: no
+    // camera (opening one lights an indicator nobody asked for) and no loopback,
+    // which would only add a second audio track to the thing being watched.
+    recordingId = await recorder.start({
+      micDeviceId: 'default',
+      systemAudio: false,
+      webcamDeviceId: null,
+    });
+    console.log(
+      `\n  [verify] recording ${recordingId}. **Switch "Loom Clone" off under ` +
+        `System Settings › Privacy & Security › Microphone now.**\n` +
+        `  [verify] waiting up to ${String(Math.round(windowMs / 1000))}s for the grant to move…`,
+    );
+
+    // Enough of a recording to be worth keeping, so "the footage survived" is a
+    // claim about frames rather than about an empty file. A capture that never
+    // produced one — Screen Recording not granted, `getDisplayMedia` refused — is a
+    // run that could not look at anything, so it says so rather than reporting the
+    // revocation it never got to watch as broken.
+    const capturing = await waitFor(() => recorder.status().frameCount > 0, 15_000);
+    if (!capturing) {
+      const stalled = recorder.status();
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'The recording produced no frames, so there was nothing for a revocation to ' +
+          `happen to. Screen Recording is ${readMediaStatus('screen')} and the recorder is ` +
+          `${stalled.phase}${stalled.error === null ? '' : `: ${stalled.error}`}. Grant Screen ` +
+          'Recording and re-run — this check needs a recording that is actually running.',
+        data: {
+          screen: readMediaStatus('screen'),
+          microphone: readMediaStatus('microphone'),
+          phase: stalled.phase,
+          error: stalled.error,
+          frameCountBefore: stalled.frameCount,
+        },
+      };
+    }
+    const frameCountBefore = recorder.status().frameCount;
+
+    const wasRevoked = await waitFor(() => readMediaStatus('microphone') !== 'granted', windowMs);
+    if (!wasRevoked) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'Microphone was still granted when the window closed — nobody revoked it, so there ' +
+          'was nothing to observe. Re-run and switch it off while the recording is running.',
+        data: { microphone: readMediaStatus('microphone'), frameCountBefore },
+      };
+    }
+
+    // The recorder stops itself. Not "we stopped it and then looked": the whole
+    // claim is that the app reacts to the revocation without being told to.
+    const stopped = await waitFor(
+      () => recorder.status().phase === 'idle' && recorder.status().revoked !== null,
+      30_000,
+    );
+    const status = recorder.status();
+    const doc = (await store.readProject(recordingId)).recording;
+    const mic = doc?.tracks.mic?.parts[0];
+    const screenPart = doc?.tracks.screen?.parts[0];
+    const data = {
+      stoppedItself: stopped,
+      revoked: status.revoked,
+      micEndReason: mic?.endReason ?? null,
+      micEndedEarly: mic?.endedEarly ?? null,
+      screenFrames: screenPart?.frameCount ?? 0,
+      screenDurationSec: screenPart?.durationSec ?? 0,
+      frameCountBefore,
+    };
+
+    const problems: string[] = [];
+    if (!stopped) problems.push('the recorder did not stop itself');
+    if (status.revoked?.kind !== 'microphone') {
+      problems.push('the user was not told a Microphone permission had been revoked');
+    }
+    if (mic === undefined) problems.push('the microphone part is missing from recording.json');
+    else if (mic.endReason !== 'permission-revoked') {
+      problems.push(
+        `the mic part says endReason=${mic.endReason ?? 'none'}, not permission-revoked`,
+      );
+    }
+    // The point with teeth: raw sources are deleted after an export (decision 5), so
+    // a partial recording discarded at stop time is gone for good.
+    if ((screenPart?.frameCount ?? 0) === 0) {
+      problems.push('the screen part kept no frames — the recording was discarded, not finalized');
+    }
+
+    return {
+      id,
+      title,
+      obligation,
+      status: problems.length === 0 ? 'pass' : 'fail',
+      detail:
+        problems.length === 0
+          ? `The grant was withdrawn, the recorder stopped itself, the user was told the ` +
+            `Microphone permission was revoked, and ${String(data.screenFrames)} frames ` +
+            `(${data.screenDurationSec.toFixed(2)}s) of screen survived in the bundle.`
+          : problems.join('; '),
+      data,
+    };
+  } catch (error) {
+    return {
+      id,
+      title,
+      obligation,
+      status: 'blocked',
+      detail: `the check could not be run: ${message(error)}`,
+    };
+  } finally {
+    // Whatever happened, nothing is left recording. A stop that is not needed is a
+    // no-op; one that is, is the difference between this harness exiting and hanging.
+    await recorder.stop().catch(() => undefined);
+  }
+}
+
+/**
+ * Poll until `predicate` holds, or give up. `true` if it held.
+ *
+ * Polling rather than an event, because the thing being watched — TCC's answer —
+ * emits no event at all: macOS does not notify an app that a grant has moved, which
+ * is the same fact `PermissionsApi.onChange` re-probes on focus to work around.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await delay(250);
+  }
+  return predicate();
 }
 
 function message(error: unknown): string {

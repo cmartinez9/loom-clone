@@ -1,6 +1,7 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
- * phase 4's camera-unplug gate and phase 7's timeline model.
+ * phase 4's camera-unplug gate, §7.3's revoked-microphone path and phase 7's
+ * timeline model.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -38,6 +39,8 @@ const AUDIO_MUX = 'packages/mux/test/audio-part.test.ts';
 /** The phase 4 gate: unplug the camera, keep the screen, two parts placed right. */
 const PHASE4 = 'test/phase4-gate.test.ts';
 const RECORDER = 'apps/main/test/recorder-session.test.ts';
+/** The capture page's own lifecycle, including §7.3's mid-recording track end. */
+const RECORDER_CAPTURE_PAGE = 'apps/renderer/test/capture-session.test.ts';
 /** Phase 7's two gates, and the tests that carry the model's other properties. */
 const EDL_DETERMINISM = 'packages/edl/test/spring-determinism.test.ts';
 const EDL_SPRING = 'packages/edl/test/spring.test.ts';
@@ -201,6 +204,33 @@ const MUTATIONS = [
     find: '      if (chunk.part === state.part) this.appendChunk(active, state, chunk);',
     replace: '      if (chunk.part !== state.part) this.appendChunk(active, state, chunk);',
     mustFail: [PHASE4, RECORDER],
+  },
+
+  // ---- §7.3: a Microphone grant withdrawn mid-recording -------------------
+  {
+    name: 'revoked-microphone-treated-as-a-lost-device',
+    breaks:
+      'the one distinction `decision-mic-revocation.md` is about. Reading TCC is ' +
+      'what tells a withdrawn Microphone grant apart from an unplugged interface, ' +
+      'and answering "still granted" for every audio track that ends puts the ' +
+      "revocation straight back on §7.4's webcam path: recorded as device-lost, " +
+      'with the recording carrying on and nobody told why the voice went away.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: "  if (cause !== 'track-ended') return 'crash';\n  return stillGranted ? 'device-lost' : 'permission-revoked';",
+    replace: "  if (cause !== 'track-ended') return 'crash';\n  return 'device-lost';",
+    mustFail: [RECORDER],
+  },
+  {
+    name: 'audio-track-end-not-reported-while-recording',
+    breaks:
+      'the capture page telling main a track stopped **as it happens**. Held until ' +
+      'the end report instead, the TCC read that decides the cause is taken minutes ' +
+      'after the grant moved — and a recording that should have stopped at minute ' +
+      'two runs to the end without its microphone.',
+    file: 'apps/renderer/src/capture/audio.ts',
+    find: '  sink.ended({ track: capture.track, part: capture.part, cause, detail });',
+    replace: '  void cause;\n  void detail;',
+    mustFail: [RECORDER_CAPTURE_PAGE],
   },
 
   // ---- phase 7: the timeline model ---------------------------------------
