@@ -985,9 +985,15 @@ was not a control.
   kept out of `contextLost` by name rather than by inference.
 - **The phase-8 golden harness dies on CI when the GPU process cannot allocate. Asking
   the GPU for less thinned it out; tuning a switch did nothing; and it is still not
-  closed.** Always the same instant, within a second of `export writer open`:
-  `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane`, then
-  `Restarting GPU process due to unrecoverable error`.
+  closed.** Always the same instant, within a second of `export writer open`: an
+  allocation the GPU process cannot satisfy, then
+  `Restarting GPU process due to unrecoverable error` and `abnormal-exit (exit 8704)`.
+  **Which allocator reports it is not part of the signature.** Some runs say
+  `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane`
+  (`dawn_context_provider.cc:120`); others say `Failed to allocate host memory` out of
+  ANGLE-Metal's `mtl_resources.mm`, as a `GL_OUT_OF_MEMORY`. What runs out is **host**
+  memory, so the site named is whichever allocation happened to be next rather than the
+  one that is too large.
   Two things were tried first and neither closed it, both worth knowing because both
   _sound_ decisive. **One:** `--force-gpu-mem-available-mb` overrides Skia's GPU
   resource-cache budget, so phase 6's `2048` tells the driver it may hold two gigabytes
@@ -1012,11 +1018,14 @@ was not a control.
   export pass moves — **source area, output area, and the number of live contexts** —
   not the cache budget.
   **Two turns of that knob did not close it, and there is no third.** Measured on
-  `fm/loom-gate-instrument-validity`, at 1024x576 into 768x432: two of six CI runs died
-  the same way — runs `31094399329` and `31100718641`, each `Failed to allocate texture`
-  inside `Skia_Wrapped_YUVPlane` within a second of `export writer open`, and each
-  exhausting **both** launches `shouldRelaunchGolden` allows, so the gate reported a
-  phase-8 failure about a run that produced no reading. A third turn — 768x432 into
+  `fm/loom-gate-instrument-validity`, at 1024x576 into 768x432: three of seven CI runs
+  died the same way — `31094399329`, `31100718641` and `31102224786`, each within a
+  second of `export writer open` and each exhausting **both** launches
+  `shouldRelaunchGolden` allows, so the gate reported a phase-8 failure about a run that
+  produced no reading. The first two reported `Failed to allocate texture` inside
+  `Skia_Wrapped_YUVPlane`; the third reported `Failed to allocate host memory` out of
+  ANGLE-Metal and carried no Skia line at all, which is the measurement behind the
+  sentence above that the allocator is not the signature. A third turn — 768x432 into
   512x288, 44% of the area — was applied as a CI auto-fix on `0e2c49e` and **reverted**
   on `8a421b4`. Read _"Not one assertion moved"_ two paragraphs up in that light, because
   it is the sentence every reduction is defended with: a fixture size is a **constant, not
@@ -1030,9 +1039,14 @@ was not a control.
   6's frame budget. The same remedy for phase 8 — withhold the verdict when every launch
   lost the GPU context — is in flight as its own task and is **not** phase 6's branch to
   land. Until it does, a red `test/phase8-gate.test.ts` whose log carries
-  `Failed to allocate texture` and `GPU process gone: abnormal-exit (exit 8704)` is this
-  known crash rather than a regression to chase, and the answer is neither a smaller
-  fixture nor a third launch.
+  `GPU process gone: abnormal-exit (exit 8704)` within a second of `export writer open`
+  on **both** launches is this known crash rather than a regression to chase, and the
+  answer is neither a smaller fixture nor a third launch. **Match on that pair and not
+  on the allocator**: this rule used to read `Failed to allocate texture`, which run
+  `31102224786` — the first run after the revert, and the one that turned this branch red
+  — does not contain anywhere in its log. A recognition rule that fails to recognise the
+  run it was written for sends the next reader chasing a regression, which is the one
+  thing this entry exists to prevent.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
