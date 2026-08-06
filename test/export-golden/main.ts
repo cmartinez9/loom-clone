@@ -128,7 +128,7 @@ registerLoomScheme();
 // the driver it may hold two gigabytes of textures before purging any of them. Phase
 // 6's gate can make that claim: it uploads a frame and draws it, and its Skia
 // residency is a handful of surfaces. This one cannot. Every composited frame here
-// costs a YUV→RGB conversion of a software-decoded 1920x1080 source *and* a
+// costs a YUV→RGB conversion of a software-decoded source frame *and* a
 // `new VideoFrame(canvas)` for the encoder, so the run accumulates Skia resources for
 // the whole comparison and then asks for more, at rate, the instant the export pass
 // starts. On a GitHub macOS runner — "Apple Paravirtual device", far short of two
@@ -145,12 +145,13 @@ registerLoomScheme();
 // addressed is how much this harness was asking the device for: four contexts, four
 // readers and a 1920x1080 source, with a fresh context created for the export pass at
 // the exact moment three released ones were still resident. `harness.ts`'s
-// `disposePath` carries that reading and what closed it. Do not read this block as the
-// fix.
+// `disposePath` carries that reading, and `OUTPUT_SIZE` carries the one after it — the
+// crash returned, and what answered it a second time was again the size of what the
+// export pass asks the device for, not a switch. Do not read this block as the fix.
 //
-// Same reasons as the phase-6 gate: this run composites 4K-class frames and must not
-// have the GPU process taken away from it, or be descheduled mid-encode, on a shared
-// host. Nothing here is timed — but a lost context makes every pixel comparison a
+// Same reasons as the phase-6 gate: this run composites and encodes a decoded stream
+// frame by frame, and must not have the GPU process taken away from it, or be
+// descheduled mid-encode, on a shared host. Nothing here is timed — but a lost context makes every pixel comparison a
 // fiction, which is worse than a slow one.
 app.commandLine.appendSwitch('disable-gpu-watchdog');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -386,7 +387,17 @@ void app.whenReady().then(async () => {
       report.ok ? 'harness reported success' : `harness reported failure: ${report.error ?? ''}`,
     );
     await store.cancelExport(JOB).catch(() => undefined);
-    await finish(report, report.ok ? 0 : 1);
+    // A failing run is classified with what *both* processes saw. The harness asks its
+    // own contexts; main watched the GPU process exit, which is the same event arriving
+    // by the route that cannot mistake it for anything else. `failureReport` already
+    // reads `gpuGone` that way, and a run the harness *managed* to report on should not
+    // be classified differently from one it did not.
+    //
+    // Never a widening: it only ever touches a report that already failed, and
+    // `gpuGone` is false on a healthy run — the harness hands its own contexts back
+    // with `WEBGL_lose_context`, which does not take the process with it.
+    const classified = report.ok || !gpuGone ? report : { ...report, contextLost: true };
+    await finish(classified, classified.ok ? 0 : 1);
   });
 
   ipcMain.on('golden:log', (_event, message: string) => {

@@ -122,13 +122,14 @@ declare global {
 /**
  * The fixture's size. Smaller than phase 6's 4K: this gate measures pixels, not time.
  *
- * And smaller than the 1920x1080 it was: on a host with no hardware decoder every
- * composite is a CPU-backed `texImage2D` of a whole source frame, so the *area* of
- * this constant is the unit of GPU work the run spends — see {@link disposePath} for
- * what that cost bought on CI. 1280x720 is 44% of the pixels and is a multiple of 16
- * on both axes, which matters below.
+ * And smaller than the 1920x1080 and then the 1280x720 it was: on a host with no
+ * hardware decoder every composite is a CPU-backed `texImage2D` of a whole source
+ * frame, so the *area* of this constant is the unit of GPU work the run spends — see
+ * {@link disposePath} for what the first reduction bought on CI, and {@link OUTPUT_SIZE}
+ * for why the second one had to come with it. 1024x576 is 28% of 1920x1080's pixels
+ * and a multiple of 16 on both axes, which matters below.
  */
-const FIXTURE_SIZE: [number, number] = [1280, 720];
+const FIXTURE_SIZE: [number, number] = [1024, 576];
 /**
  * Same aspect, so `contentRect` fills and the frame-code band lands where it is
  * looked for — and, like the fixture, a whole number of macroblocks on both axes.
@@ -137,9 +138,29 @@ const FIXTURE_SIZE: [number, number] = [1280, 720];
  * frame code out of a picture the *encoder* produced, and an output size H.264 has to
  * pad would come back with a coded height above the display height, letterbox by a
  * couple of pixels against `contentRect`'s expectation, and move the band off the row
- * the reader samples.
+ * the reader samples. 16:9 with both axes on a macroblock is `256k x 144k`, so the
+ * sizes here and above are consecutive rungs of that ladder rather than round numbers.
+ *
+ * ## The second reduction, and what came back
+ *
+ * `disposePath` records the run that went from four contexts and a 1920x1080 source to
+ * two and 1280x720. That closed the crash it was measured against and did not close it
+ * for good: on this branch it returned on **five of six** CI runs, always the same
+ * `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane` followed by
+ * `Restarting GPU process due to unrecoverable error`, and always inside the export
+ * pass — once at output frame 112 of 168, once on both of the two launches the lost
+ * context earns. Nothing about the contexts had changed; what had not changed either
+ * is that the export pass is the only phase that pays for a frame **twice**, once to
+ * upload the decoded source and once for `new VideoFrame(canvas)` into a software
+ * encoder, 168 times over.
+ *
+ * So the same knob is turned again, on both halves of that per-frame cost: the source
+ * frame is 64% of the pixels it was and the encoded frame 56% of its own, which is
+ * roughly 61% of the GPU bytes the pass used to move. Not one assertion changes — the
+ * gate compares per-pixel deltas, counts samples and reads frame codes, and none of
+ * those is a statement about resolution.
  */
-const OUTPUT_SIZE: [number, number] = [1024, 576];
+const OUTPUT_SIZE: [number, number] = [768, 432];
 const FIXTURE_FRAMES = 90;
 const GOP = 30;
 const FPS = 30;
@@ -169,6 +190,42 @@ function checkContext(gl: WebGL2RenderingContext, where: string): void {
   if (lost.where === null && !gl.isContextLost()) return;
   lost.where ??= where;
   throw new Error(`the WebGL context was lost (noticed at ${lost.where}); nothing can be compared`);
+}
+
+/**
+ * The contexts this run opened and has not handed back. See {@link contextWasLost}.
+ *
+ * `disposePath` removes one *before* it releases it, so a context this harness gave up
+ * on purpose can never be read as one the driver took away — the same rule
+ * {@link released} keeps for the `webglcontextlost` event.
+ */
+const liveContexts = new Set<WebGL2RenderingContext>();
+
+/**
+ * Did the driver take a context away? Asked of the contexts, not of the bookkeeping.
+ *
+ * `lost.where` is set by {@link checkContext} and by the `webglcontextlost` listener,
+ * and in the failure this exists for **neither had run**. `ExportRenderLoop` consults
+ * `Compositor.contextLost` before and after every composite, so on a GPU process that
+ * dies mid-export it is the first thing to notice: it throws `ExportContextLostError`
+ * in the same turn the context died, microseconds ahead of the event Chromium
+ * dispatches and before any `checkContext` below is reached. The report then said
+ * `contextLost: false` about a run whose context was gone, so `shouldRelaunchGolden`
+ * — the predicate that exists for exactly this event — did not fire and the gate
+ * judged a run that produced no reading as a phase-8 failure. Observed on CI: the
+ * export refused at output frame 112 with `Failed to allocate texture` and
+ * `Restarting GPU process due to unrecoverable error` in Chromium's own log.
+ *
+ * So this asks `isContextLost()` of every live context, which is the same question the
+ * export loop asked. It widens nothing: the relaunch condition is still *"the context
+ * was lost"*, and a run that loses it twice still fails at the gate's first assertion.
+ */
+function contextWasLost(): boolean {
+  if (lost.where !== null) return true;
+  for (const gl of liveContexts) {
+    if (gl.isContextLost()) return true;
+  }
+  return false;
 }
 
 /** §4.5's rows this run compares, and the two it structurally cannot. See the header. */
@@ -327,6 +384,7 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
     powerPreference: 'high-performance',
   });
   if (gl === null) throw new Error('no WebGL2 context');
+  liveContexts.add(gl);
   // Recorded rather than prevented: the program, the textures and the render target
   // all go with the context, so there is nothing to restore into. What matters is
   // knowing, and knowing before the next thing reads. Same listener, same reason, as
@@ -378,8 +436,11 @@ async function openPath(url: string, indexUrl: string, durationSec: number): Pro
 function disposePath(path: Path): void {
   path.reader.close();
   path.compositor.dispose();
-  // Marked before the call, not after: the event is the driver's to schedule.
+  // Marked before the call, not after: the event is the driver's to schedule, and so
+  // is `isContextLost()` going true. Both readings have to stop counting this context
+  // as one the driver could take away, from here on.
   released.add(path.canvas);
+  liveContexts.delete(path.gl);
   const release = path.gl.getExtension('WEBGL_lose_context');
   if (release !== null) release.loseContext();
 }
@@ -1027,7 +1088,7 @@ void run().then(
     return window.exportGolden.finish({
       ok: false,
       error: message,
-      contextLost: lost.where !== null,
+      contextLost: contextWasLost(),
       coverage: {
         exercised: [],
         notExercised: [],

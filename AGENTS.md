@@ -861,15 +861,29 @@ was not a control.
   crash came back anyway. **Two:** releasing each finished path's context before the
   end-to-end pass — also still right, also not sufficient, because a release is a
   message to another process and the allocation that failed was the very next one.
-  What closed it was the peak itself: the run opened **four** paths (preview, export, a
+  What answered it is the peak itself: the run opened **four** paths (preview, export, a
   third for the divergence controls, a fourth for the export pass) over a 1920x1080
   source, and created that fourth context at exactly the moment three released ones
   were still resident. It now opens **two** and reuses them — the controls run on the
-  export path, and so does the export pass — over a 1280x720 source into a 1024x576
-  output, both a whole number of macroblocks because `readBackFrames` reads the frame
-  code out of an _encoded_ picture. Not one assertion moved. The knob on a virtualised
-  runner is the source frame's **area × the number of live contexts**, not the cache
-  budget.
+  export path, and so does the export pass. **The resolutions are that same knob, turned
+  twice:** 1920x1080 into 1280x720, and then — when the crash came back on five of six
+  runs, once at output frame 112 of 168 and once on both of the two launches a lost
+  context earns — 1024x576 into a 768x432 output. Both axes stay a whole number of
+  macroblocks (16:9 on a macroblock is `256k x 144k`, so the sizes are rungs of one
+  ladder) because `readBackFrames` reads the frame code out of an _encoded_ picture. Not
+  one assertion moved. The knob on a virtualised runner is the GPU bytes a frame of the
+  export pass moves — **source area, output area, and the number of live contexts** —
+  not the cache budget.
+- **A lost context the export loop notices first still has to reach
+  `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
+  after every composite, so when the GPU process dies mid-export it throws
+  `ExportContextLostError` in the same turn — ahead of the `webglcontextlost` event and
+  of any `checkContext` in the harness. The report then said `contextLost: false` about a
+  run whose context was gone, `shouldRelaunchGolden` never fired, and a run that produced
+  no reading was judged as a phase-8 failure. `contextWasLost()` asks the live contexts
+  themselves (minus the ones `disposePath` handed back), and main folds in the
+  GPU-process exit it watched. The predicate is untouched and nothing is widened: a run
+  that loses the context twice still fails at the gate's first assertion.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
