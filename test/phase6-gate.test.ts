@@ -60,7 +60,20 @@ import {
 // larger, in a file nobody opens to review retry policy. What may *trigger* a relaunch is
 // fixed at `shouldRelaunch` and never moves; the count answers to measured evidence and to
 // nothing else, and both halves of that rule are stated where the number now lives.
-import { GATE_ATTEMPTS, shouldRelaunch } from './gate/relaunch.ts';
+//
+// The two timeouts come from there for a stronger reason than tidiness: `GATE_TIMEOUT_MS`
+// bounds every launch together, so it is arithmetic on the count rather than a number
+// anybody chooses, and it was already once left behind when the count moved. Deriving it
+// beside the count is what stops that recurring; `test/relaunch-policy.test.ts` is where
+// the derivation is held against the bound that encloses it, and cannot import this file
+// to do so — importing a test module registers its suites, and this one is a 4K encode and
+// a real Electron launch.
+import {
+  ATTEMPT_TIMEOUT_MS,
+  GATE_ATTEMPTS,
+  GATE_TIMEOUT_MS,
+  shouldRelaunch,
+} from './gate/relaunch.ts';
 import type { GateReport, GpuProfile } from './gate/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,9 +109,6 @@ const GATE = join(here, 'gate');
  * below, and the run reports as skipped rather than as a pass.
  */
 const FRAME_BUDGET_MS = 1000 / 60;
-const GATE_TIMEOUT_MS = 300_000;
-/** Per launch, so a hung run leaves room for the attempts after it. */
-const ATTEMPT_TIMEOUT_MS = 120_000;
 
 /**
  * How few frames a phase may measure and still be a measurement rather than an anecdote.

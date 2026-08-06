@@ -20,6 +20,14 @@
  * reading of that kind, and the pin below is what makes them come here to say so
  * rather than nudge a number in a gate file.
  *
+ * **And what the count implies is fenced here too**, because the first version of this
+ * file did not do that and a raise slipped through: how long the gate may take is
+ * `GATE_ATTEMPTS` times what a launch costs, so it is a consequence of the count and
+ * belongs to the same policy. Checking the count's value while checking nothing it must
+ * stay consistent with is what let the timeout be left behind when the count moved. The
+ * second test below is that consistency, against the bound which actually encloses this
+ * gate's run.
+ *
  * **Two gates, two predicates, one rule.** Phase 8's golden-frame gate
  * (`test/export-golden/relaunch.ts`) runs on the same virtualised runners and loses
  * its contexts the same way — Chromium's GPU process exits on a context loss and
@@ -29,11 +37,50 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 import { CONTROL_PERIOD_MS, CONTROL_TARGET_MS } from './gate/budget-control.ts';
-import { GATE_ATTEMPTS, shouldRelaunch } from './gate/relaunch.ts';
+import {
+  ATTEMPT_TIMEOUT_MS,
+  GATE_ATTEMPTS,
+  GATE_TIMEOUT_MS,
+  LAUNCH_OVERHEAD_MS,
+  shouldRelaunch,
+} from './gate/relaunch.ts';
 import type { GateReport } from './gate/report.ts';
 import { shouldRelaunchGolden } from './export-golden/relaunch.ts';
 import type { GoldenReport } from './export-golden/report.ts';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * The `verify` job's own limit, in milliseconds — **read** from the workflow, never
+ * copied.
+ *
+ * A number transcribed into a second file is a fact with two homes and one of them
+ * silently wrong the first time the other moves; this branch has already had to remove
+ * two of those. Reading it means a change to the workflow's budget reaches this
+ * assertion by itself, and a rename of the job fails loudly below rather than quietly
+ * asserting nothing.
+ */
+async function verifyJobBudgetMs(): Promise<number> {
+  const text = await readFile(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8');
+  const ci = parseYaml(text) as {
+    jobs?: Record<string, { 'timeout-minutes'?: number } | undefined>;
+  };
+  const minutes = ci.jobs?.['verify']?.['timeout-minutes'];
+  if (typeof minutes !== 'number') {
+    throw new Error(
+      'could not read `jobs.verify.timeout-minutes` out of .github/workflows/ci.yml. That ' +
+        "is the bound the phase-6 gate's own timeout has to fit inside, and it is read " +
+        'rather than copied so the two cannot drift. If the job was renamed or the key ' +
+        'moved, point this at the new one — do not write the number here.',
+    );
+  }
+  return minutes * 60_000;
+}
 
 const EMPTY_METRICS = {
   count: 0,
@@ -138,6 +185,71 @@ describe('the gate relaunches only for a lost context', () => {
         'three. Record that evidence in test/gate/relaunch.ts and in this file, then ' +
         'change this number.',
     ).toBe(3);
+  });
+
+  /**
+   * The count decides a timeout, and that timeout has to fit inside what contains it.
+   *
+   * `GATE_TIMEOUT_MS` bounds the **whole** gate, every launch together, so it is
+   * arithmetic on {@link GATE_ATTEMPTS} rather than a number anybody chooses. It was
+   * written down once instead, and then the count moved without it: `GATE_ATTEMPTS` went
+   * from two to three and the timeout stayed at the 300 s that fitted two, against the
+   * 360 s three launches may legitimately take.
+   *
+   * **Under the exact scenario that raise was made for.** A context lost late in a launch
+   * — the loss is noticed only when the harness reaches it — costs most of that launch's
+   * own bound before the relaunch begins. Two of those plus a third full launch runs past
+   * the test timeout, so vitest reports `test timed out` in place of the
+   * `report.contextLost` assertion and the gate log, which is precisely the diagnostic the
+   * third launch was added to obtain. And `runGate`'s `finally` never runs, leaving an
+   * Electron child and a `mkdtemp` directory behind on the runner — leaked processes on a
+   * shared machine being a cost this project has already paid once, for nine hours.
+   *
+   * Deriving the number fixes that arithmetic. This test fixes the next one out: a derived
+   * timeout **grows** with the count, so raising it to four grows the timeout past
+   * whatever encloses the run, and vitest kills the test before the same assertion — the
+   * identical silent failure, one level up. The fence beside this one checks the count's
+   * *value* and nothing about what that value must stay consistent with, which is how the
+   * first version of this got through.
+   *
+   * ## What this establishes, and what it does not
+   *
+   * **Necessary, not sufficient.** The `verify` job's budget covers the whole suite —
+   * typecheck, lint, format, every other test and the build — so a gate timeout fitting
+   * inside it does **not** say the run fits. It says only that this gate alone cannot
+   * exceed it, which is the part that answers to the count.
+   *
+   * **`vitest.config.ts`'s `testTimeout` is not a guard here.** It is 60 s, less than a
+   * single launch, and it does not enclose this test at all: the third argument to `it()`
+   * overrides it. It would have caught none of the above; do not read it as though it
+   * might.
+   */
+  it('keeps the gate’s derived timeout inside the CI job that has to contain it', async () => {
+    const budgetMs = await verifyJobBudgetMs();
+    const minutes = (ms: number): string => (ms / 60_000).toFixed(1);
+
+    // The derivation itself, so a hand-written GATE_TIMEOUT_MS that happens to fit
+    // cannot pass this: what is being fenced is that the number tracks the count.
+    expect(
+      GATE_TIMEOUT_MS,
+      'GATE_TIMEOUT_MS is no longer derived from the launch count. It bounds every ' +
+        'launch together, so it has to be GATE_ATTEMPTS x (ATTEMPT_TIMEOUT_MS + ' +
+        'LAUNCH_OVERHEAD_MS); written down as a literal it goes stale the next time the ' +
+        'count moves, which is exactly what happened when it went from two to three.',
+    ).toBe(GATE_ATTEMPTS * (ATTEMPT_TIMEOUT_MS + LAUNCH_OVERHEAD_MS));
+
+    expect(
+      GATE_TIMEOUT_MS,
+      `GATE_ATTEMPTS is ${GATE_ATTEMPTS}, so the phase-6 gate may now ask for ` +
+        `${minutes(GATE_TIMEOUT_MS)} minutes on its own, and the CI verify job that has to ` +
+        `contain it allows ${minutes(budgetMs)} minutes for the ENTIRE suite. Raising the ` +
+        'launch count past what that job can hold does not fail loudly — vitest kills the ' +
+        'test before it can assert report.contextLost, so the run reports `test timed ' +
+        'out` instead of the reading the extra launch was added to obtain, and runGate ' +
+        'leaks an Electron child and its temp directory on the way. Lower GATE_ATTEMPTS, ' +
+        'or raise jobs.verify.timeout-minutes in .github/workflows/ci.yml first and with ' +
+        'the same evidence the count itself answers to.',
+    ).toBeLessThan(budgetMs);
   });
 
   it('relaunches when the context was lost', () => {

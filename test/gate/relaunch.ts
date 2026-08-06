@@ -68,3 +68,44 @@ export function shouldRelaunch(report: GateReport): boolean {
  * `report.contextLost` assertion.
  */
 export const GATE_ATTEMPTS = 3;
+
+/**
+ * How long **one launch** may take, so a hung run leaves room for the attempts after it.
+ *
+ * Passed to the harness as `--timeout` and armed inside `app.whenReady()`, so it bounds
+ * the page load, the 4K fixture encode and every phase — everything the harness's own
+ * clock can see. What it does not bound is either end of a launch: {@link
+ * LAUNCH_OVERHEAD_MS} is that, and {@link GATE_TIMEOUT_MS} is what makes this docblock's
+ * first sentence true rather than merely intended.
+ */
+export const ATTEMPT_TIMEOUT_MS = 120_000;
+
+/**
+ * What one launch costs **outside** {@link ATTEMPT_TIMEOUT_MS}: the `mkdtemp`, the three
+ * esbuild bundles, the Electron spawn up to `app.whenReady()` — the harness's own timer
+ * is armed inside that callback, so none of it is on its clock — and, after the child
+ * exits, reading the report and removing the temp tree.
+ *
+ * **Sized above the observed figures rather than fitted to them.** Measured on this
+ * machine: the three-bundle esbuild build is 261 ms cold and 10–14 ms warm, and a quiet
+ * local run of the whole gate is about 14 s end to end, of which under 2 s is outside the
+ * harness's clock. 30 s is therefore more than the entire quiet run, let alone the slice
+ * this term covers. Deliberately: a 3-vCPU runner is slower at every one of those four,
+ * and this gate is where the `verify` job first `exec`s a freshly written `Electron.app`,
+ * which macOS signature-scans on that first launch — `.github/workflows/ci.yml` says why
+ * the binary is fetched in a step of its own for the same reason. A term fitted to the
+ * 2 s measured here would be a bound on CI rather than the slack it is meant to be.
+ */
+export const LAUNCH_OVERHEAD_MS = 30_000;
+
+/**
+ * Vitest's limit on the **whole** gate — every launch, not one — and therefore a
+ * consequence of {@link GATE_ATTEMPTS} rather than a number of its own.
+ *
+ * It is derived because it was once written down, and then the count moved without it:
+ * `GATE_ATTEMPTS` went from two to three and this stayed at the 300 s that fitted two,
+ * against the 360 s three launches may legitimately take. `test/relaunch-policy.test.ts`
+ * holds the rest of that story, the failure it produces, and the assertion that keeps
+ * this number inside the bound which encloses it.
+ */
+export const GATE_TIMEOUT_MS = GATE_ATTEMPTS * (ATTEMPT_TIMEOUT_MS + LAUNCH_OVERHEAD_MS);
