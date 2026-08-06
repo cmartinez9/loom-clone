@@ -154,12 +154,22 @@ export class ScreenSource implements PreviewSource {
   }
 
   release(beforeT: Seconds): void {
-    const part = this.#select(beforeT);
+    // Looked up, never activated — see {@link ScreenSource.#activate}. `PreviewLoop`
+    // makes all three calls on one frame in this order: `frameAt(sourceTime)`,
+    // `prime(sourceTime, …)`, `release(sourceTime - retainBehindSec)`. Just past a
+    // part boundary the first two are about the *new* part while the third names an
+    // instant inside the old one, so activating here would hand the ring `prime` had
+    // just filled a `release(+Infinity)` — every frame, for the whole of
+    // `retainBehindSec`, which is the re-seek-per-frame churn `SourceReader.prime`'s
+    // docstring exists to avoid.
+    const part = this.#partAt(beforeT);
     part.reader.release(partTimeSec(beforeT, part));
   }
 
   hasSourceFrameAt(t: Seconds): boolean {
-    const part = this.#select(t);
+    // Also lookup-only: this asks the *index* a question and never touches a ring,
+    // so it has no opinion about what is being read. §10.2's watchdog calls it.
+    const part = this.#partAt(t);
     return part.reader.hasSourceFrameAt(partTimeSec(t, part));
   }
 
@@ -192,14 +202,22 @@ export class ScreenSource implements PreviewSource {
    * of them, for the reason `clipIndexAt` clamps — a playhead parked on the final
    * frame still has to have a frame. See the header for what a `t` inside a hole
    * between two parts resolves to, and why nothing special is done about it.
+   *
+   * Lookup only. Which part is *being read* is a separate decision and only
+   * {@link ScreenSource.#select} takes it.
    */
-  #select(t: Seconds): Part {
+  #partAt(t: Seconds): Part {
     for (const part of this.#parts) {
-      if (t <= part.startTimeSec + part.durationSec) return this.#activate(part);
+      if (t <= part.startTimeSec + part.durationSec) return part;
     }
     // `#parts` is never empty — the constructor refuses that — so the fallback is
     // unreachable and is here because the index signature cannot know it.
-    return this.#activate(this.#parts[this.#parts.length - 1] ?? this.#active);
+    return this.#parts[this.#parts.length - 1] ?? this.#active;
+  }
+
+  /** {@link ScreenSource.#partAt}, and make it the part being read. */
+  #select(t: Seconds): Part {
+    return this.#activate(this.#partAt(t));
   }
 
   /**
@@ -210,6 +228,10 @@ export class ScreenSource implements PreviewSource {
    * leave a full ring per part alive for the rest of the session. `release` is
    * given `+Infinity` — the reader answers it with the timestamp of its own last
    * frame, so what is kept is one frame and never a time-shaped guess.
+   *
+   * **Only `frameAt` and `prime` reach this**, because they are the two calls that
+   * decide what is being read; `release` and `hasSourceFrameAt` look their part up
+   * without it, and say at their own call sites what goes wrong otherwise.
    */
   #activate(part: Part): Part {
     if (part === this.#active) return part;

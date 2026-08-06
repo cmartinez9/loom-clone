@@ -60,8 +60,15 @@ export const MAX_ZOOM_SPAN_SEC = 0.5;
  */
 export const EDGE_PX = 8;
 
-/** Pixels the ruler actually maps time onto — the width less both insets. */
-function trackPx(view: TimelineView): number {
+/**
+ * Pixels the ruler actually maps time onto — the width less both insets.
+ *
+ * Exported because a wheel scroll converts pixels to seconds too, and every such
+ * conversion in this window has to divide by the same number: dividing by the raw
+ * `widthPx` instead makes the content under the pointer run about 1.6% ahead of it
+ * at a thousand-pixel lane area.
+ */
+export function trackPx(view: TimelineView): number {
   return Math.max(1, view.widthPx - 2 * EDGE_PX);
 }
 
