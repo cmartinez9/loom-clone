@@ -948,9 +948,24 @@ was not a control.
   hosts. Both runs of d26016c overlapped for the whole of both gates and each reported
   one frame over budget — 21.3 ms and 123.6 ms against p99s of 3.5 ms and 6.2 ms. A
   branch is now covered by its `pull_request` run alone (`synchronize` fires on every
-  push, and it measures the merge result); `push` is kept for `main`. Before adding a
-  second macOS job that runs concurrently with `verify`, note that these three gates
-  cannot tell a busy host apart from the defect they exist to catch.
+  push, and it measures the merge result); `push` is kept for `main`. **That fixed one
+  of the two ways this workflow did it, and `mutation` was the other**: it is
+  `macos-14` too, it fires on every pull request too, and with nothing between them the
+  two jobs started in the same second — so the repo's heaviest job (the crash test
+  again and again, `avconvert` transcodes, the phase-4 and phase-11 Electron gates,
+  once per mutation) ran beside the gate that times the box, on a shared pool of Macs
+  whose GPU the gate's own renderer string names ("Apple Paravirtual device"). Measured
+  2026-08-06 on run 31074470239: phase 6 was measuring 05:33:56–05:34:21 while
+  `mutation` was inside two `avconvert` transcodes, and its **GPU** composite came back
+  at 18.08 ms median scrubbing and 22.97 ms playing against 2.37–2.48 ms on the three
+  previous runs of the same gate on the same runner class — while the CPU frame body
+  stayed inside §8's budget (worst 3.50 ms, 0 of 160 frames over). What failed was not
+  a time but the picture: one playback readback held an all-dark frame-code band
+  between two correct ones, with no miss and no seek in that phase. `mutation` now
+  `needs: verify`. Adding any further macOS job means answering the same question
+  again: these three gates cannot tell a busy host apart from the defect they exist to
+  catch, and a mutation proof over a red tree is vacuous anyway — `mutation-check.mjs`
+  reads a non-zero exit as "caught".
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
