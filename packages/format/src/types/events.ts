@@ -68,10 +68,65 @@ export interface ClickEvent {
 }
 
 /**
- * A live-drawing-overlay stroke event. Phase 12 owns the stroke payload; the format
- * fixes only the timestamp so the log stays sortable and replayable.
+ * `events/drawing.ndjson` — the live drawing overlay's log. Phase 12.
+ *
+ * The same §2.5 stream the cursor and click logs are: NDJSON, one event per line,
+ * append-only, `t` in seconds sharing its origin with `VideoFrame.timestamp`,
+ * positions normalized 0–1 against the logical display. Every line carries `e`,
+ * because unlike `cursor.ndjson` there is no majority event shape for a bare line
+ * to mean.
+ *
+ * **One line per stroke, written when the stroke ends** — not one line per point.
+ * A point log would be truer to §2.5's 100 ms cadence, and it is the wrong unit
+ * here: the consumer of this file is the importer, which wants strokes, and the
+ * atom the user drew is the stroke. What that costs is bounded and stated: a
+ * `SIGKILL` loses the stroke that is still under the pen, which is at most a second
+ * or two of ink on a recording that has just lost its own tail.
+ *
+ * The reason strokes are logged at all rather than burned into the capture is
+ * §8's phase 12 gate: the overlay is `setContentProtection(true)`, so it is
+ * **absent** from the recorded pixels, and the editor re-composites it from here at
+ * full resolution over whatever zoom and trim the user ends up with.
  */
-export interface DrawingEvent {
+export interface DrawingStrokeEvent {
+  e: 'stroke';
+  /** When the pen went down. */
   t: Seconds;
-  [key: string]: unknown;
+  /** When it came up. `t1 >= t`. */
+  t1: Seconds;
+  /** Unique within one recording; `erase` refers to it. */
+  id: string;
+  tool: DrawingTool;
+  /** `#rrggbb` or `#rrggbbaa`, in the display's own encoding — no linearisation. */
+  color: string;
+  /**
+   * Stroke width as an isotropic fraction of the display **width**, matching
+   * phase 11's `strokeWidth` (`packages/edl/src/annotations.ts`). Normalized
+   * coordinates are anisotropic, so a per-axis width would be thicker vertically.
+   */
+  w: number;
+  /** Flat `[x0, y0, x1, y1, …]`, normalized 0–1 against the logical display. */
+  p: number[];
+}
+
+/** Strokes the user rubbed out, by id. What was on screen until now stays until now. */
+export interface DrawingEraseEvent {
+  e: 'erase';
+  t: Seconds;
+  ids: string[];
+}
+
+/** Everything currently on the overlay, gone. */
+export interface DrawingClearEvent {
+  e: 'clear';
+  t: Seconds;
+}
+
+/** The two pens the overlay offers. A highlighter is a wide translucent pen. */
+export type DrawingTool = 'pen' | 'highlighter';
+
+export type DrawingEvent = DrawingStrokeEvent | DrawingEraseEvent | DrawingClearEvent;
+
+export function isDrawingStroke(event: DrawingEvent): event is DrawingStrokeEvent {
+  return event.e === 'stroke';
 }

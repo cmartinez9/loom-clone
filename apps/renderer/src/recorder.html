@@ -42,6 +42,12 @@
 
       <div class="hud-actions">
         <button class="btn btn-rec" id="record" type="button">Record screen</button>
+        <!--
+          Phase 12's live drawing overlay. A toggle rather than a mode: the overlay
+          is a window that is open or shut, and the pen inside it is a separate
+          state — the HUD only ever says "put it on screen" or "take it away".
+        -->
+        <button class="btn btn-sm" id="draw" type="button" aria-pressed="false">Draw</button>
         <button class="btn btn-sm btn-ghost" id="stop" type="button" hidden>Stop</button>
       </div>
     </main>

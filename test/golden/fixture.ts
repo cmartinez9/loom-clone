@@ -100,7 +100,53 @@ export const BOXES: Record<string, Box> = {
   arrow: { cx: 0.28, cy: 0.83, w: 0.42, h: 0.16 },
   fading: { cx: 0.58, cy: 0.83, w: 0.12, h: 0.1 },
   parked: { cx: 0.78, cy: 0.84, w: 0.16, h: 0.12 },
+  // Phase 12's `stroke`: a hand-drawn polyline, placed by `center`/`size` like
+  // every other box, with the shape itself in `style.points`.
+  stroke: { cx: 0.3, cy: 0.31, w: 0.36, h: 0.1 },
+  // The reveal. Its own box because it deliberately draws *nothing* at t=0 —
+  // `progress` is 0 there — so it is excluded from "every kind drew" and carries
+  // its own check instead. See {@link REVEALING_POINTS}.
+  revealing: { cx: 0.74, cy: 0.31, w: 0.32, h: 0.1 },
 };
+
+/**
+ * The zig-zag both stroke spans draw, in the span's own `-1..1` box.
+ *
+ * Kept inside `±0.9` so the half stroke width and the one-pixel coverage ramp still
+ * land inside the box the gate expects — a stroke is the one kind whose geometry is
+ * not the box itself, so this is where that has to be arranged.
+ *
+ * Five points and four segments, with real direction changes: a straight line would
+ * pass a reveal check that truncated by point *index* rather than by arc length, and
+ * would say nothing about the round joins between capsules.
+ */
+export const REVEALING_POINTS: number[] = [-0.9, 0.6, -0.45, -0.6, 0, 0.6, 0.45, -0.6, 0.9, 0.6];
+
+/**
+ * Points in {@link REVEALING_POINTS}, and the bound the reveal check turns on.
+ *
+ * A reveal that truncated the polyline by **point index** rather than by arc length
+ * can produce at most this many distinct pictures — one per point it has reached —
+ * however finely `progress` is sampled. A reveal by arc length shortens the last
+ * segment as well, so it produces a new picture at every sampled progress. That
+ * difference is the check, and it is the only one that can tell the two apart: both
+ * grow, both start empty, and both end whole.
+ */
+export const REVEAL_POINT_COUNT = 5;
+
+/** Where `progress` reaches 1. Deliberately past the last unzoomed timestamp. */
+export const REVEAL_END_SEC = 8;
+
+/**
+ * The revealing stroke's `progress` at `t`, from the fixture's own arithmetic.
+ *
+ * Two lines, written out, for the reason {@link expectedBoxPx} is four: an
+ * expectation that called `resolve` would move with the thing it is judging.
+ */
+export function expectedRevealProgress(t: number): number {
+  if (t <= 0) return 0;
+  return Math.min(1, t / REVEAL_END_SEC);
+}
 
 /** The mask's fill, in bytes. The gate reads this exact triple back out of a pixel. */
 export const MASK_FILL: [number, number, number] = [0x11, 0x22, 0xdd];
@@ -171,6 +217,36 @@ function annotationTracks(): Track[] {
           end: DURATION_SEC,
           style: { text: 'REDACTED', fill: '#FFFFFF', fontSizeY: 0.06, align: 'center' },
           channels: box('text'),
+        }),
+        // Phase 12. A stroke with no `progress` channel is drawn whole, which is
+        // what the per-kind probe needs at every timestamp.
+        annotationSpan({
+          id: 'a-stroke',
+          kind: 'stroke',
+          start: 0,
+          end: DURATION_SEC,
+          style: { stroke: '#00B4D8', strokeWidth: 0.008, points: REVEALING_POINTS },
+          channels: box('stroke'),
+        }),
+        // The same ink, revealed as it was drawn. `progress` is an ordinary curve
+        // channel, so what this exercises is the compositor truncating the polyline
+        // by **arc length** — a thing no "did it draw" check can see, which is the
+        // same gap `t-fading` exists to close for `blendMs`.
+        annotationSpan({
+          id: 'a-revealing',
+          kind: 'stroke',
+          start: 0,
+          end: DURATION_SEC,
+          style: { stroke: '#F72585', strokeWidth: 0.008, points: REVEALING_POINTS },
+          channels: {
+            ...box('revealing'),
+            progress: {
+              keys: [
+                { t: 0, v: 0, ease: { kind: 'linear' } },
+                { t: REVEAL_END_SEC, v: 1, ease: { kind: 'hold' } },
+              ],
+            },
+          },
         }),
         annotationSpan({
           id: 'a-arrow',

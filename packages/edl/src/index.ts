@@ -162,9 +162,24 @@ export {
   parseColor,
   readAnnotationGeometry,
   readAnnotationStyle,
+  readStrokePoints,
+  MAX_STROKE_POINTS,
+  MIN_STROKE_HALF_EXTENT,
   type AnnotationGeometry,
   type AnnotationKind,
   type AnnotationStyle,
   type Rgba,
   type TextAlign,
 } from './annotations.ts';
+
+// ---- the live drawing overlay's import path (phase 12) -----------------------
+export {
+  drawingTrack,
+  importDrawingLog,
+  parseDrawingLog,
+  strokeEndSec,
+  DRAWING_BLEND_MS,
+  DRAWING_SPAN_PREFIX,
+  DRAWING_TRACK_ID,
+  type DrawingImportOptions,
+} from './drawing.ts';

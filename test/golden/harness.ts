@@ -58,6 +58,7 @@ import {
   MASK_FILL,
   OUTPUT_SIZE,
   expectedFadingWeight,
+  expectedRevealProgress,
   PARKED_RANGE,
   paintSource,
   SOURCE_SIZE,
@@ -277,6 +278,10 @@ async function run(): Promise<GoldenReport> {
     for (const [name, box] of Object.entries(BOXES)) {
       if (name === 'parked' && !parkedActive) continue;
       if (name === 'fading' && expectedFadingWeight(t) <= 0) continue;
+      // The revealing stroke is authored to draw nothing at t=0 — `progress` is 0
+      // there — so its box is not an expectation at that instant. It is still a
+      // probe: `outsideExpected` would count the ink as stray otherwise.
+      if (name === 'revealing' && expectedRevealProgress(t) <= 0) continue;
       const rect = expectedBoxPx(box, zoom, BOX_PAD_PX);
       expected.push(rect);
       probeRects.set(name, rect);
@@ -353,6 +358,7 @@ async function run(): Promise<GoldenReport> {
       parkedActive,
       fadingMeanDiff,
       fadingWeight: expectedFadingWeight(t),
+      revealProgress: expectedRevealProgress(t),
     });
   }
 

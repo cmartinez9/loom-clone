@@ -56,6 +56,7 @@
 import type {
   AudioCaptureSummary,
   AudioTrackKey,
+  DrawingTool,
   EditDocument,
   EditOp,
   PartEndReason,
@@ -71,6 +72,7 @@ import type { PermissionKind, PermissionReport } from '@loom/permissions';
 export type {
   AudioCaptureSummary,
   AudioTrackKey,
+  DrawingTool,
   EditDocument,
   EditOp,
   PartEndReason,
@@ -640,6 +642,92 @@ export interface RecorderApi {
   noticeHeight(px: number): void;
 }
 
+// ------------------------------------------------- the live drawing overlay
+
+/**
+ * One stroke, as the overlay reports it. Phase 12.
+ *
+ * **Times are ages, not timestamps.** `startedMsAgo` and `endedMsAgo` are measured
+ * against the renderer's own `performance.now()` at the instant the message is sent,
+ * and main subtracts them from its own clock. That is deliberate: the overlay and
+ * main do not share a time origin — the renderer's `performance.now()` starts when
+ * its document did — and a renderer that sent an absolute number would be sending
+ * one only it can interpret. A *difference* survives the crossing; an origin does
+ * not. `apps/main/src/overlay.ts` is where they land on the recording clock.
+ *
+ * Coordinates are normalized 0–1 against the overlay's own viewport, which is the
+ * display it covers — §2.5's convention for `cursor.ndjson`, and the same space
+ * `zoom.center` is in.
+ */
+export interface StrokeMsg {
+  /** Unique within one recording; the overlay mints it. */
+  id: string;
+  startedMsAgo: number;
+  endedMsAgo: number;
+  tool: DrawingTool;
+  /** `#rrggbb`. Main does not interpret it beyond writing it down. */
+  color: string;
+  /** Isotropic fraction of the display **width**, matching phase 11's `strokeWidth`. */
+  width: number;
+  /** Flat `[x0, y0, x1, y1, …]`, already simplified by the pen. */
+  points: number[];
+}
+
+/** Strokes the user rubbed out, and when. Same clock convention as {@link StrokeMsg}. */
+export interface EraseMsg {
+  ids: string[];
+  atMsAgo: number;
+}
+
+/** Everything on the overlay, gone. */
+export interface ClearMsg {
+  atMsAgo: number;
+}
+
+/** What the overlay is doing, pushed to the HUD so its Draw button can say so. */
+export interface OverlayStatus {
+  /** The window exists and is on screen. */
+  open: boolean;
+  /**
+   * The pen is down-able: the overlay is taking mouse events instead of letting
+   * them fall through to whatever is underneath.
+   *
+   * Separate from `open` because that separation *is* the feature. An overlay that
+   * swallowed clicks whenever it was visible would make the app underneath
+   * unusable for the length of the recording, and the recording is of that app.
+   */
+  armed: boolean;
+  /** Strokes accepted for this recording. `0` when no recording is running. */
+  strokeCount: number;
+  /**
+   * The overlay stopped working, in words, or `null`.
+   *
+   * A field rather than a thrown error because of the constraint that governs this
+   * whole surface: **the overlay must never break the recording**. It is an
+   * accessory. Every failure in it ends here, as something the HUD can say.
+   */
+  error: string | null;
+}
+
+export interface OverlayApi {
+  /** Open or close the overlay. Idempotent; safe with no recording running. */
+  setOpen(open: boolean): void;
+  /**
+   * Take mouse events, or let them through.
+   *
+   * Called by the overlay page itself as the pointer enters and leaves its palette,
+   * and by the HUD when the user picks up or puts down the pen. Main is what calls
+   * `setIgnoreMouseEvents`, because the window is main's — the same division
+   * `recorder.noticeHeight` draws.
+   */
+  setArmed(armed: boolean): void;
+  /** A finished stroke. Fire-and-forget: ink is never worth failing a recording for. */
+  stroke(message: StrokeMsg): void;
+  erase(message: EraseMsg): void;
+  clear(message: ClearMsg): void;
+  onStatus(callback: (status: OverlayStatus) => void): Unsubscribe;
+}
+
 // ------------------------------------------------------------- permissions
 
 /**
@@ -840,6 +928,7 @@ export interface LoomApi {
   recorder: RecorderApi;
   setup: SetupApi;
   capture: CaptureApi;
+  overlay: OverlayApi;
 }
 
 // ---------------------------------------------------------------- channels
@@ -894,6 +983,19 @@ export const CHANNEL = {
   /** event: main -> renderer */
   recorderStatus: 'loom.recorder.status',
 
+  /** send-only */
+  overlaySetOpen: 'loom.overlay.setOpen',
+  /** send-only */
+  overlaySetArmed: 'loom.overlay.setArmed',
+  /** send-only, the overlay -> main. One finished stroke. */
+  overlayStroke: 'loom.overlay.stroke',
+  /** send-only, the overlay -> main */
+  overlayErase: 'loom.overlay.erase',
+  /** send-only, the overlay -> main */
+  overlayClear: 'loom.overlay.clear',
+  /** event: main -> renderer */
+  overlayStatus: 'loom.overlay.status',
+
   /** event: main -> the capture window */
   captureCommand: 'loom.capture.command',
   /** send-only, capture window -> main */
@@ -945,6 +1047,11 @@ export const SEND_CHANNELS: readonly ChannelName[] = [
   CHANNEL.captureCameraUnavailable,
   CHANNEL.captureEnded,
   CHANNEL.captureFailed,
+  CHANNEL.overlaySetOpen,
+  CHANNEL.overlaySetArmed,
+  CHANNEL.overlayStroke,
+  CHANNEL.overlayErase,
+  CHANNEL.overlayClear,
 ];
 
 /** Main -> renderer pushes. A renderer subscribes; it never sends on these. */
@@ -952,6 +1059,7 @@ export const EVENT_CHANNELS: readonly ChannelName[] = [
   CHANNEL.permissionsChanged,
   CHANNEL.recorderStatus,
   CHANNEL.captureCommand,
+  CHANNEL.overlayStatus,
 ];
 
 /** The key the preload binds the API to on `window`. */

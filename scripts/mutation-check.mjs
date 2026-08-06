@@ -1,7 +1,8 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
  * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
- * model, phase 10's generators and phase 11's golden-frame gate over annotations.
+ * model, phase 10's generators, phase 11's golden-frame gate over annotations and
+ * phase 12's live drawing overlay.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -59,6 +60,11 @@ const EDL_BUDGET = 'packages/edl/test/budget.test.ts';
 const PHASE11 = 'test/phase11-golden.test.ts';
 const EDL_ANNOTATIONS = 'packages/edl/test/annotations.test.ts';
 const COMPOSITOR_GEOMETRY = 'packages/compositor/test/annotation-geometry.test.ts';
+/** Phase 12's gate: the live overlay, in a real Electron renderer and a real capture. */
+const PHASE12 = 'test/phase12-overlay.test.ts';
+const EDL_DRAWING = 'packages/edl/test/drawing.test.ts';
+const OVERLAY = 'apps/main/test/overlay.test.ts';
+const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -588,6 +594,144 @@ const MUTATIONS = [
     find: '    if (!Number.isFinite(cx) || !Number.isFinite(cy)) {',
     replace: '    if (false) {',
     mustFail: [PHASE11, EDL_ANNOTATIONS],
+  },
+
+  // ---- phase 12: the live drawing overlay ----------------------------------
+
+  {
+    name: 'the-drawing-overlay-is-not-content-protected',
+    breaks:
+      "the whole of §8's phase-12 gate. With the flag off the overlay is in every " +
+      'captured frame — so the ink is burned into the recording as well as ' +
+      're-composited from `drawing.ndjson` over it, which is the one outcome this ' +
+      'phase exists to prevent. The gate has to notice it in *pixels*: an assertion ' +
+      'that the flag was set would still be green here if macOS stopped honouring it.',
+    file: 'apps/main/src/windows.ts',
+    find: '    if (spec.contentProtected) window.setContentProtection(true);',
+    replace:
+      "    if (spec.contentProtected && spec.page !== 'overlay.html') {\n" +
+      '      window.setContentProtection(true);\n    }',
+    mustFail: [PHASE12],
+  },
+  {
+    name: 'the-overlay-swallows-every-click',
+    breaks:
+      'the constraint that a full-screen always-on-top window must not take clicks ' +
+      'meant for the app underneath. With the ignoring branch gone the overlay eats ' +
+      "the user's input for the whole recording — on the display they are recording.",
+    file: 'apps/main/src/overlay.ts',
+    find: '    else window.setIgnoreMouseEvents(true, { forward: true });',
+    replace: '    else window.setIgnoreMouseEvents(false);',
+    mustFail: [OVERLAY],
+  },
+  {
+    name: 'the-overlay-steals-focus',
+    breaks:
+      '*"must not steal focus from what the user is recording"*. `show()` activates ' +
+      'the app on macOS; `showInactive()` does not, and the difference is the window ' +
+      'the presenter was demonstrating losing key in the middle of their recording.',
+    file: 'apps/main/src/overlay.ts',
+    find: '      window.showInactive();',
+    replace: '      window.show();\n      window.focus();',
+    mustFail: [OVERLAY],
+  },
+  {
+    name: 'a-failed-stroke-write-takes-the-recording-down',
+    breaks:
+      '*"a drawing overlay must never break the recording"*. Rethrowing instead of ' +
+      'recording the failure sends a full disk, or any other write error, straight ' +
+      'into `RecorderSession.finalize` — losing the footage to save the ink, which ' +
+      "is the exact inversion of this phase's priority.",
+    file: 'apps/main/src/overlay.ts',
+    find: "    console.error('[overlay]', this.#error);",
+    replace: "    console.error('[overlay]', this.#error);\n    throw error;",
+    mustFail: [OVERLAY],
+  },
+  {
+    name: 'a-strokes-time-is-taken-when-it-arrives',
+    breaks:
+      'the one arithmetic claim on this path: a stroke happened *before* the message ' +
+      'about it, and the two processes share no time origin, so main subtracts the ' +
+      'age the renderer reported. Ignoring it puts every stroke at the moment its ' +
+      'IPC landed — a whole gesture late, and every stroke of a recording drifting ' +
+      'by however long the pen was down.',
+    file: 'apps/main/src/overlay.ts',
+    find: '    return Math.max(0, now - msAgo / 1000);',
+    replace: '    return Math.max(0, now);',
+    mustFail: [OVERLAY],
+  },
+  {
+    name: 'a-rubbed-out-stroke-stays-for-the-whole-recording',
+    breaks:
+      'the reading that makes an `erase` mean anything. A stroke ends when it was ' +
+      'rubbed out, not when the recording did — with this, ink the presenter cleared ' +
+      'at 0:40 is composited over the rest of the video.',
+    file: 'packages/edl/src/drawing.ts',
+    find: "    if (event.e === 'erase' && event.ids.includes(stroke.id)) return event.t;",
+    replace: '    if (false) return event.t;',
+    mustFail: [EDL_DRAWING],
+  },
+  {
+    name: 'the-drawing-track-is-not-generated',
+    breaks:
+      "§3.5's whole arrangement. A `manual` drawing track is one a re-import would " +
+      'overwrite the user\'s own edits in — the separation that makes *"user edits ' +
+      'survive by construction"* true is that generated and hand-authored tracks ' +
+      'never share storage.',
+    file: 'packages/edl/src/drawing.ts',
+    find: "    origin: 'generated',",
+    replace: "    origin: 'manual',",
+    mustFail: [EDL_DRAWING],
+  },
+  {
+    name: 'a-stroke-appears-before-it-was-drawn',
+    breaks:
+      'the reveal. Without the `progress` keys a stroke is composited whole at the ' +
+      'instant the pen went down — so the finished arrow is on screen a second ' +
+      'before the presenter draws it. Invisible to any check that only asks whether ' +
+      'the ink is there, which is why the golden gate reads the growth back out of ' +
+      'the pixels.',
+    file: 'packages/edl/src/drawing.ts',
+    find: "  if (!(stroke.t1 > stroke.t)) return [{ t: stroke.t, v: 1, ease: { kind: 'hold' } }];",
+    replace: "  return [{ t: stroke.t, v: 1, ease: { kind: 'hold' } }];",
+    mustFail: [EDL_DRAWING],
+  },
+  {
+    name: 'a-revealing-stroke-is-truncated-by-point-index',
+    breaks:
+      'the reveal being by **arc length**. Truncating by point index instead makes a ' +
+      'slow dense stretch of a stroke reveal at a different speed from a fast sparse ' +
+      'one, which is what a simplified polyline is made of. The golden gate is what ' +
+      'sees it: the growth stops being monotonic in the drawn length.',
+    file: 'packages/compositor/src/annotations.ts',
+    find: '      const fraction = to > from ? Math.min(1, (drawn - from) / (to - from)) : 1;',
+    replace: '      const fraction = 1;',
+    mustFail: [PHASE11],
+  },
+  {
+    name: 'stroke-coverage-double-blends-at-every-joint',
+    breaks:
+      'the reason the coverage goes through a scratch at all. Consecutive capsules ' +
+      'overlap by construction — that is what rounds a joint — so accumulating them ' +
+      'with an ordinary additive blend instead of `MAX` composites the ink over ' +
+      "itself at every joint. At full opacity nothing shows; at a highlighter's 0.35, " +
+      'or anywhere in a crossfade, the line grows a string of dark beads.',
+    file: 'packages/compositor/src/annotations.ts',
+    find: '    gl.blendEquation(gl.MAX);',
+    replace: '    gl.blendEquation(gl.FUNC_ADD);',
+    mustFail: [COMPOSITOR_STROKE],
+  },
+  {
+    name: 'the-scratch-scissor-is-not-flipped',
+    breaks:
+      "the one flip between GL's bottom-left scissor box and `pxRect`'s top-left " +
+      'origin. Get it wrong and the scissor lands on a band of the scratch the ' +
+      'stroke is not in, so the coverage draw is clipped away entirely — the ink ' +
+      'vanishes for every stroke that is not exactly halfway down the frame.',
+    file: 'packages/compositor/src/annotations.ts',
+    find: '    const sy = Math.max(0, Math.floor(height - (pxRect.y + pxRect.height)));',
+    replace: '    const sy = Math.max(0, Math.floor(pxRect.y));',
+    mustFail: [PHASE11],
   },
 ];
 

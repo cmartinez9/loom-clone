@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The same strict CSP as every other window. Nothing here loads media or talks
+      to anything: it is a canvas, a palette of buttons, and the pen.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none';
+               script-src 'self';
+               style-src 'self';
+               font-src 'self';
+               img-src 'self' data:;
+               base-uri 'none';
+               form-action 'none';
+               frame-ancestors 'none';
+               object-src 'none'"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Draw</title>
+    <script type="module" src="./overlay/main.ts"></script>
+  </head>
+  <body>
+    <!--
+      The window is transparent and covers the whole display, so *everything* here
+      has to be either ink or a control the user aimed at. There is no ground, no
+      panel and no scrim: a scrim over the screen you are recording is a scrim over
+      the thing you are demonstrating.
+
+      `setContentProtection(true)` is set on this role in `apps/main/src/windows.ts`
+      and is what keeps all of it out of the captured frames.
+    -->
+    <canvas id="ink"></canvas>
+
+    <!--
+      The palette is the only part of this window that takes clicks when the pen is
+      down. `pointerenter`/`pointerleave` on it are what arm and disarm the window
+      while the pen is *up* — main forwards mouse moves into a click-through window
+      for exactly that (`overlay.setArmed`), which is what lets the overlay be
+      reachable without swallowing the clicks meant for the app underneath.
+    -->
+    <div class="palette" id="palette" role="toolbar" aria-label="Drawing tools">
+      <button class="tool" id="pen" type="button" aria-pressed="true" title="Pen">
+        <span class="swatch swatch-pen"></span>
+        <span class="t-label">Pen</span>
+      </button>
+      <button class="tool" id="highlighter" type="button" aria-pressed="false" title="Highlighter">
+        <span class="swatch swatch-highlighter"></span>
+        <span class="t-label">Marker</span>
+      </button>
+      <span class="palette-rule" aria-hidden="true"></span>
+      <button class="tool" id="undo" type="button" title="Undo the last stroke">
+        <span class="t-label">Undo</span>
+      </button>
+      <button class="tool" id="clear" type="button" title="Clear everything">
+        <span class="t-label">Clear</span>
+      </button>
+      <span class="palette-rule" aria-hidden="true"></span>
+      <!--
+        Dismissal. The overlay is non-activating, so it never receives a keystroke
+        and cannot be closed with Escape; this button and the HUD's Draw toggle are
+        the two ways out, and the recording ending is the third.
+      -->
+      <button class="tool tool-close" id="close" type="button" title="Put the pen away">
+        <span class="t-label">Done</span>
+      </button>
+    </div>
+  </body>
+</html>

@@ -64,7 +64,14 @@
 
 import type { ResolvedAnnotation } from './state.ts';
 
-/** The six annotation families phase 11 ships; `mask` is `blur`'s hard sibling. */
+/**
+ * The annotation families this build renders; `mask` is `blur`'s hard sibling.
+ *
+ * Phase 11 shipped the first seven. `stroke` is phase 12's and is **not** a new
+ * primitive either: it is a `kind: 'object'` span like the rest, placed by
+ * `center`/`size`, and what makes it a hand-drawn line rather than a rectangle is
+ * `style.points` — see {@link readStrokePoints}.
+ */
 export const ANNOTATION_KINDS = [
   'arrow',
   'rect',
@@ -73,6 +80,7 @@ export const ANNOTATION_KINDS = [
   'highlight',
   'blur',
   'mask',
+  'stroke',
 ] as const;
 
 export type AnnotationKind = (typeof ANNOTATION_KINDS)[number];
@@ -101,6 +109,18 @@ export function isAnnotationKind(type: string): type is AnnotationKind {
 export function isPrivacyKind(kind: AnnotationKind): boolean {
   return kind === 'blur' || kind === 'mask';
 }
+
+/**
+ * The most points one stroke span may carry.
+ *
+ * The overlay simplifies a stroke before it writes it (`packages/edl/src/drawing.ts`
+ * does the reading; the pen does the douglas-peucker), so this is a bound on a
+ * malformed or hostile document rather than on ordinary ink: 4096 points is a line
+ * with four thousand direction changes in it. Points past it are dropped and
+ * {@link readStrokePoints} says so, because a stroke that draws most of itself is a
+ * cosmetic failure — the lenient half of the rule this file's header states.
+ */
+export const MAX_STROKE_POINTS = 4096;
 
 /** A refusal to render an annotation, rather than rendering it wrongly. */
 export class AnnotationError extends Error {
@@ -181,6 +201,9 @@ const DEFAULTS: Record<AnnotationKind, Partial<AnnotationStyle>> = {
   // translucent one is not an answer.
   mask: { fill: [0, 0, 0, 1], stroke: TRANSPARENT, strokeWidth: 0 },
   blur: { fill: [0, 0, 0, 1], stroke: TRANSPARENT, strokeWidth: 0, blurPx: 24, feather: 0.01 },
+  // A stroke is a line, so its colour is its `stroke` and it has no interior; the
+  // overlay writes both keys explicitly and this is what an empty style draws as.
+  stroke: { stroke: DEFAULT_STROKE, fill: TRANSPARENT, strokeWidth: 0.004 },
 };
 
 const BASE: AnnotationStyle = {
@@ -339,11 +362,23 @@ export interface AnnotationGeometry {
    * `activeRange` fades an annotation out instead of cutting it.
    */
   opacity: number;
+  /**
+   * How much of a `stroke` has been drawn, `0..1` of its arc length. `1` for every
+   * other kind, and for a stroke carrying no `progress` channel.
+   *
+   * It exists because a hand-drawn line is the one annotation whose *making* is
+   * part of the recording. A span that appeared complete at the instant the pen
+   * went down would show the finished arrow a second before the presenter drew it;
+   * one that appeared only when the pen came up would lag every gesture by its own
+   * length. The importer writes two keys — 0 at the stroke's start, 1 at its end —
+   * and the reveal is then the ordinary evaluation of an ordinary channel.
+   */
+  progress: number;
 }
 
 /** A geometry record to be overwritten. One per span, allocated at wiring time. */
 export function newAnnotationGeometry(): AnnotationGeometry {
-  return { cx: 0.5, cy: 0.5, hx: 0, hy: 0, x0: 0, y0: 0, x1: 0, y1: 0, opacity: 0 };
+  return { cx: 0.5, cy: 0.5, hx: 0, hy: 0, x0: 0, y0: 0, x1: 0, y1: 0, opacity: 0, progress: 1 };
 }
 
 function component(values: ReadonlyMap<string, Float64Array>, name: string, at: number): number {
@@ -371,6 +406,8 @@ export function readAnnotationGeometry(
   const values = annotation.values;
   const opacity = or(component(values, 'opacity', 0), 1);
   out.opacity = Math.max(0, Math.min(1, opacity)) * annotation.weight;
+  const progress = or(component(values, 'progress', 0), 1);
+  out.progress = Math.max(0, Math.min(1, progress));
 
   if (kind === 'arrow') {
     out.x0 = or(component(values, 'from', 0), 0.25);
@@ -419,3 +456,66 @@ export function readAnnotationGeometry(
   out.x1 = out.cx + out.hx;
   out.y1 = out.cy + out.hy;
 }
+
+// ---- `stroke`, and where its points live ------------------------------------
+
+/**
+ * One stroke's polyline, read out of `style.points`, in the span's **own box**.
+ *
+ * ## Why the points are in `style` and not in a channel
+ *
+ * Everything else about an annotation that can vary over time is a channel, and
+ * this deliberately is not. A hand-drawn stroke's *shape* is fixed at the instant
+ * the pen came up — what varies is where the box is (`center`), how big it is
+ * (`size`), how visible it is (`opacity`) and how much of it has been drawn
+ * (`progress`), and those are all channels. Making the points a channel too would
+ * put a four-hundred-component evaluation on the frame path for a value that never
+ * changes; `style` is read **once per compile** and cached on the identity of the
+ * resolved record, so a two-hundred-point stroke costs nothing per frame.
+ *
+ * ## Why they are in the box and not in source coordinates
+ *
+ * `x` and `y` here are `-1..1` across the span's `center` ± `size/2` box — the same
+ * relationship a `rect` has to its box, and the reason a stroke can be dragged and
+ * scaled with the ordinary `center`/`size` keys rather than needing a rewrite of
+ * every point. The importer normalizes into the box and pads a degenerate axis (a
+ * perfectly vertical line has zero width) to {@link MIN_STROKE_HALF_EXTENT}, so the
+ * normalization never divides by zero and the padding is visible in the document
+ * rather than hidden in a renderer.
+ *
+ * Returns `null` — never throws — when there is nothing drawable. A stroke is a
+ * decoration: the lenient half of this file's rule.
+ */
+export function readStrokePoints(style: Record<string, unknown> | null): Float32Array | null {
+  const raw = style?.['points'];
+  if (!Array.isArray(raw)) return null;
+  const pairs = Math.min(raw.length >> 1, MAX_STROKE_POINTS);
+  if (pairs < 1) return null;
+  const out = new Float32Array(pairs * 2);
+  let n = 0;
+  for (let i = 0; i < pairs; i++) {
+    const x: unknown = raw[i * 2];
+    const y: unknown = raw[i * 2 + 1];
+    if (typeof x !== 'number' || typeof y !== 'number') continue;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    // A point that repeats its predecessor exactly is a zero-length segment, which
+    // contributes nothing to the line and a division by its own length to the
+    // reveal. Dropped here so neither the arc-length walk nor the shader has to
+    // carry a guard for a case the pen produces at every pause.
+    if (n >= 2 && out[n - 2] === x && out[n - 1] === y) continue;
+    out[n++] = x;
+    out[n++] = y;
+  }
+  if (n < 2) return null;
+  return n === out.length ? out : out.subarray(0, n);
+}
+
+/**
+ * The smallest half-extent a stroke's box may have on either axis.
+ *
+ * A perfectly straight vertical line has zero width, and a box with zero width
+ * cannot be scaled into or out of. One thousandth of the frame is under a pixel at
+ * 4K, so padding to it changes no picture and removes the division by zero from
+ * both the importer and the shader.
+ */
+export const MIN_STROKE_HALF_EXTENT = 0.0005;

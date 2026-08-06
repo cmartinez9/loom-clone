@@ -82,6 +82,7 @@ import {
   type RecordingId,
   type VideoTrackKey,
 } from '@loom/format';
+import { performance } from 'node:perf_hooks';
 import { AAC_ENCODER_DELAY_SAMPLES } from '@loom/mux';
 import { PERMISSIONS, toRecordingState, type PermissionKind } from '@loom/permissions';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
@@ -177,6 +178,31 @@ const MAX_DEVICE_ID_LENGTH = 200;
  */
 const RECORDER_ROLES: readonly WindowRole[] = ['library', 'recorder-hud'];
 
+/**
+ * The live drawing overlay's half of the recording lifecycle. Phase 12.
+ *
+ * Two calls, and both are allowed to fail without consequence — the constraint on
+ * this whole surface is that the overlay is an **accessory**: if it breaks, the
+ * recording continues. That is the opposite priority to blur and mask, where
+ * failing closed protects the user; here failing closed would cost them their
+ * footage to save their ink.
+ *
+ * `apps/main/src/overlay.ts` is the implementation, and the only one.
+ */
+export interface DrawingSink {
+  /**
+   * A recording has begun; ink from now until {@link finish} belongs to it.
+   *
+   * Never awaited and never allowed to throw into the recorder.
+   */
+  begin(id: RecordingId): void;
+  /**
+   * The recording is closing. Returns what belongs in `recording.json`'s
+   * `events.drawing`, or `null` when nothing was drawn and no log was opened.
+   */
+  finish(): Promise<{ file: string; strokeCount: number } | null>;
+}
+
 export interface RecorderSessionOptions {
   store: ProjectStore;
   windows: WindowRegistry;
@@ -231,6 +257,17 @@ interface ActiveVideo {
   /** First and last chunk timestamps of the **open** part, on the track's clock. */
   firstPtsUs: number | null;
   lastEndUs: number;
+  /**
+   * `monotonicMs()` when the chunk that set {@link lastEndUs} arrived.
+   *
+   * Main's own monotonic clock, kept beside the media clock so that "what time is
+   * it in this recording, right now" has an answer between frames. The live
+   * drawing overlay is the caller: a stroke is timestamped when the pen comes up,
+   * which is almost never the instant a frame arrived, and a screen track is
+   * genuinely variable-rate — an idle desktop emits 1.4 fps (research §5.1), so
+   * rounding to the last frame would put a stroke most of a second early.
+   */
+  lastArrivalMs: number;
   /** Parts already closed, in the order they were recorded. */
   parts: ClosedVideoPart[];
   /**
@@ -320,6 +357,8 @@ export class RecorderSession {
    * is what dismisses it.
    */
   private revoked: RevocationNotice | null = null;
+  /** The live drawing overlay's log, when one is wired. See {@link attachDrawing}. */
+  private drawing: DrawingSink | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private captureContentsId: number | null = null;
   /** Set only between telling the capture page to start and handing it a source. */
@@ -433,6 +472,49 @@ export class RecorderSession {
     });
   }
 
+  /**
+   * Where the recording clock is *right now*, in source seconds, or `null` when
+   * there is no recording or no frame has arrived to give the clock an origin.
+   *
+   * `elapsedSec()` answers the same question for the HUD's timer and deliberately
+   * does not interpolate: a stalled capture should show a stalled timer, because a
+   * timer that kept running would hide the stall. This one does interpolate,
+   * because its caller is stamping an event that happened between frames — and on
+   * an idle desktop ScreenCaptureKit emits 1.4 frames a second (research §5.1), so
+   * "the last frame's time" would put a stroke most of a second early.
+   *
+   * Accurate to about the encode-and-deliver latency of one frame, which is what
+   * separates the moment a frame was captured from the moment its chunk arrived
+   * here. For ink that is invisible; nothing on this path is A/V sync.
+   */
+  sourceTimeNowSec(): number | null {
+    if (this.phase !== 'recording') return null;
+    const state = this.active?.video.get(REFERENCE_TRACK);
+    if (state?.firstPtsUs == null) return null;
+    const media = (state.lastEndUs - state.firstPtsUs) / 1_000_000;
+    const since = Math.max(0, (monotonicMs() - state.lastArrivalMs) / 1000);
+    return Math.max(0, media + since);
+  }
+
+  /** The recording being written to right now, or `null`. */
+  activeRecordingId(): RecordingId | null {
+    return this.phase === 'recording' ? (this.active?.id ?? null) : null;
+  }
+
+  /**
+   * Wire the live drawing overlay's log into the recording lifecycle (phase 12).
+   *
+   * A setter rather than a constructor option because the two hold each other: the
+   * overlay asks the session what time it is, and the session asks the overlay what
+   * to write into `recording.json`. Optional, and absent in every test that is not
+   * about drawing — a recorder with no overlay attached behaves exactly as it did
+   * before phase 12, which is the first half of *"the overlay must never break the
+   * recording"*.
+   */
+  attachDrawing(sink: DrawingSink | null): void {
+    this.drawing = sink;
+  }
+
   /** Remove every handler. Used on shutdown and by tests. */
   uninstall(): void {
     session.defaultSession.setDisplayMediaRequestHandler(null);
@@ -516,6 +598,15 @@ export class RecorderSession {
         end: null,
       };
 
+      // Ink is scoped to the recording it was drawn over, so the overlay is told
+      // before the capture page is. Wrapped, like everything else on this path: an
+      // overlay that cannot start is a recording without ink, never a failed one.
+      try {
+        this.drawing?.begin(id);
+      } catch (error) {
+        console.error('[recorder] the drawing overlay could not start:', error);
+      }
+
       const window = await this.readyCaptureWindow();
       this.captureContentsId = window.webContents.id;
       this.sourceWanted = options;
@@ -574,6 +665,18 @@ export class RecorderSession {
     }
 
     const { store } = this.options;
+    // Closed *before* the bundle is, and outside the try, because closing the
+    // drawing log is a write into a project that has to still be open —
+    // `ProjectStore`'s event-log section states that contract from the other side.
+    // Its failure is swallowed here rather than reported: the recording is what
+    // matters, and this is the last thing that could take it down.
+    let drawing: { file: string; strokeCount: number } | null = null;
+    try {
+      drawing = (await this.drawing?.finish()) ?? null;
+    } catch (error) {
+      console.error('[recorder] closing the drawing log failed:', error);
+    }
+
     try {
       await store.setState(active.id, 'finalizing');
       // The end report closes whatever part of each video track was still open —
@@ -597,9 +700,14 @@ export class RecorderSession {
         return;
       }
 
+      const finalized = finalizedRecordingDoc(
+        provisional,
+        { video, audio },
+        new Date().toISOString(),
+      );
       await store.writeRecordingDoc(
         active.id,
-        finalizedRecordingDoc(provisional, { video, audio }, new Date().toISOString()),
+        drawing === null ? finalized : { ...finalized, events: { ...finalized.events, drawing } },
       );
       await store.setState(active.id, 'editable');
       this.phase = 'idle';
@@ -1564,6 +1672,7 @@ export class RecorderSession {
   private appendChunk(active: Active, state: ActiveVideo, chunk: ChunkMsg): void {
     state.firstPtsUs ??= chunk.timestampUs;
     state.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
+    state.lastArrivalMs = monotonicMs();
     // The recording clock's origin is the reference track's first frame, and this
     // is where it is learned (§5.4 mechanism 2).
     if (state.track === REFERENCE_TRACK) active.originUs ??= chunk.timestampUs;
@@ -1872,6 +1981,7 @@ function videoTrack(active: Active, track: VideoTrackKey): ActiveVideo {
     held: [],
     firstPtsUs: null,
     lastEndUs: 0,
+    lastArrivalMs: 0,
     parts: [],
     opened: new Set(),
     facts: null,
@@ -2334,4 +2444,17 @@ function audioEndReasonFor(
 ): 'permission-revoked' | 'device-lost' | 'crash' {
   if (cause !== 'track-ended') return 'crash';
   return stillGranted ? 'device-lost' : 'permission-revoked';
+}
+
+/**
+ * A monotonic millisecond reading, from `node:perf_hooks` rather than the global.
+ *
+ * The import is not fussiness. `test/phase4/fake-capture-platform.ts` installs a
+ * **driven** `globalThis.performance` so the capture page can be replayed on a
+ * synthetic clock, and deletes it again afterwards — so a main-process read of the
+ * global would either take the capture page's fake clock or throw `performance is
+ * not defined`, depending on which test ran. Main's clock is main's.
+ */
+function monotonicMs(): number {
+  return performance.now();
 }
