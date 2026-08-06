@@ -265,6 +265,10 @@ describe('phase 11 gate: preview and export are pixel-identical with annotations
       // built — so the only way to say "the export path is the shipping loop" is to
       // read the loop's own bookkeeping, which a stand-in does not have.
       const { report } = await gate();
+      // Through `frames` on the way in, like every other check here: a harness that
+      // died reports `framesRendered: 0` from `failureReport`, and read directly that
+      // would blame the fold for an exception somewhere else entirely.
+      frames(report);
       expect(
         report.exportLoop.framesRendered,
         'the export loop composited nothing, so the export path is not going through it',

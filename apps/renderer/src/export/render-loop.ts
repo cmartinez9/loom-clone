@@ -298,10 +298,11 @@ export class ExportRenderLoop {
    * grid would be comparing the two paths at two different instants, which is a
    * difference that says nothing about either.
    *
-   * So this is the seam a golden harness calls. `test/export-golden/harness.ts` uses
-   * it, and phase 11's `test/golden/harness.ts` has a two-line stand-in for the
-   * export path — `resolve` then `render` — which this replaces exactly, with its
-   * assertions untouched, when the two branches meet.
+   * So this is the seam a golden harness calls, and **both of them now call it**:
+   * `test/export-golden/harness.ts` (phase 8) and `test/golden/harness.ts` (phase 11),
+   * whose two-line stand-in — `resolve` then `render` — this replaced with its
+   * assertions untouched once both branches were on main. Neither gate subsumes the
+   * other; AGENTS.md § Sharp edges says which axis each covers.
    */
   async renderAt(
     timelineTimeSec: Seconds,

@@ -309,8 +309,38 @@ async function run(): Promise<GoldenReport> {
     return compositor.readPixels(into);
   }
 
-  /** The preview path: the shipping loop, then read what reached the canvas. */
+  /**
+   * The preview path: the shipping loop, then read what reached the canvas.
+   *
+   * ## The scribble is load-bearing. Do not delete it as a pointless clear.
+   *
+   * `exportFrame` above ends inside `ExportRenderLoop.renderAt`, which calls
+   * `Compositor.present()` — a `NEAREST` blit of the render target onto **this**
+   * default framebuffer at matching sizes, i.e. a byte-exact copy — and this context
+   * is created with `preserveDrawingBuffer: true`, so the export's own picture is
+   * still sitting on the canvas when this is called. `PreviewLoop.#frame` catches a
+   * refused composite (a `blur`/`mask` region it could not read) and deliberately
+   * *skips* `present()`. Without the clear, such a frame would leave the export's
+   * picture there, {@link readCanvas} would hand it back as "the preview", and
+   * `maxDelta` would read exactly **0** — §4.5's per-pixel zero satisfied by
+   * comparing the export path against itself. That is the vacuous-comparison shape
+   * this project has already paid for once, in a duration check answered by the
+   * writer whose header it was checking (AGENTS.md § Sharp edges, `mvhd`).
+   *
+   * The stand-in this gate used to carry never presented, so the fold onto the real
+   * loop is precisely what removed the independence that made this unreachable; this
+   * puts it back rather than relying on the export throwing first.
+   *
+   * A **uniform** fill is a picture the composite can never be — every correct frame
+   * here is a letterboxed high-frequency source with annotations over it — so a
+   * preview that drew nothing cannot compare equal to one that did. And it is the
+   * DEFAULT framebuffer alone: the compositor's render target, which `exportFrame`
+   * reads through `Compositor.readPixels`, is a separate FBO and is untouched.
+   */
   function previewFrame(t: number): Uint8Array {
+    context.bindFramebuffer(context.FRAMEBUFFER, null);
+    context.clearColor(1, 0, 1, 1);
+    context.clear(context.COLOR_BUFFER_BIT);
     loop.seek(t);
     loop.renderOnce();
     return readCanvas(context);
