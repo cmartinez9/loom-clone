@@ -105,11 +105,13 @@
  * withheld verdict cannot suppress a real one. This gate cannot do that: a lost context
  * empties the report, so every assertion below would fail and the branch has to come
  * first. The safety therefore has to live in the predicate, and it does —
- * {@link readingsTaken} enumerates **every** reading a `GoldenReport` can carry, field by
- * field, and one of them is enough to refuse to withhold. That is `mayDeleteSources`'s
- * discipline applied here: refuse on what the record *says*, field by field rather than
- * by `error === undefined`, because a record claiming some of it is one to refuse
- * whatever else it says.
+ * {@link readingsTaken} enumerates **every** reading *of the subject* a `GoldenReport`
+ * can carry, field by field, and one of them is enough to refuse to withhold. That is
+ * `mayDeleteSources`'s discipline applied here: refuse on what the record *says*, field
+ * by field rather than by `error === undefined`, because a record claiming some of it is
+ * one to refuse whatever else it says. What that list leaves out — the fixture that was
+ * fed in and the host it ran on, neither of which is a reading of the subject — is a
+ * deliberate exclusion argued at {@link readingsTaken} itself, not a gap to close.
  *
  * **Honest about its reach:** today the harness's catch-all builds an empty report on
  * any throw, so a run that lost the context has nothing in those fields and the guard
@@ -145,6 +147,27 @@ export const MIN_LOST_LAUNCHES = 2;
  * where a number or an object would go, so "was this measured?" is answerable without
  * trusting `ok` or `error`. A single entry here is enough to refuse to withhold: the
  * gate then judges the run and fails on it, which is the right way round.
+ *
+ * ## What is deliberately not on this list
+ *
+ * `report.fixture` and `report.environment` are **excluded on purpose**. This is not an
+ * incomplete enumeration, and it is not an oversight: do not finish it.
+ *
+ * This function answers exactly one question — *was the subject measured*, i.e. was a
+ * single pixel of the export ever compared. `fixture` describes the **input** that was
+ * fed in (its size, its frame count, its longest hold); `environment` describes the
+ * **host** it ran on (the renderer string, the Electron and Chrome versions). Neither is
+ * a reading of the subject. A run that built a fixture, read a renderer string and then
+ * lost the GPU before comparing anything measured **nothing**, and withholding is the
+ * correct outcome for it.
+ *
+ * Counting those fields would make that run judge-and-fail instead — which is precisely
+ * the flakiness this branch exists to remove, reintroduced in exactly the future the
+ * guard was written for: a partial-report writer that stops emitting an empty report on
+ * a throw and keeps the two cheapest fields to preserve. Widening the list is
+ * directionally conservative, and conservative in the **wrong dimension**: being more
+ * willing to fail is a virtue only where the extra failures are real, and these would be
+ * failures on runs where nothing was measured.
  */
 export function readingsTaken(report: GoldenReport): string[] {
   const readings: string[] = [];

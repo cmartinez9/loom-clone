@@ -1055,8 +1055,11 @@ was not a control.
   run whose context was gone, `shouldRelaunchGolden` never fired, and a run that produced
   no reading was judged as a phase-8 failure. `contextWasLost()` asks the live contexts
   themselves (minus the ones `disposePath` handed back), and main folds in the
-  GPU-process exit it watched. The predicate is untouched and nothing is widened: a run
-  that loses the context twice still fails at the gate's first assertion.
+  GPU-process exit it watched. The predicate is untouched and nothing is widened: the
+  relaunch condition is still `report.contextLost` alone. What a run that loses the
+  context on **every** launch earns is not that first assertion but no verdict at all —
+  `instrumentOutOfCalibration` in `test/export-golden/verdict.ts`, and § The phase-8 gate
+  has three outcomes, below.
 - **`prime()` is called ~60×/s and must not disturb decode that is already running.**
   A prime whose range is already requested rides along with the in-flight one rather
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
@@ -1436,9 +1439,11 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   withheld verdict is structurally unable to suppress a real one; here a lost context
   empties the report, so everything below would fail on the absence and the branch has to
   come first. The safety is therefore the predicate's: `readingsTaken` enumerates every
-  reading a `GoldenReport` can carry, field by field, and **one of them refuses to
-  withhold** — `mayDeleteSources`'s discipline applied to a verdict instead of a
-  deletion. `test/golden-verdict.test.ts` is the fence, `test/relaunch-policy.test.ts`'s
+  reading _of the subject_ a `GoldenReport` can carry, field by field, and **one of them
+  refuses to withhold** — `mayDeleteSources`'s discipline applied to a verdict instead of
+  a deletion. `fixture` and `environment` are excluded from it deliberately — they
+  describe the input and the host, not the subject — and the reason is at `readingsTaken`
+  itself; it is not a list to finish. `test/golden-verdict.test.ts` is the fence, `test/relaunch-policy.test.ts`'s
   sibling; three `verdict.ts` entries in `npm run verify:mutation` break it on disk.
   **The hazard it would be unsound without is a defect in the export path provoking the
   context loss itself**, and it is ruled out structurally rather than statistically:

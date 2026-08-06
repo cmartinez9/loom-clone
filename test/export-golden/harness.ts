@@ -219,7 +219,10 @@ const liveContexts = new Set<WebGL2RenderingContext>();
  *
  * So this asks `isContextLost()` of every live context, which is the same question the
  * export loop asked. It widens nothing: the relaunch condition is still *"the context
- * was lost"*, and a run that loses it twice still fails at the gate's first assertion.
+ * was lost"*. What a run that loses it on **every** launch earns is no verdict at all
+ * rather than a failure — `instrumentOutOfCalibration` in `verdict.ts` keys on this
+ * value together with the readings the report carries, and the gate then reports
+ * *skipped* under a NOT JUDGED banner.
  */
 function contextWasLost(): boolean {
   if (lost.where !== null) return true;
