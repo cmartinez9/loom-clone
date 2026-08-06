@@ -38,9 +38,9 @@ npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break capture, the timeline model, export, retention, the
                           # generators, annotations, the drawing overlay, the event logs,
-                          # the editor and both gates' judgement policies; one way per
-                          # entry in scripts/mutation-check.mjs's MUTATIONS registry, which
-                          # is where the count lives — each must fail a gate
+                          # the editor, its controls and both gates' judgement policies;
+                          # one way per entry in scripts/mutation-check.mjs's MUTATIONS
+                          # registry, which is where the count lives — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -125,8 +125,15 @@ apps/renderer/     renderer windows. First-run setup, library — including the 
                    (`export/`), the preview loop, `media/` — the loom:// readers
                    both of them share, including `TrackReader`, which is what turns a
                    multi-part track into the one-part seam preview and export already
-                   speak — and `editor/`, the editor window: the preview host, the
-                   timeline and trimming.
+                   speak — `glyphs.ts`, the one place either path rasterises a glyph —
+                   and `editor/`, the editor window: the preview host, the timeline and
+                   trimming (phase 14), plus the controls (phase 15) — `zoom.ts` for
+                   manual zoom regions and keyframe ops, `annotate.ts` for annotation
+                   ops and the pointer's map into normalized source space,
+                   `generators.ts` for reading `events/` and §3.5's regenerate/bake,
+                   `tools.ts`, `stage.ts` (the handles over the picture) and
+                   `inspector.ts`. The first three are pure and are where the arithmetic
+                   that is wrong invisibly lives.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -651,8 +658,9 @@ Report §8 has a phase for the timeline _model_ (7), the _generators_ (10) and
 _annotations_ (11), and no phase that builds the window they live in; the captain
 settled that in `data/loom-scope/decision-editor-scope.md` ("full editor", with
 **track stacking and blending UI out of the MVP** and **manual zoom alongside the
-automatic generators**). `apps/renderer/src/editor/` is the shell half: the window,
-the preview host, playback transport, the timeline and trimming. The library's
+automatic generators**). `apps/renderer/src/editor/` is both halves of it: phase 14's
+shell — the window, the preview host, playback transport, the timeline and trimming —
+and phase 15's **controls**, below. The library's
 **Open** button sends `loom.editor.open(id)`; `apps/main/src/editor.ts` shows the
 `editor` role keyed by the recording — which is what §1.2's `multiple: true` already
 meant by one editor per recording — and puts the id in the page's URL, so a window is
@@ -677,16 +685,19 @@ the only protection.
 here: vanilla TypeScript against the Pressroom design system, like the other four
 windows.** The argument is in `editor/main.ts`'s header and is not only consistency —
 the two things this window does sixty times a second are a WebGL draw and one style
-write, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
-inherits the choice; re-taking it is a decision to write down, not one to drift into.
+write, and §4.3's first rule is that nothing allocates in the loop. **Phase 15 kept
+it**, on the condition its header names: the rail, the overlay and the three inspector
+panels rebuild on a _document_ or _selection_ change, which is a person's rate, and no
+control reads another control's value. Re-taking the choice is a decision to write
+down, not one to drift into.
 
 **The timeline is drawn in _source_ time**, and that is the load-bearing layout
 decision (`timeline-geometry.ts` argues it). Its full width is the recording as
 captured; the trimmed-away head and tail stay on screen, dimmed, with the handles
 still on them. §3.2 anchors effect tracks in source time _"so that trimming does not
 re-time your zooms"_, so a timeline-time ruler would draw those tracks sliding under
-a trim they are explicitly independent of — and a keyframe placed by hand, which is
-`loom-p15`'s job, would not stay over the frame it was placed on. The playhead is
+a trim they are explicitly independent of — and a keyframe placed by hand, which phase
+15 made possible, would not stay over the frame it was placed on. The playhead is
 the one thing that crosses: it is drawn at `resolve(...).sourceTime`, and a scrub
 converts back with `timelineTimeAt`. **A trim is `clips.set` with one clip and no new
 primitive**, at `speed: 1` always — `trim.ts` says why a speed control is not a local
@@ -713,6 +724,75 @@ notice it — this gate for the two that move the picture, `editor-trim.test.ts`
 `track-reader.test.ts` for the three that do not. It deliberately does **not** time
 the frame budget: §8's 16.67 ms is `test/phase6-gate.test.ts`'s, and a second opinion
 about one number is a weaker one.
+
+## The editor's controls, in one paragraph
+
+Phase 15, and **no new primitive anywhere**. A _manual zoom_ is one `manualZoomTrack`
+carrying one `activeRanges` window per region the user placed, with §6.5's own
+four-keys-per-segment shape on `amount` and spring keys on `center` over
+`DEFAULT_SPRING` — the same shape the generator emits, because a hand-placed zoom and
+a generated one moving at visibly different speeds is a defect nobody can name. An
+_annotation_ is a `Span` on one `annotationTrack`; _keyframe editing_ is `key.set` and
+`key.remove`; _regenerate_ and _bake_ are `@loom/edl`'s `regenerateOps` and `bakeOps`,
+which have existed unused since phase 10. What phase 15 adds is the reading, the
+surface and the three seams a pure package cannot cross: reading `events/*.ndjson`
+over `loom://`, hashing them for §3.5's fingerprint, and asking `recording.json`
+whether the click tap was ever live.
+
+**The captain's own row of the capability table is _"Manual option too."_**, and it is
+`overrideZoomOps`: a manual region seeded with what `resolve` reports at that instant —
+so the picture does not jump when control changes hands — spanning the **generated
+segment's own `activeRanges` entry**, placed at the **end** of the track array. That
+last word is the whole mechanism. `resolve` folds in array order and `replace` wins, so
+last is topmost, and §3.5 then does everything: the user's zoom wins inside its window,
+the generator drives outside it, and the crossfade at each edge is `blendMs`. **The
+generated track is not touched**, which is §3.5's _"user edits survive by construction,
+because they were never in that track"_ read from the other side — so a _Regenerate_
+afterwards rewrites the generator's track and leaves the override alone. _Bake_ is the
+other option and a different intention: it detaches a generated track from regeneration
+(`origin: 'manual'`, the spec kept as `generatedFrom`, the block removed **by name**)
+and makes its keyframes the user's to edit. Both are offered and the panel says which
+is which; **a key on a live generated track is selectable and not draggable**, because
+an edit there sits in the one place the next regenerate is licensed to discard.
+
+**Annotation geometry is normalized _source_ space, so the pointer has to be converted
+and the conversion is the load-bearing part.** `annotate.ts`'s `outputToSource` is the
+compositor's `sourceSampleRect` + `contentRect` pair inverted, and phase 11's argument
+for source anchoring is a privacy one: geometry in output space lets a zoom slide a
+blur off the thing it hides. A point on the **letterbox** has no source coordinate and
+answers `null` rather than clamping — an annotation dropped there has no content to be
+welded to. `sourceToOutput01` is the way back, for handles only, and it is written out
+rather than imported for the reason phase 11's golden fixture computes its own
+expectation box: a handle placed by the code under test sits exactly on a wrongly-drawn
+annotation and looks right. `apps/renderer/test/editor-annotate.test.ts` round-trips it
+against `@loom/compositor`'s **own** forward map, which is the only shape that can
+disagree.
+
+**The gate is `test/phase15-gate.test.ts`** (harness `test/editor-controls/`), a real
+Electron run over a real `.loomrec` with real §2.5 logs in `events/`: the library's own
+Open button, the real generator button, the real slider, real `sendInputEvent` drags on
+the picture and on the lane, and **two real exports through `ExportSession`** — one
+before the user takes manual control and one after. The assertion worth the whole gate
+is those two finished MP4s, demuxed with `parseMovie` and decoded back out of their own
+sample tables: **inside** the manual window they differ (measured 53.6 of 255 mean
+absolute), **outside** it they are identical (0.000). The outside reading is the
+control, and it is what a whole class of plausible defects fails — a manual track
+written with `ALWAYS`, a disturbed clip list, a wrong frame selected for a time — every
+one of which changes the picture everywhere. Seven entries in `npm run verify:mutation`
+break the production source on disk and each names what must notice it; the one worth
+knowing is `an-annotation-is-placed-in-output-space`, whose guard is deliberately the
+unit test and **not** this gate, which was tried and measured surviving it (the gate
+draws and reads at one zoom, so an identity map still lands the mask inside the box).
+It does **not** measure the frame budget or §4.5's per-pixel preview/export identity;
+phases 6 and 8 own those, and a second opinion about either is a weaker one.
+
+Two consequences worth expecting. Phase 14's gate now asserts
+`['Screen', 'Zoom', 'Notes']` — the annotation lane is an _effect_ lane like Zoom, owned
+by the document rather than declared by `recording.json`, so it is on every recording;
+the list is still exact. And `test/editor-controls/main.ts` takes a **`--shots <dir>`**
+flag that writes a PNG beside each reading — the way to _look_ at this window, since
+`scripts/screenshot.cjs` boots the real main process whose recordings root is
+`homedir()` with no override.
 
 ## Sharp edges — the editor
 
@@ -768,6 +848,24 @@ about one number is a weaker one.
   scales the element; the composite is what the exporter will encode, at the
   resolution it will encode it, and it does not change because somebody dragged a
   corner. It also keeps the frame budget off the window geometry.
+- **Selection handles are DOM siblings of the canvas and may never be a draw call.**
+  `#ovl` is `position: absolute` over the preview at its exact size, and `stage.ts`
+  owns every node in it. §4.5 puts what preview and export composite on the
+  must-be-identical list, and a handle is precisely the thing that must be in one and
+  never in the other; a sibling is the only arrangement where that is true by
+  construction rather than by remembering.
+- **A recording with no event logs is not trouble.** It is the ordinary state of every
+  recording made before the sampler was wired in and of every one on a machine that
+  declined Accessibility, so `readEventLogs` reports `trouble: null` for it and only
+  names a log the document **promised** and could not be read. This is phase 5's
+  absent-versus-empty discipline one layer out, and it was found by phase 14's gate
+  going red on a `trouble` line over an editor where nothing was wrong.
+- **Two panels must not share a heading, and only a screenshot says so.** The
+  selection panel titles itself after what is selected and the standing one is _Zoom_;
+  the first version rendered _Zoom_ twice, one above the other. Nothing in `npm test`
+  can see that — this is the third defect in this window found by looking at it, after
+  the circular stage fit and the missing `[hidden]` rule, and `--shots` exists so the
+  fourth is cheap to find.
 
 ## Annotations, in one paragraph
 
@@ -1670,16 +1768,27 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   Building either pass makes the gate go red, in the same change that makes the
   coverage list wrong. Do not "fix" that by deleting the assertion; extend the gate to
   perturb the row instead.
-- **An export draws annotation shapes and redactions; annotation _text_ is not wired
-  to it yet.** `Compositor.render` takes annotations off the `ResolvedState` both
-  loops already compute, so blur, mask and the four shapes reach an export with no
-  export-side wiring at all. Glyphs are the exception: they need a `TextAtlas` on
-  `CompositorFrames`, `ExportRenderLoop` builds its frames without one, and a `text`
-  span with no atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`)
-  rather than refused — `PreviewLoop` reports that count through `onError` and the
-  export loop does not read it. Nothing authors an annotation today — the editor shell
-  has no annotation tools, and they are `loom-p15`'s — so hand the export window the
-  same atlas object before anything can.
+- **An export draws annotation shapes, redactions _and_ text, and the glyph raster is
+  made in one place for both paths.** `Compositor.render` takes annotations off the
+  `ResolvedState` both loops already compute, so blur, mask and the four shapes need no
+  export-side wiring at all. Glyphs did: they arrive as a `TextAtlas` on
+  `CompositorFrames`, and phase 15 — which is what first made a `text` span
+  authorable — added `ExportRenderLoop`'s `textAtlas` option and the export session's
+  own upload. **`apps/renderer/src/glyphs.ts` is the one place a raster is made**, and
+  it exists for a trap `document.fonts.ready` does not cover: a `@font-face` nothing on
+  the page renders is never fetched, so the hidden export window — which has no DOM at
+  all — would silently raster the _fallback_ face and set an export's labels in a
+  different typeface from the preview. `document.fonts.load()` is what forces it, and
+  `export.html` now declares `style-src 'self'; font-src 'self'` and links
+  `@loom/design/css/type.css` for the faces alone. A `text` span with no atlas is still
+  skipped and counted (`AnnotationPass.textSpansWithoutAtlas`) rather than refused,
+  which is phase 11's graded rule and is what makes a machine with no
+  `OffscreenCanvas` 2d context lose its labels and keep its export. The atlas is built
+  only when the document actually carries a `text` span, and `exportTextAtlas`'s
+  docblock says why that predicate is deliberately lax. **What is not measured**: no
+  gate compares a rendered glyph in a preview against one in an export. Phase 11's
+  golden gate draws no text and phase 15's measures a `mask`; the wiring is exercised
+  end to end by neither.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 

@@ -187,7 +187,15 @@ describe('the editor shell', () => {
       // The timeline built its lanes from `recording.json`. A screen-only recording
       // gets a screen lane and no camera or audio lane — an empty lane would be a
       // false statement about what was captured.
-      expect(report.lanes, detail).toEqual(['Screen', 'Zoom']);
+      //
+      // `Notes` is phase 15's annotation lane and arrived with the tools that author
+      // one. It is *not* a track `recording.json` declares — like `Zoom`, it is an
+      // effect lane the document owns — so it is present on every recording, and the
+      // rule above still holds for the captured tracks it is stated about. This list
+      // stays exact for the reason it always was: a lane that appeared or vanished
+      // without anybody deciding it should is a change to what this window says was
+      // recorded.
+      expect(report.lanes, detail).toEqual(['Screen', 'Zoom', 'Notes']);
       expect(report.recording.frameCount, detail).toBeGreaterThan(200);
     },
     GATE_TIMEOUT_MS,

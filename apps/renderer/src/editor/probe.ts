@@ -31,6 +31,20 @@
 
 import type { Clip, Seconds } from '@loom/format';
 
+/** One track, flattened to what a gate can assert about it without a model. */
+export interface ProbeTrack {
+  id: string;
+  target: string;
+  origin: 'manual' | 'generated';
+  /** Carries a live `generator` block — §3.5's *regenerate* applies to it. */
+  generated: boolean;
+  /** Baked: `origin: 'manual'` with the spec kept as `generatedFrom` (§3.5). */
+  baked: boolean;
+  activeRanges: [number, number][];
+  keyCount: number;
+  spanCount: number;
+}
+
 export interface EditorProbe {
   /**
    * The composited pixels, RGBA8, **top row first**, at the output size.
@@ -60,4 +74,46 @@ export interface EditorProbe {
    * which is exactly the difference between what is on screen and what is on disk.
    */
   readonly clips: readonly Clip[];
+
+  // ---- phase 15: the controls -----------------------------------------------
+
+  /** Which tool is armed. */
+  readonly tool: string;
+  /** What is selected, in the union `tools.ts` declares. */
+  readonly selection: unknown;
+  /**
+   * `resolve(...).zoom` at the playhead, **cloned**.
+   *
+   * The reading that makes a manual override provable: a gate can put the playhead
+   * inside the user's window and outside it and require different answers, which is
+   * §3.5's stacking rule measured through the shipping compiled timeline rather than
+   * asserted about a document. Cloned because `resolve` returns the timeline's own
+   * state object and overwrites it in place.
+   */
+  readonly zoom: { amount: number; center: [number, number] };
+  /** The manual zoom regions the editor is showing, read back out of the keys. */
+  readonly regions: readonly {
+    index: number;
+    startSec: Seconds;
+    endSec: Seconds;
+    windowEndSec: Seconds;
+    amount: number;
+    center: [number, number];
+  }[];
+  readonly annotations: readonly {
+    id: string;
+    kind: string;
+    startSec: Seconds;
+    endSec: Seconds;
+  }[];
+  /**
+   * Every track, flattened.
+   *
+   * Present because §3.5's three states — generated, manual, baked — are a property
+   * of *fields on a track*, and a gate that inferred them from the picture could not
+   * tell a bake from a regeneration that happened to produce the same keys.
+   */
+  readonly tracks: readonly ProbeTrack[];
+  /** Whether the event logs have been read yet, so a gate waits rather than races. */
+  readonly logsRead: boolean;
 }
