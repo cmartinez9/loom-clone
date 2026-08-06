@@ -14,9 +14,12 @@
  * §4.5 is about: they cannot disagree because there is one `resolve()` and one
  * `render()`.
  *
- * Nothing in this file reaches into the export pipeline. Phase 8 owns that; when it
- * lands, the loop in {@link exportFrame} is the two lines that get replaced by a call
- * into it, and every assertion above stays where it is.
+ * Nothing in this file reaches into the export pipeline. Phase 8 owns that, and has
+ * landed it: the seam is `ExportRenderLoop.renderAt`, so the loop in
+ * {@link exportFrame} is the two lines that fold into one call into it. That fold is
+ * deliberately still owed rather than done here — `test/phase8-gate.test.ts` is the
+ * *other* §4.5 gate and neither subsumes the other, so neither set of assertions may
+ * be dropped when it happens. AGENTS.md § Sharp edges says which axis each covers.
  *
  * ## Why equality is only a third of the gate
  *
