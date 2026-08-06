@@ -8,8 +8,9 @@ a recording is a folder on your disk that you can open in Finder.
 **Phase 2 of 14: permissions and first run**, on top of phase 1's capture spine,
 phase 3's audio and A/V sync machinery and phase 4's webcam track and multi-part
 recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
-WebGL2 compositor, phase 7's timeline model and phase 11's annotations, built early
-and out of order because they are self-contained.
+WebGL2 compositor, phase 7's timeline model, phase 10's cursor-follow and auto-zoom
+generators and phase 11's annotations, built early and out of order because they are
+self-contained.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -60,8 +61,10 @@ carries those forward.
 
 The native input sampler is complete alongside it. First run uses it to check that a
 real event tap can be built, because macOS answering "Accessibility is granted" is
-not evidence that clicks will arrive — the API succeeds either way. No recording
-samples the cursor into a log yet.
+not evidence that clicks will arrive — the API succeeds either way. No recording the
+app itself makes samples the cursor into a log yet; the only bundles that carry one
+are phase 10's corpus, written outside the recorder by
+`npm run record:cursor-corpus`.
 
 Phase 6's one decode path and WebGL2 compositor — the pair preview and export will
 share — are complete alongside it too, built ahead of the capture spine against
@@ -76,6 +79,19 @@ after a random sequence of edits matches `resolve()` after those same edits are 
 reloaded and replayed from the journal, and two independent precomputes of a spring
 channel come out byte-identical.
 
+The property phase 10 establishes: **framing that moves itself is measured, not
+judged.** Cursor-follow keeps a rest box around the pointer and pulls a spring toward
+it; auto-zoom-on-click pushes in around a burst of clicks and lets go again. Both are
+ordinary tracks on that same timeline rather than a special case, so a zoom you author
+yourself stacks over them in the usual way. `npm test` proves the comfort budget — pan
+speed, pan acceleration, and how much of the recording the frame is still for — on
+**ten real recordings** made on this machine by `npm run record:cursor-corpus` rather
+than on synthetic fixtures, with controls that must fail: the same ten logs followed
+with the rest box and the spring removed, and each of those two mechanisms removed on
+its own. Following the cursor needs no permission; only the click-driven zoom needs
+Accessibility, and without that grant it declines and names why, rather than quietly
+generating nothing. No shipping window offers either yet; the editor is later.
+
 The property phase 11 establishes: **a redaction that cannot be drawn is never
 published.** Arrows, boxes, ellipses, highlights, text and blur/mask are spans on that
 same timeline — no new primitive — anchored to the picture rather than to the output,
@@ -87,9 +103,9 @@ export loop and requiring **max per-pixel delta 0**, plus a third annotation-fre
 at every timestamp so a pair that both drew nothing cannot pass. No shipping window
 lets you author one yet; the editor is later.
 
-`npm run verify:mutation` proves all five gates are real by breaking capture, the
-timeline model and the annotation path one way at a time — editing the production
-source on disk — and requiring a test to fail each time.
+`npm run verify:mutation` proves all six gates are real by breaking capture, the
+timeline model, the generators and the annotation path one way at a time — editing the
+production source on disk — and requiring a test to fail each time.
 
 ## Requirements
 
