@@ -429,32 +429,15 @@ deletion unconditional, which is the mutation the gate exists for.
 data-destruction safeguard rather than a documentation nicety.** The export sheet in
 `apps/renderer/src/library/main.ts` _is_ §7.5 obligation 2 — the settled decision that
 the user is **told** before their sources go, and that there is no silent destruction —
-and `RETENTION_COPY.warning` is that promise in words. Nobody has watched it appear on
-a screen. **The failure mode is not cosmetic**: if the sheet does not open at all, or
-opens with the warning clipped, off-screen or below the fold, the user is not told and
-the sources are deleted anyway — and the safeguard fails **silently, with every test
-still green**. `packages/format/test/retention.test.ts` pins the sentences,
+and `RETENTION_COPY.warning` is that promise in words.
+`packages/format/test/retention.test.ts` pins the sentences,
 `apps/renderer/test/export-notice.test.ts` pins which one is chosen, and `main.ts`
 builds the nodes; none of that is the claim that a person can read the warning where it
-is put. Copy asserted in a DOM and copy read by a human are different claims.
-**What _is_ established**, so this is honest in both directions: the library window
-loads and renders with this code without throwing (observed),
-`packages/design/test/no-generic-look.test.ts` passes over `library.css`, and the sheet
-reuses only existing tokens and component classes. What is missing is specifically the
-human observation, and the reason is environmental — `scripts/screenshot.cjs` boots the
-real main process, whose recordings root is `homedir()` with no override but
-`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
-scratch library, and seeding the captain's real recordings root from a task worktree
-was not acceptable. **Where it is discharged**: the project's single signed-bundle
-end-to-end pass, the one run once and deliberately at the end because packaging and
-re-signing void the captain's grants. It belongs to that pass beside
-`microphone-revocation` and `overlay-content-protection`, which report `skipped` in
-§ Phase 2 gate status for the same reason — one item on a known list, not an orphan.
-**And it may not be upgraded to verified on the strength of a test.** No number of
-passing assertions about the copy discharges it; only a human seeing that sheet
-rendered in a running app does. It is recorded here rather than in § Carried forward on
-purpose, and should stay: that list is obligations on phase 2's signed-bundle gate, and
-this is not one of them — moving it there would dilute what that list means.
+is put. It is **one of four such surfaces**, and they are recorded together in § Four
+surfaces nobody has watched render — what each one's absence costs, what _is_
+established, why the human observation is missing, and the single signed-bundle pass
+all four are discharged at. Do not restate any of that here: a second copy of it is a
+claim to keep correct twice.
 
 ## Sharp edges — retention
 
@@ -1057,7 +1040,9 @@ disk and must never land on the 2 s poll path beside the media appends it would 
 with. It is an accessory like the rest — a library that cannot be listed costs the
 _provenance_ of the estimate, never the recording. `DISK_COPY.capacity` is rendered on
 the library's masthead, which is §7.2's estimate on a volume that is _not_ refusing:
-the refusal banner covers the other end, and between them the sentence is on a screen.
+the refusal banner covers the other end, and between them the sentence reaches a page.
+It — and the HUD's own disk banner — is **wired and not yet watched rendering**;
+§ Four surfaces nobody has watched render is where that stands.
 
 **§7.2's "< 2 min of headroom" clause cannot fire, and is kept at §7.2's value anyway** —
 the shape `minDurationSec: 1.0` already has in `auto-zoom.ts`. Two minutes of headroom
@@ -1123,6 +1108,95 @@ app last closed"_, which contradicted the pulsing record dot beside it. Both now
 what actually happened. `apps/main/test/recovery-notice.test.ts` is the gate, over a real
 crashed bundle through the shipping pass, with the control that an ordinary launch has
 nothing to say.
+
+## Four surfaces nobody has watched render, and the one pass that discharges them
+
+**Four user-facing surfaces now exist whose entire job is to tell the user something,
+and no human has watched any of them appear on a screen. That is a hole in four
+safeguards rather than in their paperwork.** The failure mode is the same in each case
+and it is not cosmetic: a banner that does not open, or opens clipped, off-screen or
+below the fold, leaves the user un-told while **every test stays green** — the sources
+are deleted with no warning anybody saw, or the app stops cleanly at 1 GB with a good
+file and the user never learns why, or is never warned early enough to act. A
+protection nobody can read is theatre. §7.4's camera banner is the precedent that makes
+that concrete rather than theoretical: it was correct in the DOM and had **zero pixels
+on screen** for the whole of phase 4, which is what `test/hud-notice.test.ts` exists to
+catch.
+
+The four, and what each one's absence costs:
+
+1. **§7.5 obligation 2's retention warning**, in the library's export sheet
+   (`apps/renderer/src/library/main.ts`, `RETENTION_COPY.warning`) — the settled
+   decision that the user is told **before** their sources go, and that there is no
+   silent destruction. Unseen, the deletion happens anyway.
+2. **§7.1 step 5's recovery banner**, in the library (`recovery-banner`,
+   `renderRecovery`) — _"Never silently discard, never silently pretend it was clean."_
+   Unseen, the app is back to the omission this branch fixed: a repaired recording that
+   looks exactly like every other recording.
+3. **§7.2's capacity line**, on the library's masthead (`disk-capacity`,
+   `renderCapacity`) — the estimate that arrives while there is still time to delete
+   something.
+4. **§7.2's low-disk banner and the notice its stop leaves behind**, on the recorder
+   HUD (`#disk`, `renderDisk`) — the warning during a recording, and then what the
+   clean stop saved.
+
+The first guards destruction; the other three prevent and report loss. The discipline
+is the same either way.
+
+**What _is_ established, so this is honest in both directions.** The pages that host
+them load and render with this code without throwing: `test/editor-gate.test.ts` shows
+the real library window through the real `WindowRegistry` role, the real preload and
+the real `loom://app/library.html`, waits on `document.fonts.ready` and clicks its Open
+button; `test/hud-notice.test.ts` does the same for `recorder.html` and then measures
+§7.3's and §7.4's notices in **pixels** clipped to the viewport, with a `--no-fit`
+control that must read zero. The HUD's shelf arithmetic already carries the disk line —
+`reportNoticeHeight` sums it with the camera, revoked and error lines and
+`WindowRegistry.fitHudNotice` sizes the window to the total, which is the mechanism
+that gate measures for the other two. The copy is pinned:
+`packages/format/test/retention.test.ts` and `apps/renderer/test/export-notice.test.ts`
+for the warning, `packages/ipc/test/disk.test.ts` and
+`apps/main/test/recovery-notice.test.ts` for `DISK_COPY` and `RECOVERY_COPY`. And
+`packages/design/test/no-generic-look.test.ts` walks `apps/renderer/src`, so it passes
+over `library.css` and `recorder.css`; all four surfaces reuse existing tokens and
+component classes.
+
+**What is missing is specifically the human observation, and it is missing for all
+four.** No `npx electron scripts/screenshot.cjs` run was made on the branch that built
+the last three. Every gate named above renders them **hidden**, or does not open a
+window at all: `test/editor-gate.test.ts` builds its `registerIpc` with no `recovery`
+function and no `PermissionManager`, so `library.recovery()` answers `[]` and
+`recorder.preflight()` has no handler — both library banners stay hidden and the export
+sheet is never opened; `test/hud/main.ts` sends `disk: null, diskStop: null`
+deliberately, so the HUD's disk line is never given text; and
+`apps/main/test/phase13-disk.test.ts` and `apps/main/test/recovery-notice.test.ts` mock
+`electron` outright. Copy pinned in a test and copy read by a human are different
+claims.
+
+**The reason is environmental.** `scripts/screenshot.cjs` boots the real
+`dist/main/index.cjs`, whose recordings root is `homedir()` with no override but
+`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
+scratch library, and seeding the captain's real recordings root from a task worktree
+was not acceptable. Three of the four need state on top of that which a dev run cannot
+manufacture honestly: an export that has just deleted its sources, a bundle genuinely
+crashed mid-recording, and a volume genuinely inside §7.2's bands.
+
+**Where all four are discharged: the project's single signed-bundle end-to-end pass**,
+the one run once and deliberately at the end because packaging and re-signing void the
+captain's grants and cost a full re-grant cycle (§ Sharp edges — permissions). They
+belong to it beside `microphone-revocation` and `overlay-content-protection`, which
+report `skipped` in § Phase 2 gate status for that same reason — items on a known list,
+not orphans.
+
+**And none of them may be upgraded to verified on the strength of a test.** No number
+of passing assertions about the copy discharges one; only a human seeing that surface
+rendered in a running app does.
+
+**They are recorded here rather than in § Carried forward on purpose, and should
+stay.** That list is obligations on phase 2's signed-bundle gate, and none of these is
+one — moving them there would dilute what that list means. For the same reason there is
+**no row for them in § Phase 2 gate status**: that table is
+`apps/main/src/verify/permissions-harness.ts`'s checks, and a surface waiting on the
+same pass is not a check that harness runs.
 
 ## Sharp edges
 
