@@ -56,23 +56,24 @@
 
     <main class="body" id="body" hidden>
       <!--
-        The tool rail. One tool today — `loom-p15` owns the zoom, annotation and
-        bubble tools that fill the gaps below it, which is why the separators are
-        already here rather than being introduced by that change.
+        The tool rail. Select, the zoom tool, and one button per annotation kind the
+        compositor renders. The buttons are built in `tools.ts` from
+        `ANNOTATION_TOOLS` rather than written out here, so a kind added to
+        `ANNOTATION_KINDS` cannot end up renderable and unreachable.
       -->
-      <nav class="rail" aria-label="Tools">
-        <button
-          class="tb"
-          id="tool-select"
-          type="button"
-          aria-pressed="true"
-          title="Select"
-        ></button>
-      </nav>
+      <nav class="rail" id="rail" aria-label="Tools"></nav>
 
       <div class="mat" id="mat">
         <div class="film" id="film">
           <canvas id="preview"></canvas>
+          <!--
+            The direct-manipulation layer, over the picture and at its exact size.
+            Empty until something is selected or a tool is armed; `stage.ts` owns
+            every node in it. It is a sibling of the canvas rather than drawn into
+            it because §4.5 puts the composite on the must-be-identical list and a
+            selection handle is the one thing that must never reach an export.
+          -->
+          <div class="ovl" id="ovl"></div>
         </div>
         <div class="mat-foot">
           <div class="cf obj obj-float">
@@ -84,6 +85,24 @@
       </div>
 
       <aside class="insp" aria-label="Details">
+        <!--
+          The selection's own panel, first because it is what the person is working
+          on. Built by `inspector.ts` and hidden when nothing is selected, so an
+          editor at rest still opens on the recording's facts rather than on an empty
+          form.
+        -->
+        <section id="insp-sel" hidden></section>
+
+        <div class="insp-h">
+          <span class="t-d4">Zoom</span>
+        </div>
+        <div class="insp-body" id="zoom-panel"></div>
+
+        <div class="insp-h">
+          <span class="t-d4">Automatic</span>
+        </div>
+        <div class="insp-body" id="gen-panel"></div>
+
         <div class="insp-h">
           <span class="t-d4">Recording</span>
         </div>

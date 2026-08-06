@@ -175,6 +175,22 @@ export interface ExportRenderLoopOptions {
   onProgress?: (renderedSec: Seconds, totalSec: Seconds) => void;
   /** Cancellation. Checked once per frame, so cancel is bounded by one composite. */
   signal?: AbortSignal;
+  /**
+   * The glyph atlas a `text` annotation is drawn from, or `null`.
+   *
+   * §4.5 puts *"annotation geometry, colour, opacity"* on the must-be-identical list,
+   * and a glyph raster is the one part of an annotation a renderer decides rather
+   * than we do — so preview and export must be handed **the same** atlas object, or
+   * the same one rebuilt from the same fonts in the same process. Without it every
+   * `text` span is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`), which
+   * is survivable and visible in a preview and is a **missing label** in a finished
+   * file the sources may then be deleted behind.
+   *
+   * It arrived here in phase 15, with the tools that can author a `text` span. Before
+   * that nothing could, and `AGENTS.md` recorded the gap in as many words: *"hand the
+   * export window the same atlas object before anything can."*
+   */
+  textAtlas?: TextAtlas | null;
 }
 
 /** §10.2's watchdog, applied to the export loop: a clear error beats a hang. */
@@ -256,6 +272,7 @@ export class ExportRenderLoop {
     this.#onFrame = options.onFrame;
     this.#onProgress = options.onProgress ?? ((): void => undefined);
     this.#signal = options.signal;
+    this.#frames.textAtlas = options.textAtlas ?? null;
     // `exportFrameCount` rather than the arithmetic written out here: main computes
     // the duration §7.5's fourth check expects from the *same* function, so the file
     // is measured against the timeline rather than against the writer's own tally.

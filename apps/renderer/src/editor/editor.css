@@ -164,6 +164,15 @@
   color: var(--select-fg);
   border-color: var(--keyline);
 }
+/* Between tool groups. A rule and not a gap: the rail is 50px wide and a gap large
+   enough to read as a group boundary would push the last tool off a short window. */
+.rail-rule {
+  width: 22px;
+  height: var(--line-thin);
+  background: var(--divider);
+  margin: 3px 0;
+  flex: none;
+}
 
 /* ---------- the mat, and the picture on it ----------
    `.mat`, not `.stage`: `@loom/design`'s components.css already owns a `.stage`
@@ -196,6 +205,61 @@
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* ---------- the direct-manipulation layer ----------
+   A sibling of the canvas at exactly its size, never a compositor pass: §4.5 puts
+   what preview and export draw on the must-be-identical list, and a selection handle
+   is precisely the thing that must be in one and never in the other. `stage.ts` owns
+   every node in here and places them all in percentages, so the layer needs no
+   knowledge of the pixel size the picture happens to be scaled to. */
+.ovl {
+  position: absolute;
+  inset: 0;
+  cursor: default;
+}
+/* An armed tool draws; Select picks. The cursor is the only difference — both need
+   to receive the pointer, and a picked annotation has to be reachable either way. */
+.ovl[data-tool='zoom'] {
+  cursor: zoom-in;
+}
+.ovl:not([data-tool='select']):not([data-tool='zoom']) {
+  cursor: crosshair;
+}
+/* The selected annotation's frame, and the rubber band a tool drag draws. Dashed,
+   because a solid rectangle over a picture reads as part of the picture. */
+.ovl-frame,
+.ovl-band {
+  position: absolute;
+  border: 1px dashed var(--select-fg);
+  outline: 1px solid rgb(0 0 0 / 0.35);
+  outline-offset: -2px;
+  box-sizing: border-box;
+}
+.ovl-frame {
+  cursor: move;
+}
+.ovl-band {
+  pointer-events: none;
+}
+.ovl-h {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  background: var(--select-fg);
+  border: 1px solid rgb(0 0 0 / 0.5);
+  border-radius: var(--r-xs);
+  cursor: crosshair;
+}
+.ovl-line {
+  position: absolute;
+  height: 3px;
+  margin-top: -1.5px;
+  transform-origin: 0 50%;
+  background: var(--select-fg);
+  outline: 1px solid rgb(0 0 0 / 0.35);
+  cursor: move;
 }
 .mat-foot {
   position: absolute;
@@ -265,12 +329,158 @@
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
+.insp-facts-tight {
+  padding-bottom: 0;
+}
 .insp-note {
   margin: 0;
   padding: 0 var(--sp-4) var(--sp-4);
   font-size: var(--ui-sm);
   line-height: var(--ui-sm-lh);
   color: var(--fg-subtle);
+}
+
+/* ---------- inspector controls (phase 15) ----------
+   A flat form: one row per value, a label on the left and a control on the right.
+   Nothing here reads another control — `inspector.ts`'s header argues why that is
+   the condition under which the no-framework decision keeps paying. */
+.insp-body {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+}
+.insp-body .insp-note {
+  padding: 0;
+}
+.fld {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-2);
+}
+.fld-l {
+  font-size: var(--ui-sm);
+  color: var(--fg-subtle);
+}
+/* The control cell. `minmax(0, 1fr)` above and `min-width: 0` here, because a number
+   input has an intrinsic width that otherwise pushes the panel wider than the
+   296px column and puts a horizontal scrollbar under the whole inspector. */
+.fld-c {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.fld-c > .inp {
+  min-width: 0;
+  flex: 1 1 0;
+}
+.fld-r {
+  flex: none;
+  font-family: var(--font-num);
+  font-size: var(--num-xs);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+.inp {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  background: var(--bg);
+  color: var(--fg);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-xs);
+  font-family: var(--font-num);
+  font-size: var(--num-xs);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+}
+.inp[type='text'] {
+  font-family: var(--font-ui);
+  font-size: var(--ui-sm);
+  font-stretch: normal;
+}
+.inp[type='range'] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+}
+.inp[type='color'] {
+  padding: 2px;
+  height: 26px;
+}
+.inp:focus-visible {
+  outline-offset: 1px;
+}
+.insp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* `library.css` already carries an identical rule. Repeated rather than shared
+   because the two pages get separate CSS bundles and `@loom/design` has no danger
+   variant; a third copy is the moment to promote it to `components.css` rather than
+   write it out again. */
+.btn-danger {
+  color: var(--danger);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-wash);
+  border-color: var(--danger);
+}
+.insp-list {
+  display: grid;
+  gap: 2px;
+}
+.insp-item {
+  text-align: left;
+  padding: 5px var(--sp-2);
+  background: transparent;
+  border: var(--line) solid transparent;
+  border-radius: var(--r-xs);
+  color: var(--fg-muted);
+  font-family: var(--font-num);
+  font-size: var(--num-xs);
+  font-weight: 500;
+  font-stretch: 78%;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.insp-item:hover {
+  background: var(--bg-deep);
+}
+.insp-item[aria-pressed='true'] {
+  background: var(--select-bg);
+  color: var(--select-fg);
+  border-color: var(--keyline);
+}
+
+/* One generator's row: what it is, what state it is in, and the two operations
+   §3.5 allows on it. */
+.gen {
+  display: grid;
+  gap: 6px;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: var(--line-thin) solid var(--divider);
+}
+.gen:last-child {
+  border-bottom: 0;
+}
+.gen-t {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--ui-sm);
+  font-weight: var(--w-med);
+}
+.gen-t .chip {
+  margin-left: auto;
 }
 
 /* ---------- the trouble line ----------
@@ -441,8 +651,27 @@
   white-space: nowrap;
 }
 
-/* Keyframes on an effect lane. Read-only in this phase — `loom-p15` makes them
-   draggable — but drawn, because a zoom you cannot see is a zoom you cannot find. */
+/* A zoom the user placed: the `activeRanges` window its keyframes live in. Behind
+   the diamonds, because §3.5's window is what makes the keys apply at all — a lane
+   showing only the keys could not explain a zoom that resolves to nothing. */
+.zregion {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  background: var(--ok-wash);
+  border: var(--line-thin) solid var(--ok);
+  border-radius: var(--r-xs);
+  cursor: pointer;
+}
+.zregion[data-selected='true'] {
+  border-color: var(--select-fg);
+  background: var(--select-bg);
+}
+
+/* Keyframes on an effect lane. Solid is the user's and draggable; hollow is a
+   generated track's, which is selectable and not movable — §3.5 puts it in the one
+   place a regeneration is licensed to overwrite, so an edit there would be thrown
+   away silently. `KeyView.editable` decides, not this stylesheet. */
 .kf {
   position: absolute;
   width: 11px;
@@ -453,6 +682,59 @@
   background: var(--ok);
   border: 1.5px solid var(--keyline);
   transform: rotate(45deg);
+  cursor: ew-resize;
+}
+.kf-gen {
+  background: var(--bg);
+  border-color: var(--fg-subtle);
+  cursor: pointer;
+}
+.kf[data-selected='true'] {
+  background: var(--select-fg);
+  border-color: var(--select-fg);
+  outline: 1.5px solid var(--keyline);
+}
+
+/* An annotation span. The middle moves it; the two grips retime it, and they are
+   separate elements for the reason the trim handles are — a wide border cannot be
+   two hit areas. */
+.span {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 6px;
+  background: var(--accent-wash);
+  border: var(--line-thin) solid var(--accent);
+  border-radius: var(--r-xs);
+  overflow: hidden;
+  cursor: move;
+}
+.span[data-selected='true'] {
+  background: var(--select-bg);
+  border-color: var(--select-fg);
+}
+.span-h {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+}
+.span-h-start {
+  left: 0;
+}
+.span-h-end {
+  right: 0;
+}
+.span-l {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: var(--ui-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* ---------- trim ----------

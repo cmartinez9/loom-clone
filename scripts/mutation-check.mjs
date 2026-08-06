@@ -179,7 +179,22 @@ const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
 
 /** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
 const EDITOR_GATE = 'test/editor-gate.test.ts';
+/**
+ * Phase 15's gate: the controls, and that what they did reaches an exported file.
+ *
+ * Not withholdable. It composites and it encodes, so it uses a GPU process like the
+ * two golden gates — but it judges *what changed between two of its own readings*
+ * rather than an absolute number about the host, and a run that loses its context
+ * produces no report at all rather than an empty one.
+ */
+const P15_GATE = 'test/phase15-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
+/** The pure halves of phase 15: manual zoom, annotations, and the generator controls. */
+const EDITOR_ZOOM = 'apps/renderer/test/editor-zoom.test.ts';
+const EDITOR_ANNOTATE = 'apps/renderer/test/editor-annotate.test.ts';
+const EDITOR_GENERATORS = 'apps/renderer/test/editor-generators.test.ts';
+/** §3.5's stack, over real generated tracks. */
+const GENERATOR_STACKING = 'packages/edl/test/generator-stacking.test.ts';
 /** Who may open an editor, and what closing one does to the bundle lock. */
 const EDITOR_WINDOW = 'apps/main/test/editor-window.test.ts';
 /** Seam S4's one adapter, shared by preview and export. */
@@ -1787,6 +1802,102 @@ export const MUTATIONS = [
       '  );',
     replace: '  return store.diskSpace();',
     mustFail: [PHASE13_DISK],
+  },
+  // ---- phase 15: the editor's controls -------------------------------------
+  {
+    name: 'a-manual-zoom-applies-everywhere',
+    breaks:
+      "§3.5's window, which is the whole of how the captain's manual option relates " +
+      'to the generators. With `activeRanges` covering the recording, the zoom the ' +
+      'user placed on one moment is applied to every moment — the generator never ' +
+      'shows through again, and every cheaper check still passes because the zoom ' +
+      'they asked for is still there where they asked for it.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    activeRanges: windows.map((window) => [window[0], window[1]]),',
+    replace: '    activeRanges: [[0, 1e9]],',
+    mustFail: [P15_GATE, EDITOR_ZOOM],
+  },
+  {
+    name: 'a-manual-zoom-goes-under-the-generator',
+    breaks:
+      'track order being stacking order. `resolve` folds in array order and the last ' +
+      'track with an opinion wins, so a manual zoom written at index 0 resolves ' +
+      '**underneath** the generated one and does nothing — a document that says ' +
+      'exactly what the user asked for and a picture that ignores it, which ' +
+      '`AGENTS.md` calls the hardest kind of bug to see.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: "  if (existing === null) return [{ op: 'track.add', track, at: doc.tracks.length }];",
+    replace: "  if (existing === null) return [{ op: 'track.add', track, at: 0 }];",
+    mustFail: [P15_GATE, EDITOR_ZOOM],
+  },
+  {
+    name: 'a-keyframe-drag-lands-on-its-neighbour',
+    breaks:
+      'the bound that keeps a dragged key clear of the ones beside it. `setKey` ' +
+      'upserts by `t`, so a move that lands exactly on a neighbour **replaces** it — ' +
+      'the drag reports success and the document comes back one keyframe short, ' +
+      'which for a four-key zoom is a shot that never returns to identity.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  const t = clamp(toSec, bounds.lowSec, bounds.highSec);',
+    replace: '  const t = toSec;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-generated-keyframe-is-editable',
+    breaks:
+      '§3.5\'s storage split: *"Regeneration rewrites only the generated track. User ' +
+      'edits survive by construction, because they were never in that track."* ' +
+      "Letting a key on a live generated track be edited puts the user's work in the " +
+      'one place the next *Regenerate* is licensed to throw away, and it is thrown ' +
+      'away silently.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: "  return track.origin === 'manual';",
+    replace: '  return true;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'an-annotation-is-placed-in-output-space',
+    breaks:
+      'the coordinate decision `annotations.ts` argues at length, and it is a privacy ' +
+      'one. Storing where the pointer was on the *output* rather than on the content ' +
+      'means a zoom slides the redaction off the thing it was covering and publishes ' +
+      'it, with the blur still visibly present a few centimetres away. Invisible at ' +
+      'magnification 1, which is every recording until somebody zooms.\n' +
+      '   The guard is the unit test and **not** the phase-15 gate, which was tried ' +
+      'and measured surviving: the gate draws its mask at one zoom and reads it back ' +
+      'at the same one, so an identity map still lands the redaction inside the box ' +
+      "it measures. What catches this is a round trip against the *compositor's own* " +
+      '`sourceToOutput` — two independent derivations of one map, which is the only ' +
+      'shape that can disagree.',
+    file: 'apps/renderer/src/editor/annotate.ts',
+    find: '  return [rx + ((px - left) / drawW) * span, ry + ((py - top) / drawH) * span];',
+    replace: '  return [at[0], at[1]];',
+    mustFail: [EDITOR_ANNOTATE],
+  },
+  {
+    name: 'a-zero-area-redaction-is-written',
+    breaks:
+      'the refusal that keeps a click from becoming a span. `readAnnotationGeometry` ' +
+      'throws on a zero-area `blur` or `mask` and `Compositor.render` then refuses ' +
+      'the whole frame — so writing one does not produce a small redaction, it ' +
+      'produces a recording whose preview will not composite at all.',
+    file: 'apps/renderer/src/editor/annotate.ts',
+    find: '    if (size[0] < MIN_EXTENT || size[1] < MIN_EXTENT) return null;',
+    replace: '    if (size[0] < 0 || size[1] < 0) return null;',
+    mustFail: [EDITOR_ANNOTATE],
+  },
+  {
+    name: 'a-bake-leaves-the-generator-block-behind',
+    breaks:
+      "§3.5's bake, on the line `AGENTS.md`'s \"an undo has to survive " +
+      '`JSON.stringify`" rule was written for. Without `patch.remove` the block stays ' +
+      'and the track is `origin: manual` **and** still generated — so the editor goes ' +
+      'on offering it a regenerate, which is precisely what a bake detaches it from, ' +
+      "and the next one overwrites the keyframes the bake made the user's.",
+    file: 'packages/edl/src/generators/lifecycle.ts',
+    find: "      patch: { origin: 'manual', generatedFrom: spec, remove: ['generator'] },",
+    replace: "      patch: { origin: 'manual', generatedFrom: spec },",
+    mustFail: [P15_GATE, EDITOR_GENERATORS, GENERATOR_STACKING],
   },
 ];
 

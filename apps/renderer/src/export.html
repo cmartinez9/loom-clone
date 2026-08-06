@@ -8,11 +8,21 @@
       1x1 and never shown (architecture report §1.2). Its CSP says so — only its own
       script, plus `connect-src loom:` so it can range-request the recording's media
       from main, which is the only way a sandboxed renderer reaches a file.
+
+      `style-src` and `font-src` are `'self'` and arrived with phase 15: a `text`
+      annotation's glyphs are rasterised in this window, and a face the page has not
+      declared is one `measureText` falls back from — which would set an export's
+      labels in a different typeface from the preview (§4.5). `'self'` only: the
+      stylesheet is a `<link>` the bundler emits, never inline, and the woff2 files
+      are ours and served from the same origin. Nothing here loosens what a renderer
+      can *reach*; it still has no filesystem and no network but `loom:`.
     -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none';
                script-src 'self';
+               style-src 'self';
+               font-src 'self';
                connect-src loom:;
                base-uri 'none';
                form-action 'none';

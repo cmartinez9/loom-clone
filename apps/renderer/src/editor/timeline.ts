@@ -35,6 +35,9 @@ import {
   type TimelineView,
 } from './timeline-geometry.ts';
 import { moveHandle, type Trim } from './trim.ts';
+import { annotationsOf, type AnnotationView } from './annotate.ts';
+import { zoomKeysOf, zoomRegionsOf, type KeyView, type ZoomRegion } from './zoom.ts';
+import { sameSelection, type Selection } from './tools.ts';
 
 /** What the timeline draws. Everything in it is source time. */
 export interface TimelineState {
@@ -43,6 +46,8 @@ export interface TimelineState {
   /** Where the playhead is, in source seconds. */
   playheadSourceSec: Seconds;
   document: EditDocument;
+  /** The one selected thing, so the lane that owns it can mark it. */
+  selection: Selection;
 }
 
 export interface TimelineElements {
@@ -66,6 +71,28 @@ export interface TimelineCallbacks {
   onTrimCommit: (trim: Trim) => void;
   /** The view scrolled or zoomed and the caller should re-render. */
   onViewChange: (view: TimelineView) => void;
+  /** Something on a lane was clicked. `null` deselects. */
+  onSelect: (selection: Selection) => void;
+  /**
+   * A keyframe was dragged along the ruler.
+   *
+   * One callback per pointer event while dragging and one at the end, like the trim
+   * handles — and for the same reason: the caller decides what is provisional and
+   * what is an undo step, and a key that wrote an op per `pointermove` would fill the
+   * history with a hundred entries per drag.
+   */
+  onMoveKey: (view: KeyView, toSec: Seconds, phase: 'move' | 'end') => void;
+  /**
+   * An annotation span's body or one of its ends was dragged.
+   *
+   * Which fields are present says which: one end is a resize, both is a move.
+   * `retimeAnnotationOps` reads it that way and behaves differently for each.
+   */
+  onMoveSpan: (
+    spanId: string,
+    times: { startSec?: Seconds; endSec?: Seconds },
+    phase: 'move' | 'end',
+  ) => void;
 }
 
 /** One row: a heading on the left and something drawn on the right. */
@@ -86,6 +113,18 @@ export class TimelineUi {
   #state: TimelineState | null = null;
   /** Which handle a pointer is holding, or `null`. */
   #dragging: 'start' | 'end' | 'playhead' | null = null;
+  /**
+   * A keyframe or a span the pointer has hold of.
+   *
+   * Separate from {@link TimelineUi.#dragging} because these are grabbed *inside* the
+   * lane area, where the playhead drag also begins — so the decision is which of the
+   * two a `pointerdown` meant, and it is taken once, from the target, in
+   * {@link TimelineUi.#grab}.
+   */
+  #object:
+    | { kind: 'key'; view: KeyView; grabSec: Seconds }
+    | { kind: 'span'; view: AnnotationView; end: 'start' | 'end' | null; grabSec: Seconds }
+    | null = null;
 
   constructor(elements: TimelineElements, callbacks: TimelineCallbacks) {
     this.#elements = elements;
@@ -101,9 +140,15 @@ export class TimelineUi {
       headingRuler(),
       ...this.#lanes.map((lane) => heading(lane)),
     );
-    this.#laneElements = this.#lanes.map(() => {
+    this.#laneElements = this.#lanes.map((lane) => {
       const element = document.createElement('div');
       element.className = 'lane';
+      // The lane's own name, so a caller — and `test/phase15-gate.test.ts` — can find
+      // one without counting rows. A recording with a camera and two audio tracks has
+      // the effect lanes at a different index from a screen-only one, and a gate that
+      // reached for `:nth-child(2)` would be measuring whichever lane that happened to
+      // be.
+      element.dataset['lane'] = lane.label.toLowerCase();
       return element;
     });
     this.#elements.laneStack.replaceChildren(...this.#laneElements);
@@ -179,12 +224,25 @@ export class TimelineUi {
     handleEnd.addEventListener('pointerdown', begin('end'));
 
     lanes.addEventListener('pointerdown', (event) => {
+      // An object on a lane takes the press; the playhead takes what is left. Both
+      // begin inside the lane area, so this is the one place the two are told apart,
+      // and it is told apart from the *target* rather than from a mode — a keyframe
+      // is draggable whichever tool is armed, because it is on the timeline and the
+      // tool rail is about the picture.
+      if (this.#grab(event)) {
+        capture(lanes, event.pointerId);
+        return;
+      }
       this.#dragging = 'playhead';
       capture(lanes, event.pointerId);
       this.#scrubTo(event, 'move');
     });
 
     const move = (event: PointerEvent): void => {
+      if (this.#object !== null) {
+        this.#dragObject(event, 'move');
+        return;
+      }
       if (this.#dragging === null) return;
       if (this.#dragging === 'playhead') {
         this.#scrubTo(event, 'move');
@@ -194,6 +252,11 @@ export class TimelineUi {
       if (next !== null) this.#callbacks.onTrimPreview(next);
     };
     const end = (event: PointerEvent): void => {
+      if (this.#object !== null) {
+        this.#dragObject(event, 'end');
+        this.#object = null;
+        return;
+      }
       const which = this.#dragging;
       if (which === null) return;
       this.#dragging = null;
@@ -270,6 +333,112 @@ export class TimelineUi {
     };
     bind(this.#elements.handleStart, 'start');
     bind(this.#elements.handleEnd, 'end');
+  }
+
+  /**
+   * Decide what a press inside the lane area had hold of, and select it.
+   *
+   * Returns whether an object took the press. Selection happens here, on
+   * `pointerdown`, rather than on a click: a drag that starts on an unselected key
+   * has to select it first or the inspector would be describing something else while
+   * the pointer moves it.
+   *
+   * A **generated** keyframe is selectable and not draggable — `KeyView.editable` is
+   * the whole of that difference (§3.5), and selecting one is how the inspector gets
+   * to say why it cannot be moved and offer the two things that can.
+   */
+  #grab(event: PointerEvent): boolean {
+    const state = this.#state;
+    const target = event.target;
+    if (state === null || !(target instanceof HTMLElement)) return false;
+    const at = timeOf(state.view, this.#xIn(event));
+
+    const key = target.closest<HTMLElement>('.kf');
+    if (key !== null) {
+      const trackId = key.dataset['track'];
+      const channel = key.dataset['channel'];
+      const t = Number.parseFloat(key.dataset['t'] ?? '');
+      if (trackId === undefined || channel === undefined || !Number.isFinite(t)) return false;
+      const view = zoomKeysOf(state.document).find(
+        (candidate) =>
+          candidate.trackId === trackId && candidate.channel === channel && candidate.t === t,
+      );
+      if (view === undefined) return false;
+      this.#select({ kind: 'key', ref: { trackId, channel, t } });
+      if (!view.editable) return true;
+      this.#object = { kind: 'key', view, grabSec: at };
+      return true;
+    }
+
+    const span = target.closest<HTMLElement>('.span');
+    if (span !== null) {
+      const spanId = span.dataset['span'];
+      if (spanId === undefined) return false;
+      const view = annotationsOf(state.document).find((candidate) => candidate.span.id === spanId);
+      if (view === undefined) return false;
+      this.#select({ kind: 'annotation', spanId });
+      const grip = target.closest<HTMLElement>('.span-h');
+      const end = grip?.dataset['end'];
+      this.#object = {
+        kind: 'span',
+        view,
+        end: end === 'start' || end === 'end' ? end : null,
+        grabSec: at,
+      };
+      return true;
+    }
+
+    const region = target.closest<HTMLElement>('.zregion');
+    if (region !== null) {
+      const index = Number.parseInt(region.dataset['zoom'] ?? '', 10);
+      if (!Number.isInteger(index)) return false;
+      this.#select({ kind: 'zoom', index });
+      // Selected, not grabbed: a region's *extent* is its keys, and dragging the
+      // whole band would have to move seven of them at once and decide what happens
+      // when it meets the next region. The keys are on the same lane and each is
+      // draggable; the inspector has the numbers.
+      return true;
+    }
+
+    // Bare lane. A press there is a scrub, and a scrub deselects — clicking the
+    // background is how a person puts a panel away.
+    if (state.selection !== null) this.#select(null);
+    return false;
+  }
+
+  #select(selection: Selection): void {
+    const state = this.#state;
+    if (state !== null && sameSelection(state.selection, selection)) return;
+    this.#callbacks.onSelect(selection);
+  }
+
+  #dragObject(event: PointerEvent, phase: 'move' | 'end'): void {
+    const state = this.#state;
+    const object = this.#object;
+    if (state === null || object === null) return;
+    const at = timeOf(state.view, this.#xIn(event));
+    if (object.kind === 'key') {
+      this.#callbacks.onMoveKey(object.view, at, phase);
+      return;
+    }
+    const { view, end } = object;
+    if (end === 'start') {
+      this.#callbacks.onMoveSpan(view.span.id, { startSec: at }, phase);
+      return;
+    }
+    if (end === 'end') {
+      this.#callbacks.onMoveSpan(view.span.id, { endSec: at }, phase);
+      return;
+    }
+    // The body: both ends move together, so the span keeps its length. The offset is
+    // taken from where the pointer went down rather than from the span's start, or a
+    // grab in the middle would jump the span's head under the pointer.
+    const shift = at - object.grabSec;
+    this.#callbacks.onMoveSpan(
+      view.span.id,
+      { startSec: view.startSec + shift, endSec: view.endSec + shift },
+      phase,
+    );
   }
 
   #scrubTo(event: PointerEvent, phase: 'move' | 'end'): void {
@@ -410,12 +579,8 @@ function lanesFor(recording: RecordingDoc | null): Lane[] {
     });
   }
 
-  lanes.push({
-    label: 'Zoom',
-    icon: 'zoomIn',
-    draw: drawZoomKeys,
-    muted: true,
-  });
+  lanes.push({ label: 'Zoom', icon: 'zoomIn', draw: drawZoomKeys });
+  lanes.push({ label: 'Notes', icon: 'marker', draw: drawAnnotations });
 
   return lanes;
 }
@@ -436,37 +601,111 @@ function drawParts(
 }
 
 /**
- * Every zoom keyframe in the document, on one lane.
- *
- * Read-only in this phase: `loom-p15` owns placing, moving and deleting them. It is
- * drawn anyway because a zoom the editor cannot show is a zoom the person watching
- * the preview cannot account for — and because the lane existing, in source time,
- * under the same ruler as the clip it applies to, is what that change needs to
- * exist before it can be written.
+ * Every zoom keyframe in the document, on one lane, and the windows they live in.
  *
  * Source-domain tracks only. A `timeline`-domain track describes the *output*
  * (§3.2) and its keys are not at these coordinates; drawing them here would put
  * them under the wrong frames, which is worse than not drawing them.
+ *
+ * ## Manual and generated keys look different, because they behave differently
+ *
+ * A key on a generated track is not the user's to move — §3.5 puts it in the one
+ * place a regeneration is licensed to overwrite — so it is drawn hollow and
+ * `isKeyEditable` is what decides, not a class name chosen here. `KeyView.editable`
+ * carries that answer from `zoom.ts` so the lane and the inspector cannot disagree
+ * about which keys can be dragged.
+ *
+ * The windows are drawn behind the keys because §3.5's `activeRanges` is what makes
+ * a zoom apply at all — a track with keys and no window over them resolves to
+ * nothing, and a lane showing only the diamonds could not tell you why.
  */
 function drawZoomKeys(element: HTMLElement, state: TimelineState): void {
   element.replaceChildren();
-  let drawn = 0;
-  for (const track of state.document.tracks) {
-    if (track.target !== 'zoom' || !track.enabled || track.domain !== 'source') continue;
-    for (const channel of Object.values(track.channels)) {
-      for (const key of channel.keys) {
-        const diamond = document.createElement('div');
-        diamond.className = 'kf';
-        diamond.style.left = `${String(xOf(state.view, key.t))}px`;
-        element.append(diamond);
-        drawn += 1;
-      }
+  const regions: ZoomRegion[] = zoomRegionsOf(state.document);
+  for (const region of regions) {
+    const box = document.createElement('div');
+    box.className = 'zregion';
+    box.dataset['zoom'] = String(region.index);
+    if (state.selection?.kind === 'zoom' && state.selection.index === region.index) {
+      box.dataset['selected'] = 'true';
     }
+    box.title = `${region.amount.toFixed(2)}× zoom`;
+    place(
+      box,
+      xOf(state.view, region.startSec),
+      xOf(state.view, region.windowEndSec) - xOf(state.view, region.startSec),
+    );
+    element.append(box);
   }
-  if (drawn > 0) return;
+
+  const keys = zoomKeysOf(state.document);
+  for (const view of keys) {
+    const diamond = document.createElement('div');
+    diamond.className = view.editable ? 'kf' : 'kf kf-gen';
+    diamond.dataset['track'] = view.trackId;
+    diamond.dataset['channel'] = view.channel;
+    diamond.dataset['t'] = String(view.t);
+    if (
+      state.selection?.kind === 'key' &&
+      state.selection.ref.trackId === view.trackId &&
+      state.selection.ref.channel === view.channel &&
+      state.selection.ref.t === view.t
+    ) {
+      diamond.dataset['selected'] = 'true';
+    }
+    diamond.title = `${view.channel} at ${formatTimecode(view.t)}${view.editable ? '' : ' · generated'}`;
+    diamond.style.left = `${String(xOf(state.view, view.t))}px`;
+    element.append(diamond);
+  }
+
+  if (keys.length > 0) return;
   const empty = document.createElement('span');
   empty.className = 'lane-empty';
   empty.textContent = 'No zoom yet';
+  element.append(empty);
+}
+
+/**
+ * The annotation spans, on one lane, in source time like everything else here.
+ *
+ * Each is a bar with a grip at each end, and the grips are separate elements for the
+ * reason the trim handles are: the middle is a move target and the ends are retime
+ * targets, and a wide border cannot be two hit areas.
+ */
+function drawAnnotations(element: HTMLElement, state: TimelineState): void {
+  element.replaceChildren();
+  const annotations: AnnotationView[] = annotationsOf(state.document);
+  for (const view of annotations) {
+    const bar = document.createElement('div');
+    bar.className = 'span';
+    bar.dataset['span'] = view.span.id;
+    bar.dataset['kind'] = view.kind;
+    if (state.selection?.kind === 'annotation' && state.selection.spanId === view.span.id) {
+      bar.dataset['selected'] = 'true';
+    }
+    bar.title = `${view.kind} · ${formatTimecode(view.startSec)}–${formatTimecode(view.endSec)}`;
+    place(
+      bar,
+      xOf(state.view, view.startSec),
+      xOf(state.view, view.endSec) - xOf(state.view, view.startSec),
+    );
+    for (const end of ['start', 'end'] as const) {
+      const grip = document.createElement('div');
+      grip.className = `span-h span-h-${end}`;
+      grip.dataset['span'] = view.span.id;
+      grip.dataset['end'] = end;
+      bar.append(grip);
+    }
+    const label = document.createElement('span');
+    label.className = 'span-l';
+    label.textContent = view.kind;
+    bar.append(label);
+    element.append(bar);
+  }
+  if (annotations.length > 0) return;
+  const empty = document.createElement('span');
+  empty.className = 'lane-empty';
+  empty.textContent = 'No notes yet';
   element.append(empty);
 }
 
