@@ -93,11 +93,28 @@ export interface CompositorFrames {
 
 export interface CompositorOptions {
   /**
-   * Letterbox colour, linear-encoded RGB in `[0..1]`.
+   * Letterbox colour, components `0..1`, in **the render target's own encoding —
+   * which is display-encoded, not linear light.**
+   *
+   * This docstring said "linear-encoded" until phase 14 and was wrong, in the
+   * direction that costs the most: `gl-util.ts` makes the target `RGBA8` rather
+   * than `SRGB8_ALPHA8`, so `gl.clearColor` stores these values verbatim, and the
+   * screen pass uploads its `VideoFrame` with `UNPACK_COLORSPACE_CONVERSION_WEBGL
+   * = NONE` into the same target. Every value in this pipeline is display-encoded
+   * end to end, exactly as `packages/edl/src/annotations.ts` sets out for
+   * annotation colours; a background is not the one exception. Following the old
+   * sentence means `srgbToLinear(hex / 255)`, which renders the letterbox visibly
+   * darker than the colour that was authored — and, if only one of preview and
+   * export takes it, makes the two differ by a gamma curve in a channel §4.5 puts
+   * on the must-not-differ list.
+   *
+   * Nothing catches that today because the default below is `[0, 0, 0]`, where the
+   * two encodings agree, and no caller anywhere constructs another background.
    *
    * Not part of `ResolvedState`: §3.6 does not put it there, and a background is a
    * property of the output, not of the timeline. `edit.json`'s `BackgroundSpec`
-   * (§2.6) becomes a pass of its own in a later phase.
+   * (§2.6) becomes a pass of its own in a later phase — this is the docstring that
+   * pass will be written against.
    */
   background?: readonly [number, number, number];
 }

@@ -10,8 +10,22 @@
  * | 1 | one timebase, taken at capture            | the capture page — never a wall clock    |
  * | 2 | per-track `startTimeSec`, recorded once    | {@link trackSourceTimeSec}, here         |
  * | 3 | snap sub-buffer offsets to zero            | {@link snapNearby}, here                 |
- * | 4 | audio is the master clock                  | the preview loop (phase 6)               |
+ * | 4 | audio is the master clock                  | **nowhere — not implemented**            |
  * | 5 | gaps are reproduced, never closed          | {@link audioRuns}, here                  |
+ *
+ * **Row 4 said "the preview loop (phase 6)" until phase 14, and phase 6 did not
+ * deliver it.** `PreviewLoop` advances its playhead by accumulating
+ * `requestAnimationFrame` deltas, which is the one thing §5.4 mechanism 4 names and
+ * forbids: *"Playback time comes from the audio output's played-sample count, never
+ * from `requestAnimationFrame` accumulation."* Nothing is wrong on any path today,
+ * because nothing plays audio alongside the preview — phase 14's editor is
+ * deliberately silent and says so on its own surface — so the stale row cost nobody
+ * anything except the next person to read it. **It belongs to whoever adds audio
+ * playback**, and it is not optional when they do: video on the host's frame clock
+ * and audio on the DAC's walk apart at the device's own error, the same 50 ppm §5.5
+ * measures as 90 ms over thirty minutes, which is a scrub bar disagreeing with the
+ * sound and a user who cannot explain either. The seam is `PreviewLoop`'s time
+ * source; `options.now` is a *measurement* clock and not that seam.
  *
  * It lives in `@loom/format` rather than in a package of its own because every
  * function here is a *reading* of a `recording.json` field: `startTimeSec`,

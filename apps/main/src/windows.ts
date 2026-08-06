@@ -257,9 +257,24 @@ interface Entry {
 export class WindowRegistry {
   private readonly options: RegistryOptions;
   private readonly entries = new Map<string, Entry>();
+  private readonly closedListeners: ((role: WindowRole, key: string) => void)[] = [];
 
   constructor(options: RegistryOptions) {
     this.options = options;
+  }
+
+  /**
+   * Be told when a window goes away, by role and key.
+   *
+   * Registered on the registry rather than on each window because the caller that
+   * needs it — the one releasing the bundle lock an editor took — must hear about
+   * *every* close, including the ones it did not open, and must hear about each of
+   * them once. Attaching a listener beside `show()` would do neither: `show()` on
+   * an existing window adds a second listener, and a window closed by the user
+   * quitting was never `show()`n by that caller at all.
+   */
+  onClosed(callback: (role: WindowRole, key: string) => void): void {
+    this.closedListeners.push(callback);
   }
 
   /**
@@ -304,8 +319,20 @@ export class WindowRegistry {
    *
    * `key` distinguishes instances of a multi-instance role — one editor per
    * recording, one hidden window per export job.
+   *
+   * `search` becomes the page URL's query, which is how a multi-instance window
+   * learns which of the things it is for: main writes it, the page reads it out of
+   * `location.search`, and a renderer has no way to change it because nothing in
+   * this app navigates. An existing window is **shown, not reloaded** — the key
+   * already identifies the subject, so a second `show` for the same key with a
+   * different query would be asking one window to become another, which is a new
+   * window's job.
    */
-  show(role: WindowRole, key = 'default'): BrowserWindow {
+  show(
+    role: WindowRole,
+    key = 'default',
+    search: Readonly<Record<string, string>> = {},
+  ): BrowserWindow {
     const spec = ROLES[role];
     if (!spec.multiple && key !== 'default') {
       throw new Error(`role ${role} is single-instance; it takes no key`);
@@ -356,6 +383,7 @@ export class WindowRegistry {
     this.entries.set(id, entry);
     window.on('closed', () => {
       this.entries.delete(id);
+      for (const listener of this.closedListeners) listener(role, key);
     });
 
     if (spec.visible) {
@@ -369,7 +397,7 @@ export class WindowRegistry {
     // rather than serving from a dev server on another origin — which keeps the
     // origin, the CSP and the asset paths identical in both, so "works in dev,
     // breaks when packaged" has one fewer place to hide.
-    void window.loadURL(appUrl(spec.page));
+    void window.loadURL(appUrl(spec.page, search));
     return window;
   }
 

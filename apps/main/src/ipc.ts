@@ -23,15 +23,10 @@ import {
   type AppInfo,
   type ApplyOpsResult,
   type EditOp,
+  type OpenedProject,
   type RecordingSummary,
 } from '@loom/ipc';
-import {
-  TRACK_KEYS,
-  isEditOp,
-  type EditDocument,
-  type RecordingDoc,
-  type TrackKey,
-} from '@loom/format';
+import { TRACK_KEYS, isEditOp, type TrackKey } from '@loom/format';
 import type { ProjectStore } from './project-store.ts';
 import { LOOM_BUNDLE_ID } from './identity.ts';
 
@@ -116,12 +111,13 @@ export function registerIpc(context: IpcContext): void {
 
   ipcMain.handle(
     CHANNEL.projectOpen,
-    async (
-      _event: IpcMainInvokeEvent,
-      rawId: unknown,
-    ): Promise<{ recording: RecordingDoc | null; edit: EditDocument }> => {
+    async (_event: IpcMainInvokeEvent, rawId: unknown): Promise<OpenedProject> => {
       const opened = await store.openProject(requireId(rawId));
-      return { recording: opened.recording, edit: opened.edit };
+      // `project.json` travels too, so the editor can put the recording's name in
+      // its window and refuse a bundle whose §2.2 state says its sources are gone.
+      // Both facts live only here; see `OpenedProject` for why the alternative —
+      // making the editor call `library.list()` — is worse.
+      return { project: opened.project, recording: opened.recording, edit: opened.edit };
     },
   );
 

@@ -23,6 +23,25 @@ export function formatDuration(seconds: number | null): string {
   return seconds === null ? '—' : formatTimecode(seconds);
 }
 
+/**
+ * `1:47.20`, `1:02:33.05` — a timecode with hundredths, the form the editor mockup
+ * sets a playhead readout in.
+ *
+ * The editor is the one surface where whole seconds are too coarse to be useful: a
+ * trim handle and a scrub bar are both positioned to a fraction of a second, and a
+ * readout that cannot express the difference makes two distinct positions look
+ * identical. Everywhere else — the library, the recorder's timer — reads
+ * {@link formatTimecode}, because there a jittering hundredths column is noise.
+ *
+ * Rounds **down**, like {@link formatTimecode} and for the same reason: a timecode
+ * names an instant you can seek to, and rounding up names one past it.
+ */
+export function formatTimecodeCentis(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--:--.--';
+  const centis = Math.floor(seconds * 100) % 100;
+  return `${formatTimecode(seconds)}.${String(centis).padStart(2, '0')}`;
+}
+
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
 /**

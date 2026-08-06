@@ -81,6 +81,12 @@ const OVERLAY = 'apps/main/test/overlay.test.ts';
 const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
 /** The event logs a recording writes, driven through `RecorderSession` itself. */
 const EVENTS = 'apps/main/test/recorder-events.test.ts';
+/** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
+const EDITOR_GATE = 'test/editor-gate.test.ts';
+const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
+const EDITOR_SOURCE = 'apps/renderer/test/screen-source.test.ts';
+const EDL_CLIPS = 'packages/edl/test/clips.test.ts';
+const PREVIEW_LOOP = 'apps/renderer/test/preview-loop.test.ts';
 
 /**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
@@ -786,6 +792,68 @@ const MUTATIONS = [
     find: '      t0Us: Math.round(clock.tUs + (originAtUs - clock.atUs)),',
     replace: '      t0Us: 0,',
     mustFail: [EVENTS],
+  },
+
+  // ---- phase 14: the editor shell ------------------------------------------
+  {
+    name: 'preview-primes-in-timeline-time',
+    breaks:
+      'the preview reading its source in source time. This is the defect the editor ' +
+      'made reachable: with the clip list producing a non-identity mapping, priming ' +
+      'at the timeline instant means `frameAt(sourceTime)` misses every frame and ' +
+      "§4.3's hold leaves one stale picture on screen under a scrub bar that still " +
+      'looks correct.',
+    file: 'apps/renderer/src/preview/preview-loop.ts',
+    find: '    this.#prime(sourceTime);',
+    replace: '    this.#prime(t);',
+    mustFail: [EDITOR_GATE, PREVIEW_LOOP],
+  },
+  {
+    name: 'a-trim-does-not-move-the-source',
+    breaks:
+      'the clip list being the only map between the domains. Answering the timeline ' +
+      'instant for a source question makes a trimmed recording play from the top — ' +
+      'the picture at timeline 0 is then the picture at source 0, not the frame the ' +
+      'trim starts on, and every cheaper check still passes.',
+    file: 'packages/edl/src/clips.ts',
+    find: '  return sourceStart + (timelineTime - start) * speed;',
+    replace: '  return timelineTime;',
+    mustFail: [EDITOR_GATE, EDL_CLIPS, EDL_RESOLVE],
+  },
+  {
+    name: 'the-part-offset-is-dropped',
+    breaks:
+      "seam S4's whole bridge: a `SourceReader` is one part in part-relative time " +
+      'and a `sourceTime` spans the recording clock. Handing the reader the ' +
+      'unconverted number is right for a single part starting at zero — every ' +
+      'recording this app makes today — and silently wrong for §7.4’s second part.',
+    file: 'apps/renderer/src/editor/screen-source.ts',
+    find: '  return trackSourceTimeSec(t, part.startTimeSec, 0);',
+    replace: '  return t;',
+    mustFail: [EDITOR_SOURCE],
+  },
+  {
+    name: 'a-trim-handle-can-be-dragged-past-the-other',
+    breaks:
+      'the minimum trim. A handle that pushes past the other one leaves a clip with ' +
+      'no extent, which `compileClips` drops and `validateEditDocument` refuses — so ' +
+      'one fast drag turns a recording into a document that will not open.',
+    file: 'apps/renderer/src/editor/trim.ts',
+    find: '    ? { startSec: Math.min(at, trim.endSec - MIN_TRIM_SEC), endSec: trim.endSec }',
+    replace: '    ? { startSec: at, endSec: trim.endSec }',
+    mustFail: [EDITOR_TRIM],
+  },
+  {
+    name: 'the-timeline-touches-its-own-clipped-edges',
+    breaks:
+      'the inset that keeps both ends of the recording reachable. The lane area is ' +
+      '`overflow: hidden`, so a trim handle centred on the last pixel has half of ' +
+      'itself — including its hit target — clipped away, and "trim the very end" is ' +
+      'a grab that lands on nothing. Found by the gate, not by reading the CSS.',
+    file: 'apps/renderer/src/editor/timeline-geometry.ts',
+    find: 'export const EDGE_PX = 8;',
+    replace: 'export const EDGE_PX = 0;',
+    mustFail: [EDITOR_TRIM],
   },
 ];
 
