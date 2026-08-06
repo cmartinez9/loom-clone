@@ -32,11 +32,11 @@
 import { Compositor } from '@loom/compositor';
 import type { CompiledTimeline } from '@loom/edl';
 import { PreviewLoop } from '../preview/index.ts';
-import type { ScreenSource } from './screen-source.ts';
+import type { TrackReader } from '../media/track-reader.ts';
 
 export interface PreviewHostOptions {
   canvas: HTMLCanvasElement;
-  screen: ScreenSource;
+  screen: TrackReader;
   timeline: CompiledTimeline;
   /** `edit.output.size` — what the exporter will encode (§2.6). */
   outputSize: readonly [number, number];
@@ -53,7 +53,7 @@ export class PreviewHost {
   readonly loop: PreviewLoop;
 
   readonly #compositor: Compositor;
-  readonly #screen: ScreenSource;
+  readonly #screen: TrackReader;
 
   constructor(options: PreviewHostOptions) {
     const { canvas, outputSize } = options;

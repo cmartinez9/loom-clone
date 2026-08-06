@@ -146,15 +146,17 @@ since `recording.json` does not carry it). `apps/renderer/src/media/loom-media.t
 the adapter that answered it — out of the part's own initialisation segment, never a
 second copy beside it — and its header says why.
 
-**Two adapters currently answer that question, and that is a duplication to settle,
-not a design.** Phase 8's `media/track-reader.ts` (`TrackReader`, `openVideoTrack`)
-and phase 14's `editor/screen-source.ts` (`ScreenSource`) were written independently,
-both implement `PreviewSource` over a track's parts, and both read `avcC` out of the
-part's own initialisation segment. §4.5 puts _"which source frame is selected for a
-given time"_ on the list preview and export may never disagree about, so two
-implementations of that selection is exactly the thing that list exists to prevent —
-one of them has to go, and `TrackReader` is the one both loops were already built to
-share.
+**There is exactly one adapter for that seam, and keeping it that way is a §4.5
+obligation rather than tidiness.** Phase 8 and phase 14 each wrote one independently —
+`media/track-reader.ts` and an editor-local `ScreenSource` — with the same interface
+and the same answers. §4.5 puts _"which source frame is selected for a given time"_ on
+the list preview and export may never disagree about, and two implementations of that
+selection is that guarantee with a second answer beside it waiting to drift, most
+likely on a part boundary where neither loop looks. Phase 14's copy was deleted, both
+loops open a track through `openVideoTrack`, and the editor's coverage moved onto the
+survivor: `apps/renderer/test/track-reader.test.ts` is the part-selection test, and
+`the-part-offset-is-dropped` in `verify:mutation` points at `TrackReader.frameAt`.
+**Do not add a third.**
 
 ## The four rules that are not style preferences
 
@@ -702,17 +704,16 @@ deliberately does **not** time the frame budget: §8's 16.67 ms is
 
 ## Sharp edges — the editor
 
-- **`ScreenSource` is seam S4's bridge, and both halves of it were undocumented.**
-  `SourceReader` knows one part in **part-relative** time (its sidecar's `pts` starts
-  at zero for that part) while `ResolvedState.sourceTime` is an offset on the
-  **recording clock** spanning every part. One reader per part, and every crossing
-  goes through `trackSourceTimeSec`. The other half is the `avcC`: `recording.json`
-  does not carry the codec description and `MetaMsg` is long gone by the time an
-  editor opens a bundle, so it is read back out of the container's own initialisation
-  segment with `parseInitSegment`. A source time inside a §7.4 hole selects the part
-  **after** it and the arithmetic then answers correctly with no special case —
-  negative part time, no frame in the index, `frameAt` null, the compositor holds, and
-  the watchdog stays quiet because time in which nothing was captured is not a stall.
+- **The editor reads its picture through `media/track-reader.ts`, not through anything
+  of its own.** That is seam S4's bridge — `SourceReader` knows one part in
+  **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —
+  and it is shared with the exporter on purpose (§4.5, above). Four separate methods
+  carry the same `t - part.startTimeSec`, so each has its own assertion in
+  `apps/renderer/test/track-reader.test.ts`: three of the four were droppable with
+  every other test in that file still green, which is what "ported a shim, not
+  coverage" looks like from the inside. The way that was established is worth reusing
+  — break the source ten ways and require each break to fail — because a test that has
+  never been seen to fail is a claim, not a measurement.
 - **`edit.output.size` is `[1920, 1080]` on every bundle and nothing sets it from the
   recording.** `newEditDocument()` is the only thing that writes it, so a 3456×2234
   capture previews — and will export — letterboxed into 1080p. The editor shows the

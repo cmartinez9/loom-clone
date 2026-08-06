@@ -180,7 +180,8 @@ const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
 /** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
 const EDITOR_GATE = 'test/editor-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
-const EDITOR_SOURCE = 'apps/renderer/test/screen-source.test.ts';
+/** Seam S4's one adapter, shared by preview and export. */
+const TRACK_READER = 'apps/renderer/test/track-reader.test.ts';
 const EDL_CLIPS = 'packages/edl/test/clips.test.ts';
 const PREVIEW_LOOP = 'apps/renderer/test/preview-loop.test.ts';
 
@@ -1469,14 +1470,18 @@ export const MUTATIONS = [
   {
     name: 'the-part-offset-is-dropped',
     breaks:
-      "seam S4's whole bridge: a `SourceReader` is one part in part-relative time " +
-      'and a `sourceTime` spans the recording clock. Handing the reader the ' +
-      'unconverted number is right for a single part starting at zero — every ' +
-      'recording this app makes today — and silently wrong for §7.4’s second part.',
-    file: 'apps/renderer/src/editor/screen-source.ts',
-    find: '  return trackSourceTimeSec(t, part.startTimeSec, 0);',
-    replace: '  return t;',
-    mustFail: [EDITOR_SOURCE],
+      "seam S4's whole bridge, on the line the composite actually comes from: a " +
+      '`SourceReader` is one part in part-relative time and a `sourceTime` spans the ' +
+      'recording clock. Handing the reader the unconverted number is right for a ' +
+      'single part starting at zero — every recording this app makes today — and ' +
+      'silently wrong for §7.4’s second part, where it shows the frame five seconds ' +
+      'earlier than the playhead. `frameAt` rather than one of the other three ' +
+      'conversions because it is the one a person sees; the ported tests carry an ' +
+      'assertion for each of the four separately, since each has its own copy.',
+    file: 'apps/renderer/src/media/track-reader.ts',
+    find: '    return part === null ? null : part.reader.frameAt(t - part.startTimeSec);',
+    replace: '    return part === null ? null : part.reader.frameAt(t);',
+    mustFail: [TRACK_READER],
   },
   {
     name: 'a-trim-handle-can-be-dragged-past-the-other',

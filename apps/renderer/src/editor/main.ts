@@ -45,7 +45,7 @@ import { recordingUrl, SUBJECT_PARAM, type OpenedProject } from '@loom/ipc';
 import type { Seconds, VideoTrackDoc } from '@loom/format';
 import { EditorProject } from './project.ts';
 import { PreviewHost } from './preview-host.ts';
-import { ScreenSource } from './screen-source.ts';
+import { openVideoTrack } from '../media/track-reader.ts';
 import { TimelineUi } from './timeline.ts';
 import { clampZoom, zoomAbout, type TimelineView } from './timeline-geometry.ts';
 import { readTrim, trimOp, type Trim } from './trim.ts';
@@ -241,13 +241,25 @@ async function start(): Promise<void> {
   // ---- the source, the preview -----------------------------------------------
   let host: PreviewHost;
   try {
-    const source = await ScreenSource.open({
-      parts,
-      mediaUrl: (_part, partIndex) => loom.project.mediaUrl(id, 'screen', partIndex),
-      // The sidecar's path comes from `recording.json`'s own `VideoPart.index`
-      // (§2.3) rather than from the layout function, because the document is what
-      // says where a part's index actually is. `recordingUrl` escapes each segment.
-      indexUrl: (part) => recordingUrl(id, part.index),
+    // `openVideoTrack` from `../media/` — the same adapter the exporter opens a
+    // track with, deliberately rather than one of the editor's own. §4.5 puts
+    // *"which source frame is selected for a given time"* on the list preview and
+    // export may never disagree about, and two implementations of that selection is
+    // that guarantee with a second answer beside it waiting to drift.
+    //
+    // The media URL comes from main, which proves the file is inside the bundle
+    // before handing one over (`ipc.ts`); the sidecar's path comes from
+    // `recording.json`'s own `VideoPart.index` (§2.3), because the document is what
+    // says where a part's index actually is. `recordingUrl` escapes each segment.
+    const source = await openVideoTrack({
+      parts: await Promise.all(
+        parts.map(async (part, partIndex) => ({
+          mediaUrl: await loom.project.mediaUrl(id, 'screen', partIndex),
+          indexUrl: recordingUrl(id, part.index),
+          startTimeSec: part.startTimeSec,
+          durationSec: part.durationSec,
+        })),
+      ),
     });
     host = new PreviewHost({
       canvas: el.preview,
