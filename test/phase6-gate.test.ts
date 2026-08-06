@@ -53,6 +53,13 @@ import {
   type BudgetEvidence,
   type HostProfile,
 } from './gate/budget-control.ts';
+// `GATE_ATTEMPTS` — launches allowed before a lost WebGL context is called a failure —
+// and `shouldRelaunch` are both declared in `test/gate/relaunch.ts` and pinned by
+// `test/relaunch-policy.test.ts`. The count is imported rather than written here on
+// purpose: as a bare `const` in this file it was a one-character edit away from being
+// larger, in a file nobody opens to review retry policy. What may *trigger* a relaunch is
+// fixed at `shouldRelaunch` and never moves; the count answers to measured evidence and to
+// nothing else, and both halves of that rule are stated where the number now lives.
 import { GATE_ATTEMPTS, shouldRelaunch } from './gate/relaunch.ts';
 import type { GateReport, GpuProfile } from './gate/report.ts';
 
@@ -92,17 +99,6 @@ const FRAME_BUDGET_MS = 1000 / 60;
 const GATE_TIMEOUT_MS = 300_000;
 /** Per launch, so a hung run leaves room for the attempts after it. */
 const ATTEMPT_TIMEOUT_MS = 120_000;
-/**
- * Launches allowed before a lost WebGL context is called a failure — declared beside
- * the predicate it belongs to, in `test/gate/relaunch.ts`, and pinned by
- * `test/relaunch-policy.test.ts`.
- *
- * It is imported rather than written here on purpose: as a bare `const` in this file it
- * was a one-character edit away from being larger, in a file nobody opens to review
- * retry policy. What may *trigger* a relaunch is fixed at {@link shouldRelaunch} and
- * never moves; the count answers to measured evidence and to nothing else, and both
- * halves of that rule are stated where the number now lives.
- */
 
 /**
  * How few frames a phase may measure and still be a measurement rather than an anecdote.
@@ -545,7 +541,7 @@ describe('phase 6 gate: 4K scrub and play', () => {
       if (assertsAbsoluteBudget(scrubEvidence)) {
         expect(report.scrub.overBudget, detail).toBe(0);
         expect(report.scrub.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
-      } else if (instrumentOutOfCalibration(report.control.scrub, FRAME_BUDGET_MS)) {
+      } else if (instrumentOutOfCalibration(scrubEvidence)) {
         withheld.push(withheldJudgement(scrubEvidence));
       } else {
         shortfalls.push(expectTracksControl(scrubEvidence));
@@ -553,7 +549,7 @@ describe('phase 6 gate: 4K scrub and play', () => {
       if (assertsAbsoluteBudget(playEvidence)) {
         expect(report.play.overBudget, detail).toBe(0);
         expect(report.play.maxMs, detail).toBeLessThanOrEqual(FRAME_BUDGET_MS);
-      } else if (instrumentOutOfCalibration(report.control.play, FRAME_BUDGET_MS)) {
+      } else if (instrumentOutOfCalibration(playEvidence)) {
         withheld.push(withheldJudgement(playEvidence));
       } else {
         shortfalls.push(expectTracksControl(playEvidence));

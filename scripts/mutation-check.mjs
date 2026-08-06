@@ -1313,8 +1313,10 @@ const MUTATIONS = [
       'silently and forever: a control that dies takes §8 with it and the run reports ' +
       'skipped rather than failing on its own sample-count floor.',
     file: 'test/gate/budget-control.ts',
-    find: '  return !environmentSustainsBudget(control, budgetMs);',
-    replace: '  return control.count === 0 || !environmentSustainsBudget(control, budgetMs);',
+    find: '  return !environmentSustainsBudget(evidence.control, evidence.budgetMs);',
+    replace:
+      '  return evidence.control.count === 0 || ' +
+      '!environmentSustainsBudget(evidence.control, evidence.budgetMs);',
     mustFail: [BUDGET_POLICY],
   },
 ];

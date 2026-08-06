@@ -9,7 +9,8 @@
  *
  * **Both halves are fenced here, and they are fenced differently.** The trigger is
  * fixed and never moves: the cases below enumerate the ways a run can be *bad* and
- * require that none of them earns a launch. The count is fixed too — pinned by this
+ * require that none of them earns a launch — cheaply, in Node, against gates that cost a
+ * 4K encode and a real Electron launch each. The count is fixed too — pinned by this
  * file — but it is the one part that may answer to evidence, and only to the kind that
  * moved it last: a measured demonstration that every launch the gate currently gets can
  * fail to yield a reading for one shared cause. It went from two to three on CI run
@@ -18,10 +19,6 @@
  * naming the shared cause — two launches, no reading. Anyone raising it again owes a
  * reading of that kind, and the pin below is what makes them come here to say so
  * rather than nudge a number in a gate file.
- *
- * So this file enumerates the ways a run can be *bad* and requires that none of them
- * earns a second launch. It is cheap and runs in Node; the gates it guards cost a 4K
- * encode and a real Electron launch each.
  *
  * **Two gates, two predicates, one rule.** Phase 8's golden-frame gate
  * (`test/export-golden/relaunch.ts`) runs on the same virtualised runners and loses

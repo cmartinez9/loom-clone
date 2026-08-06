@@ -808,7 +808,7 @@ describe('a control that missed its own budget yields no verdict', () => {
       expect(() => expectTracksControl(stalled)).toThrow(/ceiling this host earned/);
 
       // And what happens now: the instrument is judged first, and it failed.
-      expect(instrumentOutOfCalibration(run.control, FRAME_BUDGET_MS)).toBe(true);
+      expect(instrumentOutOfCalibration(stalled)).toBe(true);
       const line = withheldJudgement(stalled);
       expect(line).toContain('NOT JUDGED');
       expect(line).toContain('this is not a pass');
@@ -908,7 +908,7 @@ describe('a control that missed its own budget yields no verdict', () => {
 
       // The host held the budget in these frames — the same 8.4 ms spin the quiet
       // runners measure — so nothing is withheld and the phase is judged.
-      expect(instrumentOutOfCalibration(healthy, FRAME_BUDGET_MS)).toBe(false);
+      expect(instrumentOutOfCalibration(evidence(run.measured, healthy, TARGET_HOST))).toBe(false);
 
       // Door one: a host that runs the product's own workload. §8's number applies
       // exactly as written, these are the gate's two assertions verbatim, and both fail
@@ -929,7 +929,7 @@ describe('a control that missed its own budget yields no verdict', () => {
       // and never a throw manufactured out of a spin count the phase did not have.
       const deferred = evidence(run.measured, healthy, run.host);
       expect(assertsAbsoluteBudget(deferred)).toBe(false);
-      expect(instrumentOutOfCalibration(deferred.control, FRAME_BUDGET_MS)).toBe(false);
+      expect(instrumentOutOfCalibration(deferred)).toBe(false);
       if (run.cleanControl.throws) {
         expect(() => expectTracksControl(deferred)).toThrow(run.cleanControl.matches);
       } else {
@@ -997,9 +997,7 @@ describe('a control that missed its own budget yields no verdict', () => {
         { count: 470, maxMs: 0.3, overBudget: 0 },
         { count: 470, maxMs: 1667, maxAt: 12, overBudget: 470 },
       ]) {
-        expect(
-          instrumentOutOfCalibration(evidence(measured, HEALTHY, host).control, FRAME_BUDGET_MS),
-        ).toBe(false);
+        expect(instrumentOutOfCalibration(evidence(measured, HEALTHY, host))).toBe(false);
       }
     }
 
@@ -1010,11 +1008,11 @@ describe('a control that missed its own budget yields no verdict', () => {
     // from it rather than beside it.
     const atBudget = control({ maxMs: FRAME_BUDGET_MS });
     const justPast = control({ maxMs: FRAME_BUDGET_MS * (1 + Number.EPSILON), overBudget: 1 });
-    expect(instrumentOutOfCalibration(atBudget, FRAME_BUDGET_MS)).toBe(false);
-    expect(instrumentOutOfCalibration(justPast, FRAME_BUDGET_MS)).toBe(true);
+    expect(instrumentOutOfCalibration(evidence({}, atBudget))).toBe(false);
+    expect(instrumentOutOfCalibration(evidence({}, justPast))).toBe(true);
     expect(CLEARS_BUDGET).toBe(1);
     for (const c of [HEALTHY, STALLED, JUST_OVER, atBudget, justPast, NO_CONTROL]) {
-      expect(instrumentOutOfCalibration(c, FRAME_BUDGET_MS)).toBe(
+      expect(instrumentOutOfCalibration(evidence({}, c))).toBe(
         !environmentSustainsBudget(c, FRAME_BUDGET_MS),
       );
     }
@@ -1031,10 +1029,8 @@ describe('a control that missed its own budget yields no verdict', () => {
     // otherwise "the control stopped running" and "the gate has no opinion" become the
     // same event, silently, forever. The gate asserts the spin count separately, so an
     // empty control fails there with its own number in the message.
-    expect(instrumentOutOfCalibration(NO_CONTROL, FRAME_BUDGET_MS)).toBe(false);
-    expect(instrumentOutOfCalibration(control({ count: 0, maxMs: 0 }), FRAME_BUDGET_MS)).toBe(
-      false,
-    );
+    expect(instrumentOutOfCalibration(evidence({}, NO_CONTROL))).toBe(false);
+    expect(instrumentOutOfCalibration(evidence({}, control({ count: 0, maxMs: 0 })))).toBe(false);
     expect(assertsAbsoluteBudget(evidence({ maxMs: 20.2, overBudget: 1 }, NO_CONTROL))).toBe(true);
   });
 

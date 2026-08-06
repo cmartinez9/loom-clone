@@ -725,6 +725,25 @@ export function spinResolution(spins: number): number {
  * that would be circular — **not on the frame comparison having failed**. The instrument
  * is judged before the thing it measures, and by itself.
  *
+ * ## It takes the phase's whole {@link BudgetEvidence}, and reads two fields of it
+ *
+ * The shape is its siblings' — {@link assertsAbsoluteBudget}, {@link expectTracksControl},
+ * {@link withheldJudgement} — so one phase's evidence is the only thing any member of the
+ * family can be handed, and the branch that withholds a phase cannot be given a *different*
+ * phase's control by a copy-paste that type-checks. It could be: the scrub branch and the
+ * play branch each used to reach past their own evidence for a bare `ControlPhase`, and
+ * leaving `report.control.scrub` in the play branch compiled and decided the play phase's
+ * withholding on the scrub control's overrun — mis-routing exactly the decision this
+ * function exists to make.
+ *
+ * **Taking the whole object is not licence to consult the rest of it, and must never
+ * become one.** The body is `!environmentSustainsBudget(evidence.control,
+ * evidence.budgetMs)`; `host`, `measured` and `what` are not read here and may not be. That
+ * is the keying stated above, restated as a property of the code a reader can check by eye
+ * — and the reason it is spelled out is that widening the parameter is precisely the change
+ * a later reader could misread as permission to key on the host profile, the frame
+ * comparison or the renderer string. The whole verdict rests on it not being.
+ *
  * **A control that produced nothing is not out of calibration.** `count === 0` sustains
  * the budget by {@link environmentSustainsBudget}'s own rule, so it lands on the branch
  * where §8 is asserted rather than on the one where nothing is: a dead instrument must
@@ -797,8 +816,8 @@ export function spinResolution(spins: number): number {
  * compositor's own work is never inside it — and that is the honest division of the two
  * halves rather than one claim doing the work of both.
  */
-export function instrumentOutOfCalibration(control: ControlPhase, budgetMs: number): boolean {
-  return !environmentSustainsBudget(control, budgetMs);
+export function instrumentOutOfCalibration(evidence: BudgetEvidence): boolean {
+  return !environmentSustainsBudget(evidence.control, evidence.budgetMs);
 }
 
 /**
