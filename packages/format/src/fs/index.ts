@@ -38,6 +38,7 @@ export { BundleLock, BundleLockedError, type LockInfo } from './lock.ts';
 export {
   bundlePaths,
   createBundle,
+  deleteBundleSources,
   directorySize,
   listBundles,
   readBundle,
@@ -47,5 +48,6 @@ export {
   type BundlePaths,
   type CreateBundleInput,
   type CreatedBundle,
+  type DeleteSourcesPacing,
   type OpenedBundle,
 } from './bundle.ts';

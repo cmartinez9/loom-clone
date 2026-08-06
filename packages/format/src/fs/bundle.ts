@@ -5,7 +5,7 @@
  * that touches a disk, and it is imported only by the main process.
  */
 
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { BUNDLE, BUNDLE_DIRECTORIES, bundleDirName, isBundleDirName } from '../bundle/layout.ts';
@@ -323,6 +323,72 @@ export async function directorySize(dir: string): Promise<number> {
     }
   }
   return total;
+}
+
+/**
+ * Unlink the raw sources of one bundle. Architecture report §7.5, step 2.
+ *
+ * The captain's retention decision deletes the user's **only** copy of their raw
+ * footage, so three properties are structural rather than incidental:
+ *
+ * - **It takes the directory names it is given** — `RETENTION_SOURCE_DIRECTORIES`,
+ *   which is §7.5's `media/` and `events/` — and resolves each one against
+ *   {@link BundlePaths}. There is no path argument and no recursion out of the
+ *   bundle: the worst a wrong caller can do is name a directory of this bundle.
+ * - **The directories survive their contents.** The §2.1 layout stays valid at every
+ *   instant, so a bundle interrupted here is a bundle with empty `media/` rather
+ *   than one missing a directory the next read expects.
+ * - **It is idempotent**, because the crash story is "the next launch finishes it":
+ *   a second run over an already-emptied bundle removes nothing and reports nothing,
+ *   rather than failing on the files the first run took.
+ *
+ * Each directory is `fsync`'d after its entries go. `rename(2)` is not durable
+ * without a directory sync and neither is `unlink(2)`; without this, `state:
+ * "exported"` could reach the disk while the media it claims to have deleted comes
+ * back, which is the one end state §7.5's ordering exists to make impossible.
+ */
+
+/**
+ * Widens the deletion window so a `SIGKILL` can be aimed inside it.
+ *
+ * The same bargain — and the same justification — as {@link WriteAtomicPacing}: set
+ * only by `apps/main/test/retention-crash.test.ts`, so that test can kill *this*
+ * function part-way through rather than a copy of it. A harness that re-implemented
+ * the loop would keep passing after a regression here, and the regression here costs
+ * the user their footage. Production callers pass nothing.
+ */
+export interface DeleteSourcesPacing {
+  /** Awaited after each entry is unlinked, with the path that went. */
+  betweenEntries?: (path: string) => Promise<void>;
+}
+export async function deleteBundleSources(
+  paths: BundlePaths,
+  directories: readonly ('media' | 'events' | 'cursors' | 'thumbs')[],
+  pacing: DeleteSourcesPacing = {},
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const name of directories) {
+    const dir = paths[name];
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+    // A directory that is not there is a deletion that already happened, not an
+    // error: this runs again after a crash, on purpose.
+    if (entries === null) continue;
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      await rm(path, { recursive: true, force: true });
+      removed.push(path);
+      if (pacing.betweenEntries !== undefined) await pacing.betweenEntries(path);
+    }
+    const handle = await open(dir, 'r').catch(() => null);
+    if (handle !== null) {
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }
+  }
+  return removed;
 }
 
 /**

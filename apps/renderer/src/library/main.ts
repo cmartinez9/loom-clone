@@ -12,8 +12,9 @@
 import '@loom/design/css';
 import './library.css';
 import { formatBytes, formatDuration, formatRelativeDate, icon, mountIcons } from '@loom/design';
+import { RETENTION_COPY } from '@loom/format';
 import type { ProjectState, RecordingSummary } from '@loom/format';
-import type { PreflightReport, RecorderStatus } from '@loom/ipc';
+import type { ExportProgress, PreflightReport, RecorderStatus } from '@loom/ipc';
 import { describePermission } from '@loom/permissions';
 
 const loom = window.loom;
@@ -36,6 +37,32 @@ function must(id: string): HTMLElement {
 /** The id whose delete is awaiting a second click, if any. */
 let pendingDelete: string | null = null;
 let recordingsRoot = '';
+
+/**
+ * The export sheet, §7.5 obligation 2 — *"the user is told before it happens … Not a
+ * footnote, not a toast afterwards."*
+ *
+ * It expands **in the row**, the way the delete confirmation does, for the same
+ * reason that one does: the consequence is read in the act of confirming rather than
+ * in a dialog that is dismissed on the way past. What it says is
+ * `RETENTION_COPY.warning`, which is `@loom/format`'s copy and not this file's — the
+ * warning and the deletion have to be about the same thing, and a sentence written
+ * here could drift from the behaviour written there.
+ */
+interface ExportSheet {
+  id: string;
+  /** §7.5 obligation 4. Defaults to false — the captain's chosen default. */
+  keep: boolean;
+  /** `null` until the button is pressed. */
+  jobId: string | null;
+  /** What to show under the buttons: progress, the outcome, or an error. */
+  status: string;
+  done: boolean;
+}
+
+let exportSheet: ExportSheet | null = null;
+/** The live status line, so progress does not have to re-render the library. */
+let exportStatusNode: HTMLElement | null = null;
 
 // ---------------------------------------------------------------- state chips
 
@@ -65,7 +92,9 @@ const STATE_CHIPS: Record<ProjectState, StateChip> = {
 const STATE_NOTES: Partial<Record<ProjectState, string>> = {
   recording: 'A recording was in progress when the app last closed.',
   'needs-recovery': 'This will be repaired and truncated to the last complete frame when opened.',
-  exported: 'The sources were deleted after the export was verified. This recording is final.',
+  // The same words the export sheet warned with, after the fact rather than before —
+  // one source, so the promise and the outcome cannot be phrased differently.
+  exported: RETENTION_COPY.exported,
 };
 
 // ---------------------------------------------------------------- rendering
@@ -150,7 +179,156 @@ function appendFacts(container: HTMLElement, values: string[]): void {
   });
 }
 
+/**
+ * The export sheet for one row: the warning, the escape hatch, and the button.
+ *
+ * Every part of §7.5's obligations 2 and 4 that a person can see is here, and the
+ * order is deliberate — the consequence first, the way out of it second, the button
+ * last. The button is `btn-rec` (the accent, the same one "New recording" uses)
+ * rather than a danger red: this is the thing the user came to do, and it is
+ * destructive only in a way the sentence above it has already said out loud.
+ */
+function renderExportSheet(sheet: ExportSheet): HTMLElement {
+  const panel = document.createElement('div');
+  panel.className = 'export-sheet';
+
+  const warning = document.createElement('div');
+  warning.className = 'export-warning';
+  warning.append(iconSpan('alert', 15));
+  const warningText = document.createElement('span');
+  warningText.textContent = RETENTION_COPY.warning;
+  warning.append(warningText);
+  panel.append(warning);
+
+  const keepRow = document.createElement('div');
+  keepRow.className = 'export-keep';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'tgl';
+  toggle.setAttribute('role', 'switch');
+  toggle.setAttribute('aria-checked', String(sheet.keep));
+  toggle.setAttribute('aria-label', RETENTION_COPY.keepLabel);
+  toggle.disabled = sheet.jobId !== null || sheet.done;
+  toggle.addEventListener('click', () => {
+    sheet.keep = !sheet.keep;
+    void refresh();
+  });
+  const keepText = document.createElement('div');
+  const keepLabel = document.createElement('div');
+  keepLabel.className = 'export-keep-label';
+  keepLabel.textContent = RETENTION_COPY.keepLabel;
+  const keepHint = document.createElement('div');
+  keepHint.className = 'export-keep-hint';
+  // The hint says what *this* setting buys, and it swaps: leaving it off is a
+  // decision too, and the sentence that explains it belongs beside the switch.
+  keepHint.textContent = sheet.keep ? RETENTION_COPY.keepHint : RETENTION_COPY.deleteHint;
+  keepText.append(keepLabel, keepHint);
+  keepRow.append(toggle, keepText);
+  panel.append(keepRow);
+
+  const actions = document.createElement('div');
+  actions.className = 'export-actions';
+  const cancel = button(sheet.done ? 'Close' : 'Cancel', 'btn btn-sm');
+  cancel.addEventListener('click', () => {
+    const jobId = sheet.jobId;
+    if (jobId !== null && !sheet.done) loom.export.cancel(jobId);
+    exportSheet = null;
+    exportStatusNode = null;
+    void refresh();
+  });
+  actions.append(cancel);
+
+  if (!sheet.done) {
+    const go = button('Export', 'btn btn-sm btn-rec');
+    go.prepend(iconSpan('export', 14));
+    go.disabled = sheet.jobId !== null;
+    go.addEventListener('click', () => {
+      void startExport(sheet);
+    });
+    actions.append(go);
+  }
+  panel.append(actions);
+
+  // Always present, even when empty, because progress writes into it directly. See
+  // {@link onExportProgress}: a `refresh()` per progress report would re-scan every
+  // bundle on disk, and main reports progress **per encoded frame**.
+  const status = document.createElement('div');
+  status.className = 'export-status';
+  status.setAttribute('role', 'status');
+  status.textContent = sheet.status;
+  panel.append(status);
+  exportStatusNode = status;
+  return panel;
+}
+
+async function startExport(sheet: ExportSheet): Promise<void> {
+  sheet.status = 'Preparing…';
+  void refresh();
+  try {
+    // The destination is not ours to name: main composes it from
+    // `settings.exportRoot`. All a renderer says is which recording, and — §7.5
+    // obligation 4 — whether to keep the sources this time.
+    const { jobId } = await loom.export.start(sheet.id, { keepSources: sheet.keep });
+    sheet.jobId = jobId;
+  } catch (error) {
+    sheet.status = `The export could not start: ${messageOf(error)}`;
+    sheet.done = true;
+  }
+  await refresh();
+}
+
+/**
+ * Turn one progress report into the sentence under the buttons.
+ *
+ * A terminal phase re-renders the row — the state chip, the size on disk and the
+ * actions all change when an export finishes. Everything before it writes straight
+ * into {@link exportStatusNode} instead, because `ExportSession` reports progress
+ * **per encoded frame** and `refresh()` reads every bundle in the library.
+ */
+function onExportProgress(progress: ExportProgress): void {
+  const sheet = exportSheet;
+  if (sheet?.jobId !== progress.jobId) return;
+  if (progress.phase === 'done') {
+    const result = progress.result;
+    sheet.done = true;
+    // What actually happened to the sources, from `sourcesDeleted` and never
+    // inferred from the checkbox: a deletion that was authorised and then failed is
+    // a third state, and telling the user their recording is final when it is not
+    // would be the same lie in the other direction.
+    sheet.status =
+      result === undefined
+        ? 'Exported.'
+        : result.sourcesDeleted
+          ? `Exported to ${result.path}. ${RETENTION_COPY.exported}`
+          : `Exported to ${result.path}. The original recording was kept.`;
+  } else if (progress.phase === 'failed') {
+    sheet.done = true;
+    sheet.status = `The export failed, and nothing was deleted: ${progress.error ?? 'no detail'}`;
+  } else if (progress.phase === 'cancelled') {
+    sheet.done = true;
+    sheet.status = 'The export was cancelled. Nothing was deleted.';
+  } else {
+    sheet.status = `${PHASE_WORDS[progress.phase]} ${Math.round(progress.completed * 100)}%`;
+    if (exportStatusNode !== null) exportStatusNode.textContent = sheet.status;
+    return;
+  }
+  void refresh();
+}
+
+const PHASE_WORDS: Record<ExportProgress['phase'], string> = {
+  preparing: 'Preparing…',
+  audio: 'Mixing audio…',
+  video: 'Rendering…',
+  muxing: 'Writing the file…',
+  verifying: 'Checking the file…',
+  done: 'Done.',
+  failed: 'Failed.',
+  cancelled: 'Cancelled.',
+};
+
 function renderActions(summary: RecordingSummary): HTMLElement {
+  if (exportSheet?.id === summary.id) return renderExportSheet(exportSheet);
+
   if (pendingDelete === summary.id) {
     // The second click. The consequence sits beside the button rather than in a
     // dialog, so it is read in the act of confirming.
@@ -179,6 +357,20 @@ function renderActions(summary: RecordingSummary): HTMLElement {
 
   const actions = document.createElement('div');
   actions.className = 'row-actions';
+
+  // Only an editable recording can be exported. An `exported` one has no sources
+  // left to compose from (captain decision 5), and the other states are a recording
+  // that is not finished being one.
+  if (summary.state === 'editable' && summary.unreadable === undefined) {
+    const exportButton = button('Export', 'btn btn-sm');
+    exportButton.prepend(iconSpan('export', 14));
+    exportButton.addEventListener('click', () => {
+      pendingDelete = null;
+      exportSheet = { id: summary.id, keep: false, jobId: null, status: '', done: false };
+      void refresh();
+    });
+    actions.append(exportButton);
+  }
 
   const reveal = button('Reveal', 'btn btn-sm');
   reveal.prepend(iconSpan('folder', 14));
@@ -389,10 +581,23 @@ async function start(): Promise<void> {
     lastPhase = status.phase;
     void refresh();
   });
-  // Escape backs out of a pending delete, the same way it cancels the countdown.
+  // The export sheet's only channel. Subscribed once, for the window's life, rather
+  // than per export: main broadcasts to every window, and a job started here
+  // outlives any particular render of the row it came from.
+  loom.export.onProgress(onExportProgress);
+  // Escape backs out of a pending delete, the same way it cancels the countdown. It
+  // closes a *finished or unstarted* export sheet too, and deliberately does not
+  // cancel a running export: a key pressed by accident must not throw away four
+  // minutes of encoding.
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && pendingDelete !== null) {
+    if (event.key !== 'Escape') return;
+    if (pendingDelete !== null) {
       pendingDelete = null;
+      void refresh();
+    }
+    if (exportSheet !== null && (exportSheet.jobId === null || exportSheet.done)) {
+      exportSheet = null;
+      exportStatusNode = null;
       void refresh();
     }
   });

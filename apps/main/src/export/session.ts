@@ -12,13 +12,16 @@
  * 2. decide which pipeline (§5.3's stream-copy fast path, or compose-and-encode);
  * 3. open the writer, run the passes, write the file;
  * 4. **verify it** (§7.5's five checks, `verify.ts`);
- * 5. record the result in `project.json`, put the file on the clipboard, reveal it.
+ * 5. record the result in `project.json`;
+ * 6. **delete the recording's raw sources** if that record earned it (`retention.ts`),
+ *    then put the file on the clipboard and reveal it.
  *
  * Step 4 is why the rest exists in this shape. `decision-loom-storage-retention.md`
- * has phase 9 delete the user's only copy of the raw sources on the strength of what
- * this returns, so success has to be a thing that was *checked* rather than a thing
+ * has step 6 delete the user's only copy of the raw sources on the strength of what
+ * step 4 returns, so success has to be a thing that was *checked* rather than a thing
  * that was not interrupted. A cancelled or failed job leaves no file, records the
- * failure with the checks that did pass, and never reports `phase: 'done'`.
+ * failure with the checks that did pass, never reports `phase: 'done'` — and never
+ * reaches step 6, because every failure path throws above it.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -69,6 +72,7 @@ import {
   streamCopyEligibility,
   type StreamCopyPlan,
 } from './stream-copy.ts';
+import { applyRetention } from './retention.ts';
 import { verifyExport, type VerificationIo } from './verify.ts';
 
 /** How long main waits for the export window to answer a verification request. */
@@ -642,13 +646,33 @@ export class ExportSession {
       // written from, so handing it back here would be asking the file whether it
       // agrees with itself.
       const outcome = await verifyExport(job.outputPath, job.expectedDurationSec, this.#io(job));
-      await this.#record(job, {
+      const record = await this.#record(job, {
         verified: outcome.verified,
         ...(outcome.error === null ? {} : { error: outcome.error }),
       });
 
       if (outcome.failure !== null) {
         throw new Error(outcome.error ?? `verification failed at ${outcome.failure}`);
+      }
+
+      // Phase 9, and the only place in this application that deletes a recording's
+      // raw footage. It runs **here** — after the verification above returned no
+      // failure, and from the durable `ExportRecord` rather than from anything this
+      // job still holds in memory — because `decision-loom-storage-retention.md`'s
+      // first obligation is that a failed or interrupted export leaves the sources
+      // completely intact. Every `throw` above this line, including the verification
+      // one immediately above it, reaches the `catch` with nothing deleted.
+      //
+      // It cannot fail the export. The file is written, verified and about to go on
+      // the clipboard; the `catch` below discards the output, so letting a cleanup
+      // error reach it would take the user's finished video away because an unlink
+      // failed. `retention.ts` explains the ordering a crash inside it relies on.
+      const retention =
+        record === null
+          ? { deleted: false, reasons: ['this export was already recorded'] }
+          : await applyRetention(this.#options.store, job.recordingId, record);
+      if (retention.error !== undefined) {
+        console.error(`[export] ${job.id}: the sources were not deleted: ${retention.error}`);
       }
 
       // Captain decision 9's whole contract, in three lines: on disk, on the
@@ -663,6 +687,8 @@ export class ExportSession {
         copiedToClipboard,
         revealed,
         sourcesKept: job.settings.keepSources,
+        sourcesDeleted: retention.deleted,
+        retentionReasons: retention.reasons,
         mode: job.mode,
       };
       this.#finish(job, { phase: 'done', result });
@@ -712,17 +738,19 @@ export class ExportSession {
   }
 
   /**
-   * Write this job's one `ExportRecord`, whatever became of it.
+   * Write this job's one `ExportRecord`, whatever became of it, and hand it back.
    *
    * Exactly one, which is why the flag is on the job rather than on the caller: the
    * verification path records inside the `try` and then throws, and the `catch` must
-   * not append a second record for the same id.
+   * not append a second record for the same id. `null` therefore means *"this job
+   * had already been recorded"* — and phase 9 treats that as a reason not to delete,
+   * because the record it would be acting on is not the one this call wrote.
    */
   async #record(
     job: Job,
     outcome: { verified?: ExportVerification; error?: string },
-  ): Promise<void> {
-    if (job.recorded) return;
+  ): Promise<ExportRecord | null> {
+    if (job.recorded) return null;
     job.recorded = true;
     const record: ExportRecord = {
       id: job.id,
@@ -739,6 +767,7 @@ export class ExportSession {
       ...(outcome.error === undefined ? {} : { error: outcome.error }),
     };
     await this.#options.store.recordExport(job.recordingId, record);
+    return record;
   }
 
   /**

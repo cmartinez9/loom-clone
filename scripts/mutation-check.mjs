@@ -58,6 +58,13 @@ const EXPORT_SESSION = 'apps/main/test/export-session.test.ts';
 const EXPORT_COPY = 'apps/main/test/export-stream-copy.test.ts';
 const EXPORT_ENCODE = 'apps/renderer/test/export-encode.test.ts';
 const EXPORT_AUDIO = 'apps/renderer/test/audio-source.test.ts';
+/**
+ * Phase 9's gates: the ten verification failure modes with the sources surviving
+ * each one, and a `SIGKILL` aimed at each of §7.5's three deletion steps.
+ */
+const PHASE9 = 'apps/main/test/phase9-retention.test.ts';
+const RETENTION_CRASH = 'apps/main/test/retention-crash.test.ts';
+const FORMAT_RETENTION = 'packages/format/test/retention.test.ts';
 /** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
 const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
 const EDL_CONDITIONING = 'packages/edl/test/conditioning.test.ts';
@@ -1112,6 +1119,133 @@ const MUTATIONS = [
     find: '      t0Us: Math.round(clock.tUs + (originAtUs - clock.atUs)),',
     replace: '      t0Us: 0,',
     mustFail: [EVENTS],
+  },
+
+  // ---- phase 9: retention ---------------------------------------------------
+  // The captain's decision deletes the user's only copy of their raw footage, so
+  // every one of these is a mutation that would lose somebody's recording. The
+  // first is the one the phase's gate exists for: deletion made unconditional.
+  {
+    name: 'retention-deletes-whatever-the-export-said',
+    breaks:
+      '§7.5 obligation 1 — *"deletion happens only after a verified-good export"*. ' +
+      'With the predicate always true, every export deletes the sources: a missing ' +
+      'file, an empty one, a file that does not demux, a truncated encode, a last ' +
+      'frame that will not decode. The recording is gone and the thing it was ' +
+      'exchanged for does not play.',
+    file: 'packages/format/src/retention.ts',
+    find: '  return { mayDelete: reasons.length === 0, reasons };',
+    replace: '  return { mayDelete: true, reasons };',
+    mustFail: [PHASE9, FORMAT_RETENTION],
+  },
+  {
+    name: 'retention-ignores-a-recorded-failure',
+    breaks:
+      'the first thing `mayDeleteSources` reads: an export that recorded an error is ' +
+      'an export that failed, whatever else its partial `verified` block happens to ' +
+      'say. §7.5 requires the partial record precisely so a failure is legible, and ' +
+      'this is the read that acts on it.',
+    file: 'packages/format/src/retention.ts',
+    find: '  if (record.error !== undefined) {',
+    replace: '  if (false as boolean) {',
+    mustFail: [FORMAT_RETENTION],
+  },
+  {
+    name: 'retention-does-not-read-all-five-checks',
+    breaks:
+      'the five checks being read **one by one** rather than collapsed into ' +
+      '`error === undefined`. A record that says four of §7.5’s five passed is a ' +
+      'record this must refuse, and the one dropped here is the one phase 8 built a ' +
+      'whole renderer round trip to answer.',
+    file: 'packages/format/src/retention.ts',
+    find:
+      "  if (!verified.lastFrameDecodable) reasons.push('the last frame of the export did " +
+      "not decode');",
+    replace: '  void verified.lastFrameDecodable;',
+    mustFail: [FORMAT_RETENTION],
+  },
+  {
+    name: 'retention-deletes-more-than-the-report-names',
+    breaks:
+      '§7.5’s list being *exactly* `media/` and `events/`. Deleting more than the ' +
+      'authoritative document says is the one direction this may never err in: ' +
+      '`thumbs/` is the poster the library card for an exported recording still ' +
+      'shows, and the report does not name it.',
+    file: 'packages/format/src/retention.ts',
+    find:
+      "export const RETENTION_SOURCE_DIRECTORIES: readonly ['media', 'events'] = " +
+      "['media', 'events'];",
+    replace:
+      "export const RETENTION_SOURCE_DIRECTORIES = ['media', 'events', 'cursors', 'thumbs'] as " +
+      "readonly ['media', 'events'] as unknown as readonly ['media', 'events'];",
+    mustFail: [PHASE9, FORMAT_RETENTION],
+  },
+  {
+    name: 'retention-deletes-before-it-records',
+    breaks:
+      '§7.5’s ordering — *"write `retention.sourcesDeletedAt` **first**, then unlink"*. ' +
+      'Reversed, a crash inside the unlink loop leaves an editable recording with ' +
+      'holes in its media and nothing on disk saying a deletion ever began, so no ' +
+      'later launch finishes it and nothing can explain it.',
+    file: 'apps/main/src/export/retention.ts',
+    find:
+      '    await store.recordRetention(id, { sourcesDeletedAt: isoTimestamp(), reason: ' +
+      "'export-verified' });\n    await step('recorded', id);\n" +
+      '    const removed = await store.deleteSources(id, RETENTION_SOURCE_DIRECTORIES, {',
+    replace: '    const removed = await store.deleteSources(id, RETENTION_SOURCE_DIRECTORIES, {',
+    mustFail: [PHASE9, RETENTION_CRASH],
+  },
+  {
+    name: 'retention-sets-the-state-before-the-media-goes',
+    breaks:
+      '§7.5’s third step being **last**. Set first, a crash mid-unlink leaves a ' +
+      'recording the library calls `exported` — *"the sources are gone and this ' +
+      'recording is final"* — with most of its media still on disk and no launch ' +
+      'that will ever look at it again.',
+    file: 'apps/main/src/export/retention.ts',
+    find: "    await step('recorded', id);\n    const removed = await store.deleteSources(",
+    replace:
+      "    await step('recorded', id);\n    await store.setState(id, 'exported');\n" +
+      '    const removed = await store.deleteSources(',
+    mustFail: [RETENTION_CRASH],
+  },
+  {
+    name: 'an-unexported-recording-can-be-deleted',
+    breaks:
+      '§7.5 obligation 3 — *"an unexported recording is never auto-deleted"* — being a ' +
+      'property of the deleting method rather than of its callers. The retention ' +
+      'record is written only after a verification that returned no failure, and ' +
+      'refusing without it is what makes the one destructive call in this ' +
+      'application unable to fire on its own.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    if (open.project.retention === undefined) {',
+    replace: '    if (false as boolean) {',
+    mustFail: [PHASE9],
+  },
+  {
+    name: 'retention-resumes-a-recording-nobody-exported',
+    breaks:
+      'the launch-time pass being a *resume* rather than a sweep. Without the ' +
+      '`sourcesDeleted` half of the predicate it lists every recording that is not ' +
+      'already exported — which is every recording — and obligation 3’s *"never by ' +
+      'age, disk pressure, or app launch"* becomes exactly the policy the captain ' +
+      'was told he was not getting.',
+    file: 'apps/main/src/project-store.ts',
+    find: "    return summaries.filter((s) => s.sourcesDeleted && s.state !== 'exported');",
+    replace: "    return summaries.filter((s) => s.state !== 'exported');",
+    mustFail: [PHASE9],
+  },
+  {
+    name: 'a-failed-verification-does-not-stop-the-export',
+    breaks:
+      'the throw that stands between §7.5’s checks and everything after them. Without ' +
+      'it a failed export reports `done`, puts an unverified file on the clipboard, ' +
+      'and reaches the deletion — where only `mayDeleteSources` is left between the ' +
+      'user and losing their footage. That is one guard where there were two.',
+    file: 'apps/main/src/export/session.ts',
+    find: '      if (outcome.failure !== null) {',
+    replace: '      if (outcome.failure !== null && (false as boolean)) {',
+    mustFail: [PHASE9, EXPORT_SESSION],
   },
 ];
 

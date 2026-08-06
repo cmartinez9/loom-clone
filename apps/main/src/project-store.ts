@@ -57,6 +57,7 @@ import {
   type PartIndex,
   type ProjectDoc,
   type ProjectState,
+  type RetentionRecord,
   type RecordingDoc,
   type RecordingId,
   type RecordingSummary,
@@ -72,6 +73,7 @@ import {
   EventLogWriter,
   JournalWriter,
   createBundle,
+  deleteBundleSources,
   directorySize,
   listBundles,
   loadAndUpgradeDocument,
@@ -81,6 +83,7 @@ import {
   writeAtomic,
   writeJsonAtomic,
   type BundlePaths,
+  type DeleteSourcesPacing,
   type OpenedBundle,
 } from '@loom/format/fs';
 import {
@@ -279,6 +282,25 @@ export class ExportDestinationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ExportDestinationError';
+  }
+}
+
+/**
+ * Raised when something asks to delete a recording's sources and `project.json`
+ * does not carry the `retention` record a verified export writes first.
+ *
+ * The captain's retention decision deletes the user's only copy, so "was this
+ * authorised" is answered from the durable record rather than from the call stack:
+ * §7.5's step 1 is what authorises step 2, and a caller that skipped it is refused
+ * by name rather than trusted.
+ */
+export class RetentionNotAuthorisedError extends Error {
+  constructor(id: RecordingId) {
+    super(
+      `refusing to delete the sources of ${id}: project.json carries no retention record, ` +
+        'so no verified export has authorised it',
+    );
+    this.name = 'RetentionNotAuthorisedError';
   }
 }
 
@@ -1130,6 +1152,72 @@ export class ProjectStore {
       };
       await this.writeProjectDoc(open);
     });
+  }
+
+  // ----------------------------------------------------------------- retention
+
+  /**
+   * §7.5's step 1: record that this recording's sources are going, **before** one
+   * of them is unlinked.
+   *
+   * The order is the whole crash story. A `retention` block with `state` still
+   * `editable` is a bundle that has *begun* deletion, and
+   * `resumeInterruptedRetention` finishes it on the next launch; the other order
+   * would leave a recording that looks editable with half its media, which is the
+   * one end state §7.5 names.
+   *
+   * Queued and validated like every other `project.json` write, so it cannot race a
+   * debounced snapshot, and it is durable before it returns — `writeJsonAtomic`
+   * fsyncs the file and then the bundle directory.
+   */
+  async recordRetention(id: RecordingId, retention: RetentionRecord): Promise<void> {
+    const open = this.requireOpen(id);
+    await this.enqueue(open, async () => {
+      open.project = { ...open.project, retention };
+      await this.writeProjectDoc(open);
+    });
+  }
+
+  /**
+   * §7.5's step 2: unlink `media/` and `events/`.
+   *
+   * The **only** deletion in this application that takes the user's raw footage, and
+   * three things keep it that narrow. It refuses a project that is not open, so the
+   * bundle lock is held while it runs and no second process is reading what it
+   * removes. It takes directory *names* out of `RETENTION_SOURCE_DIRECTORIES` rather
+   * than paths, so a caller cannot aim it. And it refuses outright unless
+   * `project.json` already carries the `retention` record step 1 wrote — which is
+   * only ever written after a verified-good export, and is what makes obligation 3,
+   * *"an unexported recording is never auto-deleted"*, a property of this method
+   * rather than of its callers.
+   */
+  async deleteSources(
+    id: RecordingId,
+    directories: readonly ('media' | 'events' | 'cursors' | 'thumbs')[],
+    pacing: DeleteSourcesPacing = {},
+  ): Promise<string[]> {
+    const open = this.requireOpen(id);
+    if (open.project.retention === undefined) {
+      throw new RetentionNotAuthorisedError(id);
+    }
+    return this.enqueue(open, () => deleteBundleSources(open.paths, directories, pacing));
+  }
+
+  /**
+   * Bundles whose deletion began and did not finish — §7.5's *"the next launch sees
+   * a recording that has begun deletion and finishes it"*.
+   *
+   * The predicate is `retention` present and `state` not yet `exported`, and it is
+   * deliberately nothing else. Obligation 3 forbids deletion triggered by age, by
+   * disk pressure or by app launch, and the thing that keeps this on the right side
+   * of that line is that it can only ever act on a record a verified export already
+   * wrote. A launch-time sweep that looked for anything else — old recordings, large
+   * ones, exported-but-not-cleaned ones — would be the policy the captain was told
+   * he was not getting.
+   */
+  async listInterruptedRetention(): Promise<RecordingSummary[]> {
+    const summaries = await this.list();
+    return summaries.filter((s) => s.sourcesDeleted && s.state !== 'exported');
   }
 
   /**

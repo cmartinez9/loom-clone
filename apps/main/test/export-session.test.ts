@@ -462,9 +462,15 @@ describe('ExportSession', () => {
     expect(doc.exports[0]?.id).toBe(jobId);
     expect(doc.exports[0]?.verified?.lastFrameDecodable).toBe(true);
     expect(doc.exports[0]?.error).toBeUndefined();
-    // Phase 8 deletes nothing: the state is untouched and there is no retention record.
-    expect(doc.state).not.toBe('exported');
-    expect(doc.retention).toBeUndefined();
+    // Phase 9 now acts on that record: a verified-good export hands the recording to
+    // retention, which writes the record and sets the state. What it deletes, and
+    // that a *failed* export deletes nothing, is `phase9-retention.test.ts`'s
+    // question — this only pins that the two are wired together, because an export
+    // that verified and then left the recording editable would be phase 9 silently
+    // absent.
+    expect(result.sourcesDeleted).toBe(true);
+    expect(doc.state).toBe('exported');
+    expect(doc.retention?.reason).toBe('export-verified');
 
     // Progress reached the end monotonically rather than jumping there.
     expect(harness.progress.map((p) => p.phase)).toContain('verifying');
