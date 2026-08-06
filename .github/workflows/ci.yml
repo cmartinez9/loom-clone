@@ -27,6 +27,32 @@ name: ci
 # and `push` is kept for `main` alone. Nothing that was verified stops being verified;
 # it stops being verified twice over, concurrently, by the two jobs least able to
 # share a host.
+#
+# That closed one of the two ways this workflow ran the phase-6 gate beside a busy
+# macOS host, and left the other: `verify` and `mutation` are both `macos-14`, both
+# fire on every pull request, and with nothing between them they start in the same
+# second. `verify:mutation` is the heaviest thing this repo runs — it re-runs the
+# SIGKILL crash test, drives `/usr/bin/avconvert` through `media-part.test.ts`, and
+# launches the phase-4 and phase-11 Electron gates, once per mutation — and a
+# `macos-14` job is a VM on shared Apple hardware whose GPU the gate's own renderer
+# string names out loud ("Apple Paravirtual device"). Two of them can land on one
+# physical Mac, and on 2026-08-06 they did: `verify` measured the phase-6 gate from
+# 05:33:56 to 05:34:21 while `mutation` was inside two `avconvert` transcodes and the
+# crash test. The gate came back with a **GPU** composite of 18.08 ms median scrubbing
+# and 22.97 ms playing, against 2.37–2.48 ms on the three previous runs of the same
+# gate on the same runner class, while its CPU frame body stayed inside §8's budget
+# (worst 3.50 ms, 0 of 160 frames over). What failed was not a time: one playback
+# readback came back holding an all-dark frame-code band between two correct ones,
+# with no miss and no seek in that phase — a composite that did not reflect the
+# playhead, on a GPU running seven frames behind the loop that fed it.
+#
+# So `mutation` waits for `verify` rather than racing it. The second reason is that
+# the proof is only a proof over a green tree: `scripts/mutation-check.mjs` reads
+# "this test file exited non-zero" as "the mutation was caught", so every mutation
+# aimed at a file that was already failing is caught vacuously. The cost is that a
+# pull request's wall clock becomes `verify` + `mutation` instead of the longer of
+# them, and that a red `verify` skips the mutation proof — which is the run whose
+# answer would have meant nothing anyway.
 on:
   push:
     branches: [main]

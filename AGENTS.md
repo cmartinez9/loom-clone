@@ -150,8 +150,8 @@ second copy beside it — and its header says why.
 not a design.** Phase 8's `media/track-reader.ts` (`TrackReader`, `openVideoTrack`)
 and phase 14's `editor/screen-source.ts` (`ScreenSource`) were written independently,
 both implement `PreviewSource` over a track's parts, and both read `avcC` out of the
-part's own initialisation segment. §4.5 puts *"which source frame is selected for a
-given time"* on the list preview and export may never disagree about, so two
+part's own initialisation segment. §4.5 puts _"which source frame is selected for a
+given time"_ on the list preview and export may never disagree about, so two
 implementations of that selection is exactly the thing that list exists to prevent —
 one of them has to go, and `TrackReader` is the one both loops were already built to
 share.
@@ -1395,9 +1395,17 @@ was not a control.
   `npm run verify:mutation` 17 s before the phase-6 gate's window and the gate reported
   one frame at 29.10 ms, against a p99 of 1.80 ms and a 2.20 ms worst frame on the run
   before it, with the gate's own pure-arithmetic host control stretched from 8.50 ms to
-  11.40 ms in those same frames. **Never add a second macOS job that runs concurrently
-  with `verify`**: these three gates cannot tell a busy host apart from the defect they
-  exist to catch, and a job we start on purpose is a busy host we chose.
+  11.40 ms in those same frames. A second reading of the same overlap, run 31074470239,
+  shows it is not only a CPU effect: there the **GPU** composite came back at 18.08 ms
+  median scrubbing and 22.97 ms playing against 2.37–2.48 ms on three previous runs of
+  the same gate on the same runner class, while the CPU frame body stayed inside §8's
+  budget — and what failed was not a time but the picture, one playback readback
+  holding an all-dark frame-code band between two correct ones with no miss and no seek
+  in that phase. Serialising also costs nothing that was worth having: a mutation proof
+  over a red tree is vacuous, because `mutation-check.mjs` reads a non-zero exit as
+  "caught". **Never add a second macOS job that runs concurrently with `verify`**:
+  these three gates cannot tell a busy host apart from the defect they exist to catch,
+  and a job we start on purpose is a busy host we chose.
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
