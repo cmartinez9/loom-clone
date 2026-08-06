@@ -649,6 +649,20 @@ describe('two exports aimed at one destination', () => {
     avcC: fixture.avcC,
   });
 
+  /**
+   * Run every already-queued continuation, and no I/O at all.
+   *
+   * That asymmetry is what makes the two window tests deterministic rather than a
+   * race. A claim released *before* the awaited work is released by a continuation,
+   * which is pure microtask scheduling and therefore happens here. Everything
+   * `finalize` and `cancel` actually do — `handle.sync()`, `open`, `rename`,
+   * `unlink` — settles on the event loop, which a microtask drain cannot advance. So
+   * the window is guaranteed still open when the second `beginExport` lands.
+   */
+  async function drainMicrotasks(turns = 20): Promise<void> {
+    for (let i = 0; i < turns; i++) await Promise.resolve();
+  }
+
   async function appendFrames(jobId: string, from: number, to: number): Promise<void> {
     for (const [i, frame] of fixture.frames.slice(from, to).entries()) {
       await harness.store.appendExportSample(jobId, 'video', {
@@ -705,9 +719,68 @@ describe('two exports aimed at one destination', () => {
     expect(await readdir(harness.exportsDir)).toEqual(['Busy.mp4']);
   }, 60_000);
 
+  it('holds the destination for the whole of a finalize, not up to it', async () => {
+    // The window `finalize` opens: `<out>.partial` created, the whole mdat copied
+    // into it, fsync, `rename(2)` over `<out>`, then both scratch streams unlinked.
+    // Tens of seconds on a 4K export, and every path in it derives from `outputPath`.
+    // A second job admitted here sweeps the `.partial` away and a complete, correct
+    // export fails at its last step — so the claim has to span the call, not stop at
+    // it. The two release cases below only ever look at the state *around* finalize,
+    // which is why this one is asserted from inside.
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Muxing.mp4');
+
+    await store.beginExport('job-a', { outputPath, video: videoSpec() });
+    await appendFrames('job-a', 0, fixture.frames.length);
+
+    const finalizing = store.finalizeExport('job-a');
+    await drainMicrotasks();
+
+    const refusal: unknown = await store
+      .beginExport('job-b', { outputPath, video: videoSpec() })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ExportDestinationBusyError);
+
+    // ...and the export that was in the middle of being written is undamaged, which
+    // is the half that matters: a refusal that broke the job it was protecting would
+    // be worse than the collision.
+    const finished = await finalizing;
+    expect(finished.videoSampleCount).toBe(fixture.frames.length);
+    const movie = parseMovie(new Uint8Array(await readFile(outputPath)));
+    expect(movie.fastStart).toBe(true);
+    expect(movie.tracks.find((t) => t.handler === 'vide')?.samples).toHaveLength(
+      fixture.frames.length,
+    );
+    expect(await readdir(harness.exportsDir)).toEqual(['Muxing.mp4']);
+  }, 60_000);
+
+  it('holds the destination for the whole of a cancel, not up to it', async () => {
+    // Same shape, the other release site: `cancel()` is what unlinks the scratch and
+    // the `.partial`, so a job admitted before it finishes has its own freshly
+    // created scratch removed by this one's cleanup.
+    const { store } = harness;
+    const outputPath = join(harness.exportsDir, 'Abandoned.mp4');
+
+    await store.beginExport('job-a', { outputPath, video: videoSpec() });
+    await appendFrames('job-a', 0, 8);
+
+    const cancelling = store.cancelExport('job-a');
+    await drainMicrotasks();
+
+    const refusal: unknown = await store
+      .beginExport('job-b', { outputPath, video: videoSpec() })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ExportDestinationBusyError);
+
+    await cancelling;
+    expect(await readdir(harness.exportsDir)).toEqual([]);
+  }, 60_000);
+
   it('releases the destination when the job that held it is done', async () => {
     // The claim is on the export in flight, not on the name. Without this, a guard
-    // that never released would pass the test above and make every second export of
+    // that never released would pass the tests above and make every second export of
     // a recording fail for ever.
     const { store } = harness;
     const outputPath = join(harness.exportsDir, 'Again.mp4');

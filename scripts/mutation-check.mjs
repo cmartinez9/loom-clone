@@ -398,6 +398,34 @@ const MUTATIONS = [
     mustFail: [EXPORT_SESSION],
   },
   {
+    name: 'destination-released-before-the-mux',
+    breaks:
+      'the destination claim spanning the work it protects. `finalize` creates ' +
+      '`<out>.partial`, copies the whole mdat into it, fsyncs, renames it over ' +
+      '`<out>` and unlinks both scratch streams — tens of seconds on a 4K export. ' +
+      'Released a step early, a second job is admitted for all of it, and its sweep ' +
+      'removes the `.partial` the first is about to rename: a complete, correct ' +
+      'export reported as failed at its last step.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      return await writer.finalize();',
+    replace: '      this.openExports.delete(jobId);\n      return await writer.finalize();',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'destination-released-before-the-cancel',
+    breaks:
+      'the same claim spanning the other release site. `cancel()` is what unlinks ' +
+      'the scratch streams and the `.partial`, so a job admitted before it finishes ' +
+      'has its own freshly created scratch removed by the cleanup of the job it ' +
+      'replaced.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      const writer = await open.writer.catch(() => null);',
+    replace:
+      '      this.openExports.delete(jobId);\n' +
+      '      const writer = await open.writer.catch(() => null);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
     name: 'export-chunk-offsets-off-by-one',
     breaks:
       'every chunk offset in the exported moov points at the sample data. Off by a ' +

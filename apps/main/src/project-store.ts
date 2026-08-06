@@ -874,31 +874,51 @@ export class ProjectStore {
     else await writer.appendAudio(record);
   }
 
-  /** Assemble the file and move it into place. The writer is closed either way. */
+  /**
+   * Assemble the file and move it into place. The writer is closed either way.
+   *
+   * The destination claim is released in the `finally`, **after** `finalize` has
+   * settled, because that call is where the writer touches nearly every path derived
+   * from `outputPath`: it creates `<out>.partial`, copies the whole `mdat` into it,
+   * `fsync`s, `rename(2)`s it over `<out>`, and unlinks both scratch streams. On a
+   * multi-minute 4K export that is seconds to tens of seconds. Releasing before the
+   * await would hand the destination to a second job for all of it — and that job's
+   * {@link sweepExportScratch} would remove the `.partial` this one is about to
+   * rename, failing a complete and correct export at the last step.
+   */
   async finalizeExport(jobId: string): Promise<FinalizedExport> {
     const writer = await this.requireExport(jobId);
-    this.openExports.delete(jobId);
     try {
       return await writer.finalize();
     } catch (error) {
       await writer.cancel();
       throw error;
+    } finally {
+      this.openExports.delete(jobId);
     }
   }
 
   /**
    * Abandon an export, leaving nothing behind. Idempotent, and safe after
    * {@link finalizeExport} — the finished file has been renamed by then.
+   *
+   * Released in the `finally` for the same reason {@link finalizeExport} is:
+   * `cancel()` is what unlinks the scratch streams and the `.partial`, so a second
+   * job admitted before it finishes has its own freshly created scratch removed by
+   * this one's cleanup.
    */
   async cancelExport(jobId: string): Promise<void> {
     const open = this.openExports.get(jobId);
     if (open === undefined) return;
-    this.openExports.delete(jobId);
-    // A cancel that lands while the file is still being created still has to remove
-    // it, so the open is awaited rather than abandoned — and an open that failed is
-    // already cleaned up by `ExportMp4Writer.create`.
-    const writer = await open.writer.catch(() => null);
-    await writer?.cancel();
+    try {
+      // A cancel that lands while the file is still being created still has to remove
+      // it, so the open is awaited rather than abandoned — and an open that failed is
+      // already cleaned up by `ExportMp4Writer.create`.
+      const writer = await open.writer.catch(() => null);
+      await writer?.cancel();
+    } finally {
+      this.openExports.delete(jobId);
+    }
   }
 
   /**
