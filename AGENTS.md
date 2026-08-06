@@ -657,11 +657,21 @@ the preview host, playback transport, the timeline and trimming. The library's
 `editor` role keyed by the recording — which is what §1.2's `multiple: true` already
 meant by one editor per recording — and puts the id in the page's URL, so a window is
 _told_ what it is showing. That module also owns the other half of the lifetime:
-**closing an editor closes the project**, because `openProject` took the bundle
-`.lock` and a lock held by a window nobody can see is a recording the app cannot
-record over with nothing on screen to explain it. It refuses to open the bundle the
-recorder is using, and refuses to close that one, for a sharper reason: `close()`
-aborts every media part still open, and those are capture's own file descriptors.
+**closing an editor gives back the hold it took**, because `openProject` took the
+bundle `.lock` and a lock held by a window nobody can see is a recording the app
+cannot record over with nothing on screen to explain it. It is `releaseProject` and
+**not** `close`: an export of the same recording holds the same project for a job
+that outlives the window which started it (§1.2), and the library offers Open and
+Export on the same row for the same `editable` state — so an unconditional close
+there takes the lock and the `JournalWriter` out from under a running export, which
+then cannot record its own result and discards a verified MP4 already on disk. The
+two are indistinguishable in what a lone editor leaves behind, so
+`apps/main/test/editor-window.test.ts` asserts the method rather than the outcome and
+`closing-an-editor-closes-a-project-somebody-else-holds` is the mutation. It refuses
+to open the bundle the recorder is using, and refuses to release that one, for a
+sharper reason: `close()` aborts every media part still open, and those are capture's
+own file descriptors — with counted holds that guard is defence in depth rather than
+the only protection.
 
 **The framework question `library/main.ts` deferred to "phase 6 or 7" is answered
 here: vanilla TypeScript against the Pressroom design system, like the other four

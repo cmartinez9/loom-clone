@@ -180,6 +180,8 @@ const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
 /** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
 const EDITOR_GATE = 'test/editor-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
+/** Who may open an editor, and what closing one does to the bundle lock. */
+const EDITOR_WINDOW = 'apps/main/test/editor-window.test.ts';
 /** Seam S4's one adapter, shared by preview and export. */
 const TRACK_READER = 'apps/renderer/test/track-reader.test.ts';
 const EDL_CLIPS = 'packages/edl/test/clips.test.ts';
@@ -1482,6 +1484,22 @@ export const MUTATIONS = [
     find: '    return part === null ? null : part.reader.frameAt(t - part.startTimeSec);',
     replace: '    return part === null ? null : part.reader.frameAt(t);',
     mustFail: [TRACK_READER],
+  },
+  {
+    name: 'closing-an-editor-closes-a-project-somebody-else-holds',
+    breaks:
+      'the editor giving back its own hold rather than closing the project outright. ' +
+      'An export of the same recording is a second holder that outlives the window ' +
+      'which started it (§1.2), and the library offers Open and Export on the same ' +
+      'row for the same `editable` state — so closing the editor mid-export takes the ' +
+      'lock and the JournalWriter out from under the job. It then cannot record its ' +
+      'own result and discards a verified MP4 already on disk. Indistinguishable from ' +
+      'the correct call in the state a lone editor leaves behind, which is why the ' +
+      'test asserts the method and not only the outcome.',
+    file: 'apps/main/src/editor.ts',
+    find: '      store.releaseProject(key).catch((error: unknown) => {',
+    replace: '      store.close(key).catch((error: unknown) => {',
+    mustFail: [EDITOR_WINDOW],
   },
   {
     name: 'a-trim-handle-can-be-dragged-past-the-other',

@@ -1647,10 +1647,10 @@ export class ProjectStore {
    * live case rather than a hypothetical.
    *
    * So the arithmetic is the whole mechanism. Every `openProject` is one holder;
-   * this drops one; the project closes only at zero. Callers that never release —
-   * `project:open` and `applyOps`, which are an editor holding its document — keep
-   * the count above zero, which is exactly the outcome wanted: the export lets go and
-   * the editor keeps the lock.
+   * this drops one; the project closes only at zero. An editor's hold — taken by
+   * `project:open`, and by `applyOps` for a document it finds closed — lasts as long
+   * as its window, which is exactly the outcome wanted: whichever of the two finishes
+   * first lets go, and the other keeps the lock until it is done.
    */
   async releaseProject(id: RecordingId): Promise<void> {
     const held = this.holds.get(id);

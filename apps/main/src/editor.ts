@@ -8,10 +8,18 @@
  *    recording". The id goes into the page's URL, so the window is *told* what it
  *    is showing rather than asking, and a second `open` for the same recording
  *    focuses the window that already exists.
- *  - **close** — the window going away closes the project. That is not tidiness:
- *    `ProjectStore.openProject` takes the bundle `.lock`, and a lock held by a
- *    window nobody can see is a recording the user cannot open in a second
- *    instance and cannot record over, with nothing on screen to explain it.
+ *  - **close** — the window going away gives back the hold it took. That is not
+ *    tidiness: `ProjectStore.openProject` takes the bundle `.lock`, and a lock held
+ *    by a window nobody can see is a recording the user cannot open in a second
+ *    instance and cannot record over, with nothing on screen to explain it. It is
+ *    `releaseProject` rather than `close`, because the editor is one holder among
+ *    possibly several: an export of the same recording holds it too (§1.2 — the job
+ *    outlives the window that started it), and the library offers Open and Export on
+ *    the same row for the same `editable` state, so closing the editor mid-export is
+ *    an ordinary thing to do. An unconditional `close` there would pull the lock and
+ *    the `JournalWriter` out from under a running job. The project closes when the
+ *    count reaches zero, which for the common case — one editor, nothing else — is
+ *    still the moment the window goes.
  *
  * ## Why an editor is refused while the recorder holds the same bundle
  *
@@ -65,15 +73,20 @@ export class EditorWindows {
 
     windows.onClosed((role, key) => {
       if (role !== 'editor') return;
-      // The recorder's own bundle is never closed from here — see the header. It
-      // cannot normally be open in an editor at all; this is the second guard,
-      // because the cost of getting it wrong is somebody's footage.
+      // The recorder's own bundle is never released from here — see the header. It
+      // cannot normally be open in an editor at all, and the counted release below
+      // would not close a project the recorder is also holding; this is defence in
+      // depth rather than the only protection, kept because the cost of the counting
+      // being wrong here is somebody's footage.
       if (key === this.#options.activeRecordingId()) return;
-      store.close(key).catch((error: unknown) => {
+      // The editor's own hold and no more. An editor that was refused before
+      // `project.open` succeeded never took one, and releasing a project with no
+      // holder is a no-op rather than an error, so the pairing needs nothing here.
+      store.releaseProject(key).catch((error: unknown) => {
         // Reported and not rethrown: the window is already gone, so there is
         // nobody to tell, and the next launch's `sweepTempArtifacts` and lock
         // acquisition are what actually recover from a flush that failed.
-        console.error(`[editor] closing project ${key} failed:`, error);
+        console.error(`[editor] releasing project ${key} failed:`, error);
       });
     });
   }

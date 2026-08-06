@@ -207,14 +207,19 @@ export class TimelineUi {
       if (next !== null) this.#callbacks.onTrimCommit(next);
     };
 
-    for (const target of [lanes, handleStart, handleEnd]) {
-      target.addEventListener('pointermove', move);
-      target.addEventListener('pointerup', end);
-      // A cancelled pointer — the window losing focus mid-drag — commits what the
-      // user had, rather than leaving a provisional trim on screen that no
-      // pointerup will ever turn into an edit.
-      target.addEventListener('pointercancel', end);
-    }
+    // Once, on `lanes`, and never on the handles as well. The handles are its
+    // children and `setPointerCapture` retargets without stopping the bubble, so a
+    // listener on each would run `move` twice per `pointermove` — and each run
+    // rebuilds the ruler and every lane, which is the one thing this window's input
+    // path may not do. `lanes` sees the event either way: by its own capture while
+    // the playhead is being dragged, and by bubbling from the captured handle while
+    // a trim is. A drag that wanders outside the element still arrives for the same
+    // reason, and `pointercancel` — the window losing focus mid-drag — still commits
+    // what the user had rather than leaving a provisional trim on screen that no
+    // pointerup will ever turn into an edit.
+    lanes.addEventListener('pointermove', move);
+    lanes.addEventListener('pointerup', end);
+    lanes.addEventListener('pointercancel', end);
 
     // Wheel: horizontal scroll, or zoom with the modifier a trackpad pinch sends.
     lanes.addEventListener(
