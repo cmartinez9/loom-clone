@@ -319,21 +319,49 @@ describe('RECOVERY_COPY', () => {
     expect(sentence).toContain('12,344');
   });
 
+  const failed: RecoveryReport = {
+    ...repaired,
+    recovered: false,
+    recoveredSec: 0,
+    frameCount: 0,
+    truncatedBytes: 0,
+    error: 'no complete frame survived the crash',
+  };
+
   it('pluralises the heading and keeps a failed recording in the library', () => {
     expect(RECOVERY_COPY.heading([repaired, repaired])).toBe(
       '2 recordings were recovered after an unexpected quit',
     );
-    const failed: RecoveryReport = {
-      ...repaired,
-      recovered: false,
-      recoveredSec: 0,
-      frameCount: 0,
-      truncatedBytes: 0,
-      error: 'no complete frame survived the crash',
-    };
     expect(RECOVERY_COPY.failed(failed)).toBe(
       '“Untitled 3” could not be repaired: no complete frame survived the crash. ' +
         'It is still in your library, marked damaged.',
+    );
+  });
+
+  it('never announces a recovery over a pass that recovered nothing', () => {
+    // §7.1 step 5's *"never silently pretend it was clean"*, and the exact shape it
+    // fails in: `recoverOnLaunch` reports every crashed bundle it touched, repaired
+    // or not, so a headline counting the *reports* puts "A recording was recovered"
+    // directly above "“Untitled 3” could not be repaired". The heading counts what
+    // was repaired.
+    expect(RECOVERY_COPY.heading([failed])).toBe(
+      'A recording could not be recovered after an unexpected quit',
+    );
+    expect(RECOVERY_COPY.heading([failed])).not.toMatch(/was recovered/);
+    expect(RECOVERY_COPY.heading([failed, failed])).toBe(
+      '2 recordings could not be recovered after an unexpected quit',
+    );
+  });
+
+  it('says both counts when a pass repaired some and not others', () => {
+    // The mixed shape, where either count alone is a half-truth: a headline about
+    // the repaired ones hides a damaged recording, and one about the damaged ones
+    // buries the good news the user came for.
+    expect(RECOVERY_COPY.heading([repaired, failed])).toBe(
+      'A recording was recovered after an unexpected quit, and 1 could not be',
+    );
+    expect(RECOVERY_COPY.heading([repaired, repaired, failed])).toBe(
+      '2 recordings were recovered after an unexpected quit, and 1 could not be',
     );
   });
 });

@@ -71,7 +71,12 @@ import {
   type VideoPartReport,
   type VideoTrackFacts,
 } from '@loom/ipc';
-import { DiskMonitor, type DiskReader } from './disk-monitor.ts';
+import {
+  DiskMonitor,
+  diskReadDeadlineMs,
+  readSpaceBeforeDeadline,
+  type DiskReader,
+} from './disk-monitor.ts';
 import {
   AUDIO_TRACK_KEYS,
   DEFAULT_RECORDING_NAME,
@@ -102,6 +107,7 @@ import {
   startInputSampler,
   type HelperClockReading,
 } from '../input-sampler.ts';
+import { measureLibraryRate } from '../disk.ts';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
@@ -262,6 +268,19 @@ export interface RecorderSessionOptions {
  * cadence — enough that the number describes the content rather than the start.
  */
 const MEASURED_RATE_FLOOR_SEC = 2;
+
+/**
+ * What a rate reads as when **nothing** has been measured — not this recording, and
+ * not the user's library either.
+ *
+ * A first run, and only a first run. `source: 'reference'` is what stops it being
+ * reported as a measurement, which is the whole reason the field exists.
+ */
+const REFERENCE_RATE: CaptureRate = {
+  bytesPerSec: REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,
+  source: 'reference',
+  sampleCount: 0,
+};
 
 /** One audio track's state while it is being recorded. */
 interface ActiveAudio {
@@ -484,6 +503,19 @@ export class RecorderSession {
   private readonly diskMonitor: DiskMonitor;
   private lastDisk: DiskReading | null = null;
   private diskStop: DiskStopNotice | null = null;
+  /**
+   * What a second has cost this user across their own library, resolved **once per
+   * recording** in {@link start} and reused by every poll below
+   * {@link MEASURED_RATE_FLOOR_SEC}.
+   *
+   * Once, and never on a poll, because `measureLibraryRate` is a recursive walk of
+   * every bundle on disk: §7.2's monitor runs every 2 s for the length of a
+   * recording, and that walk on that path would sit in the store's queues beside the
+   * media appends — and what is queued in memory is exactly what a crash costs.
+   * `null` before the first recording of the process, which is the only state
+   * {@link REFERENCE_RATE} answers.
+   */
+  private libraryRate: CaptureRate | null = null;
   /**
    * What {@link RecorderSession.recoverOnLaunch} found, held for the life of the
    * process. See {@link RecorderSession.recoveryReports}.
@@ -723,6 +755,13 @@ export class RecorderSession {
     // a refusal that only lives there is a refusal any other caller — a menu item,
     // a global shortcut, `smoke-capture.mjs` — walks straight past. This runs
     // before `store.create`, so a refused start leaves no bundle behind.
+    //
+    // The library rate is resolved first and here, because this recording has
+    // written nothing yet and its own bytes cannot answer §7.2's capacity estimate
+    // for another two seconds. It is one walk per recording rather than one per
+    // poll, and it is an accessory like everything else on this path: a library that
+    // could not be listed costs the *provenance* of a number, never the recording.
+    this.libraryRate = await measureLibraryRate(this.options.store);
     const reading = await this.readDisk();
     this.lastDisk = reading;
     if (diskRefusesStart(reading)) {
@@ -2268,10 +2307,18 @@ export class RecorderSession {
    * Never throws, for the reason the monitor never does: a volume this process
    * could not measure must not be the thing that stops a user recording. It comes
    * back `unknown`, and every predicate over that answers "no".
+   *
+   * **And never waits for ever**, for the same reason and through the same function:
+   * a `statfs` that does not return would otherwise wedge the Record button with no
+   * recording, no message and nothing on screen that says why.
    */
   private async readDisk(): Promise<DiskReading> {
     try {
-      return classifyDisk(await this.options.disk(), this.captureRate());
+      const space = await readSpaceBeforeDeadline(
+        () => this.options.disk(),
+        diskReadDeadlineMs(this.options.diskIntervalMs),
+      );
+      return classifyDisk(space, this.captureRate());
     } catch (error) {
       console.error('[recorder] free space could not be read:', error);
       return classifyDisk(null, this.captureRate());
@@ -2289,18 +2336,19 @@ export class RecorderSession {
    * {@link REFERENCE_CAPTURE_RATE_BYTES_PER_SEC}.
    *
    * Below {@link MEASURED_RATE_FLOOR_SEC} there is nothing honest to divide, and the
-   * reference figure answers **and says so** — `CaptureRate.source` is what stops the
-   * fallback from being reported as a measurement.
+   * question falls to **the user's own library** — {@link libraryRate}, resolved once
+   * at {@link start}. §5.6's 35× spread is the argument for that too: a machine whose
+   * recordings have averaged 4 MB/min would otherwise be told about somebody else's
+   * screen for the first two seconds of every recording, and then watch the estimate
+   * jump by an order of magnitude. {@link REFERENCE_RATE} is reached only where
+   * neither has anything to say — a first run — and `CaptureRate.source` is what
+   * stops any of the three from being reported as the wrong one.
    */
   private captureRate(): CaptureRate {
     const active = this.active;
     const seconds = this.elapsedSec();
     if (active === null || seconds < MEASURED_RATE_FLOOR_SEC || active.bytesWritten <= 0) {
-      return {
-        bytesPerSec: REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,
-        source: 'reference',
-        sampleCount: 0,
-      };
+      return this.libraryRate ?? REFERENCE_RATE;
     }
     return { bytesPerSec: active.bytesWritten / seconds, source: 'measured', sampleCount: 1 };
   }

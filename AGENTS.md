@@ -996,6 +996,21 @@ predicate answers "no" for `unknown` — so a volume this process cannot measure
 nothing and stops nothing. A monitor that could fail a recording would be a new way to
 lose footage installed by the thing meant to prevent one.
 
+**And every wait on the volume has a deadline on it**, `readSpaceBeforeDeadline`, shared
+by the poll and by `RecorderSession.start`'s preflight because it is one hazard in two
+places. A `statfs` that never returns — against the volume being watched _because_ it is
+in trouble — wedged the in-flight guard for good: every later tick returned immediately,
+nothing was published, nothing was logged, and §7.2's stop became unreachable while the
+disk filled. The deadline is half the poll interval (`diskReadDeadlineMs`), so a
+timed-out read lands back inside its own interval and cannot stack polls; it bands the
+volume `unknown` and **says so** in the log, because the silence was half the defect.
+The guard is released on every exit and reset by `start()` behind a generation counter,
+so a poll the previous recording left in flight neither swallows this one's immediate
+reading nor publishes against it. `a-stalled-disk-read-switches-the-monitor-off` is the
+mutation. `ProjectStore.diskSpace()` reads first and `mkdir`s only on `ENOENT` for the
+same reason: on a path a data-loss safeguard polls, a reading `statfs` alone could have
+answered must not be lost to a write failing.
+
 **The capacity estimate is measured, and says whose measurement it is.**
 `CaptureRate.source` is `measured` or `reference` and is never smoothed away: during a
 recording the rate is that recording's own bytes (counted at the `appendMediaChunk`
@@ -1004,7 +1019,13 @@ is `measureCaptureRate` over the user's own library, weighted by seconds; and
 `REFERENCE_CAPTURE_RATE_BYTES_PER_SEC` — research §5.6's 76 MB/min — answers only a
 first run. §5.6 measured a 35× spread between an idle screen and full-screen animation,
 so a bare "≈ 42 min available" from that constant is a sentence about somebody else's
-screen.
+screen. The library rate is resolved **once per recording**, in `start()`, and reused by
+every poll below the 2 s floor: `store.list()` is a recursive walk of every bundle on
+disk and must never land on the 2 s poll path beside the media appends it would queue
+with. It is an accessory like the rest — a library that cannot be listed costs the
+_provenance_ of the estimate, never the recording. `DISK_COPY.capacity` is rendered on
+the library's masthead, which is §7.2's estimate on a volume that is _not_ refusing:
+the refusal banner covers the other end, and between them the sentence is on a screen.
 
 **§7.2's "< 2 min of headroom" clause cannot fire, and is kept at §7.2's value anyway** —
 the shape `minDurationSec: 1.0` already has in `auto-zoom.ts`. Two minutes of headroom
@@ -1039,6 +1060,15 @@ scanning the fragments that survived. It states no loss window at all: this proj
 guarantee is frame-level (the fragment writer holds one sample), a stale string claiming
 otherwise has already had to be corrected here once, and both
 `packages/ipc/test/disk.test.ts` and `apps/main/test/recovery-notice.test.ts` refuse one.
+
+**The headline counts what was _repaired_, not what was looked at.** `recoverOnLaunch`
+reports every crashed bundle it touched, repaired or not, so a heading over
+`reports.length` announced "A recording was recovered after an unexpected quit" directly
+above "could not be repaired: …" — _"silently pretend it was clean"_ phrased kindly,
+which is the one thing this surface exists to prevent. All three shapes have their own
+words (repaired-only, failed-only, and mixed, which names both counts), all three are
+pinned in the copy test, and
+`the-recovery-heading-counts-recordings-it-could-not-repair` is the mutation.
 
 **Two library state notes were wrong about when recovery happens and are corrected.**
 `needs-recovery` said the bundle would be repaired _"when opened"_; it is repaired at

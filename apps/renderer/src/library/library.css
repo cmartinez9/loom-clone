@@ -92,6 +92,23 @@ h1.t-d1 {
   text-overflow: ellipsis;
 }
 
+/* §7.2's capacity estimate, in the masthead with the other facts about this library.
+   Quiet on purpose: a volume with room is not news, and painting it the way the
+   refusal below is painted would make every ordinary launch look like a fault. */
+.disk-capacity {
+  margin: var(--sp-2) 0 0;
+  color: var(--fg-subtle);
+  font-size: var(--ui-xs);
+  line-height: var(--ui-xs-lh);
+}
+
+/* The `[hidden]` trap the banners below document, applied ahead of needing it: an
+   author `display` outranks the UA's `[hidden] { display: none }`, and a rule added
+   here later would otherwise leave this line on screen with nothing in it. */
+.disk-capacity[hidden] {
+  display: none;
+}
+
 /* ---------- toolbar ---------- */
 .toolbar {
   display: flex;

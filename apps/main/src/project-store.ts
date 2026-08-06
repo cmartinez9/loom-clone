@@ -531,10 +531,24 @@ export class ProjectStore {
    * continue when its instrument fails.
    */
   async diskSpace(): Promise<DiskSpace> {
-    // A first launch has settings but no recordings directory yet, and `statfs` of
-    // a path that is not there is `ENOENT` rather than an answer about its volume.
-    // Creating it is what `create()` would do a moment later anyway.
-    await mkdir(this.recordingsRoot, { recursive: true });
+    try {
+      return await this.readVolume();
+    } catch (error) {
+      // A first launch has settings but no recordings directory yet, and `statfs` of
+      // a path that is not there is `ENOENT` rather than an answer about its volume.
+      // Creating it is what `create()` would do a moment later anyway — but only on
+      // the one error that means it, and only after the read has been tried. This
+      // method is on §7.2's 2 s poll for the whole length of every recording, and a
+      // reading `statfs` alone could have answered must not be lost to a *write*
+      // failing: an `EACCES` or an `EROFS` ahead of it would band the volume
+      // `unknown`, which refuses nothing and stops nothing.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await mkdir(this.recordingsRoot, { recursive: true });
+      return await this.readVolume();
+    }
+  }
+
+  private async readVolume(): Promise<DiskSpace> {
     const stats = await statfs(this.recordingsRoot);
     return {
       freeBytes: stats.bavail * stats.bsize,

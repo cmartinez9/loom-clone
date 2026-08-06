@@ -16,7 +16,13 @@ import { formatBytes, formatDuration, formatRelativeDate, icon, mountIcons } fro
 import { RETENTION_COPY } from '@loom/format';
 import type { ProjectState, RecordingSummary } from '@loom/format';
 import { DISK_COPY, RECOVERY_COPY } from '@loom/ipc';
-import type { ExportProgress, PreflightReport, RecorderStatus, RecoveryReport } from '@loom/ipc';
+import type {
+  DiskReading,
+  ExportProgress,
+  PreflightReport,
+  RecorderStatus,
+  RecoveryReport,
+} from '@loom/ipc';
 import { describePermission } from '@loom/permissions';
 import { exportNotice } from './export-notice.ts';
 
@@ -30,6 +36,7 @@ const newRecordingButton = must('new-recording');
 const permissionsButton = must('permissions');
 const permBanner = must('perm-banner');
 const recoveryBanner = must('recovery-banner');
+const diskCapacity = must('disk-capacity');
 
 /** An element the page is required to contain; a missing one is a broken build. */
 function must(id: string): HTMLElement {
@@ -571,35 +578,63 @@ function messageOf(error: unknown): string {
  * would produce cannot disagree.
  */
 function renderPreflight(preflight: PreflightReport): void {
+  renderCapacity(preflight.disk);
+
+  // Two states, three branches. `blocking` is empty exactly when the one required
+  // grant is held, so a preflight that is not ready with nothing blocking is the
+  // disk and can only be the disk.
   const diskRefused = !preflight.ready && preflight.blocking.length === 0;
-  if (preflight.blocking.length === 0 && !diskRefused) {
-    permBanner.hidden = true;
-    permBanner.replaceChildren();
-    return;
-  }
-
-  const text = document.createElement('p');
-  text.textContent =
-    preflight.blocking.length === 0
-      ? DISK_COPY.refusal(preflight.disk)
-      : preflight.blocking
-          .map((kind) => describePermission(kind, preflight.report.statuses[kind]))
-          .join(' ');
-
-  if (preflight.blocking.length === 0) {
+  if (diskRefused) {
+    const text = document.createElement('p');
+    text.textContent = DISK_COPY.refusal(preflight.disk);
     permBanner.replaceChildren(iconSpan('alert', 17), text);
     permBanner.hidden = false;
     return;
   }
 
-  const open = button('Open setup', 'btn btn-sm');
-  open.prepend(iconSpan('lock', 14));
-  open.addEventListener('click', () => {
-    loom.setup.open();
-  });
+  if (preflight.blocking.length > 0) {
+    const text = document.createElement('p');
+    text.textContent = preflight.blocking
+      .map((kind) => describePermission(kind, preflight.report.statuses[kind]))
+      .join(' ');
+    const open = button('Open setup', 'btn btn-sm');
+    open.prepend(iconSpan('lock', 14));
+    open.addEventListener('click', () => {
+      loom.setup.open();
+    });
+    permBanner.replaceChildren(iconSpan('alert', 17), text, open);
+    permBanner.hidden = false;
+    return;
+  }
 
-  permBanner.replaceChildren(iconSpan('alert', 17), text, open);
-  permBanner.hidden = false;
+  permBanner.hidden = true;
+  permBanner.replaceChildren();
+}
+
+/**
+ * §7.2's *"Show estimated capacity: '≈ 42 min available'"*, which until now was
+ * written and never rendered.
+ *
+ * The words are `DISK_COPY.capacity` verbatim rather than a number re-derived here:
+ * main measures the volume, `@loom/ipc` decides what the measurement means, and a
+ * second arithmetic in a renderer is how the masthead and the HUD's banner come to
+ * say different things about one disk. Provenance rides along in that sentence —
+ * "at what your recordings have averaged" against "at a typical recording's size" —
+ * because §5.6 measured a 35× spread and the second of those is somebody else's
+ * screen.
+ *
+ * A reading that could not be taken shows nothing at all. `DISK_COPY.capacity` has a
+ * sentence for it, but a permanent "free space could not be measured" on the masthead
+ * is a fault report about an instrument, and §7.2's monitor is explicitly an accessory.
+ */
+function renderCapacity(disk: DiskReading): void {
+  if (disk.capacitySec === null) {
+    diskCapacity.hidden = true;
+    diskCapacity.textContent = '';
+    return;
+  }
+  diskCapacity.textContent = DISK_COPY.capacity(disk);
+  diskCapacity.hidden = false;
 }
 
 // --------------------------------------------------------------- recovery
@@ -671,6 +706,9 @@ async function refreshPermissions(): Promise<void> {
     // claiming one would send the user to a screen that has nothing to fix.
     console.error('[library] preflight failed:', error);
     permBanner.hidden = true;
+    // Including the estimate: a stale "≈ 42 min available" beside a preflight that
+    // could not be run is a number nothing currently stands behind.
+    diskCapacity.hidden = true;
   }
 }
 

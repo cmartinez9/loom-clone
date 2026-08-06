@@ -38,7 +38,7 @@ export async function readDiskForPreflight(store: ProjectStore): Promise<DiskRea
       console.error('[disk] free space could not be read:', error);
       return null;
     }),
-    measureRate(store),
+    measureLibraryRate(store),
   ]);
   return classifyDisk(space, rate);
 }
@@ -48,9 +48,18 @@ export async function readDiskForPreflight(store: ProjectStore): Promise<DiskRea
  *
  * `list()` measures every bundle on disk, which is the same walk the library window
  * does on every refresh — so this is a cost the app already pays whenever a surface
- * that would show this estimate is open.
+ * that would show this estimate is open. **It is also why this is never called on a
+ * poll**: §7.2's monitor runs every 2 s for the length of a recording, and a
+ * recursive walk of the recordings root on that path would be queueing behind — and
+ * in front of — the media appends. `RecorderSession` resolves it once per recording
+ * and reuses the answer, which is the only shape this is safe in.
+ *
+ * Exported so that there is one of it. The recorder and the preflight are answering
+ * the same question about the same library, and two implementations of "what has a
+ * second cost this user" is a number that can disagree with itself between the HUD
+ * and the library window.
  */
-async function measureRate(store: ProjectStore): Promise<CaptureRate> {
+export async function measureLibraryRate(store: ProjectStore): Promise<CaptureRate> {
   try {
     return measureCaptureRate(await store.list());
   } catch (error) {

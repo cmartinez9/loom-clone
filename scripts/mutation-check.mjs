@@ -1658,6 +1658,48 @@ export const MUTATIONS = [
       "      `${report.frameCount.toLocaleString('en-US')} frames were kept`;",
     mustFail: [IPC_DISK, PHASE13_RECOVERY],
   },
+  {
+    name: 'the-recovery-heading-counts-recordings-it-could-not-repair',
+    breaks:
+      '§7.1 step 5\'s *"never silently pretend it was clean"* on the one surface built ' +
+      'to keep it. `recoverOnLaunch` reports every crashed bundle it touched, repaired ' +
+      'or not, so a headline counting the *reports* puts "A recording was recovered ' +
+      'after an unexpected quit" directly above "could not be repaired: …". That is ' +
+      'the app claiming an outcome it did not reach, phrased kindly.',
+    file: 'packages/ipc/src/index.ts',
+    find: '    const repaired = reports.filter((report) => report.recovered).length;',
+    replace: '    const repaired = reports.length;',
+    mustFail: [IPC_DISK],
+  },
+  {
+    name: 'a-stalled-disk-read-switches-the-monitor-off',
+    breaks:
+      "§7.2's monitor, silently, under exactly the condition it exists for. The read " +
+      'is a `statfs` against the volume being watched *because* that volume is in ' +
+      'trouble; without a deadline on it one read that never settles holds the ' +
+      'in-flight guard for good, so every later tick returns immediately — no ' +
+      'reading, no banner, no log line, and the clean stop unreachable while the disk ' +
+      'fills to `ENOSPC`. A safety net that switches itself off is worse than none, ' +
+      'because the user is told nothing and believes they are covered.',
+    file: 'apps/main/src/recorder/disk-monitor.ts',
+    find: '    const answer = await Promise.race([read(), deadline]);',
+    replace: '    const answer = await read();',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-first-seconds-of-a-recording-ignore-the-users-own-library',
+    breaks:
+      "§7.2's capacity estimate being a measurement for the first two seconds of every " +
+      'recording. Below `MEASURED_RATE_FLOOR_SEC` the recording has nothing of its own ' +
+      "to divide, and what should answer is the user's own finished recordings — §5.6 " +
+      'measured a 35× spread, so the research constant there is a sentence about ' +
+      "somebody else's screen, followed by the estimate jumping an order of magnitude " +
+      'once the recording measures itself.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '      return this.libraryRate ?? REFERENCE_RATE;',
+    replace: '      return REFERENCE_RATE;',
+    mustFail: [PHASE13_DISK],
+  },
 ];
 
 /**

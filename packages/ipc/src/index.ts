@@ -973,11 +973,25 @@ export interface RecoveryReport {
  * Pinned by `packages/ipc/test/disk.test.ts` beside §7.2's, for the same reason.
  */
 export const RECOVERY_COPY = {
-  /** The headline over a launch that repaired something. */
+  /**
+   * The headline over a launch that found something, counting **what was repaired**
+   * rather than what was looked at.
+   *
+   * `recoverOnLaunch` reports every crashed bundle it touched, repaired or not, so a
+   * headline over `reports.length` announces a recovery above a body that says the
+   * recording could not be repaired — *"silently pretend it was clean"* phrased more
+   * kindly, which is the one thing §7.1 step 5 forbids. All three shapes are said in
+   * their own words: a pass that repaired everything, a pass that repaired nothing,
+   * and a mixed one, which names both counts because either alone is a half-truth.
+   */
   heading(reports: readonly RecoveryReport[]): string {
-    return reports.length === 1
-      ? 'A recording was recovered after an unexpected quit'
-      : `${String(reports.length)} recordings were recovered after an unexpected quit`;
+    const repaired = reports.filter((report) => report.recovered).length;
+    const damaged = reports.length - repaired;
+    if (repaired === 0) {
+      return `${countOfRecordings(damaged)} could not be recovered after an unexpected quit`;
+    }
+    const recovered = `${countOfRecordings(repaired)} ${repaired === 1 ? 'was' : 'were'} recovered after an unexpected quit`;
+    return damaged === 0 ? recovered : `${recovered}, and ${String(damaged)} could not be`;
   },
 
   /**
@@ -1010,6 +1024,11 @@ export const RECOVERY_COPY = {
     );
   },
 } as const;
+
+/** `A recording` / `3 recordings`, for the headline above. */
+function countOfRecordings(count: number): string {
+  return count === 1 ? 'A recording' : `${String(count)} recordings`;
+}
 
 /**
  * `m:ss`, for the sentences above.
