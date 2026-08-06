@@ -67,6 +67,19 @@ export interface TimestampReport {
   fadingMeanDiff: number;
   /** What that weight should be, from the fixture's own four-line arithmetic. */
   fadingWeight: number;
+  /**
+   * What the revealing stroke's `progress` should be at `t`, from the fixture's own
+   * arithmetic (phase 12).
+   *
+   * The reveal is checked as *growth* rather than as an absolute count: how many
+   * pixels a fraction of a zig-zag covers depends on the stroke width, the join
+   * geometry and the coverage ramp, and an expectation that predicted the number
+   * would be a second implementation of the thing it is judging. What the gate can
+   * say without one is that at `progress = 0` the ink is absent, and that between
+   * two unzoomed timestamps a longer stroke never covers fewer pixels — which a
+   * truncation by point index or by nothing at all both fail.
+   */
+  revealProgress: number;
 }
 
 /** A control: something that must be true only because the check can see it fail. */
@@ -100,6 +113,12 @@ export interface GoldenReport {
    * exercises it deliberately should ever raise this.
    */
   textSpansWithoutAtlas: number;
+  /**
+   * Strokes skipped because the coverage pass could not allocate its scratch target
+   * — the other condition the annotation surface degrades through rather than
+   * refusing. Any run with ink in it that reports one drew less than it composited.
+   */
+  strokesWithoutScratch: number;
   /** Glyphs the atlas rasterised, so an empty atlas cannot pass as a text pass. */
   atlasGlyphs: number;
   logs: string[];

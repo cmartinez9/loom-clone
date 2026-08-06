@@ -1,7 +1,7 @@
 /**
  * The annotation passes, in GLSL ES 3.00.
  *
- * Four programs, in the order `render()` runs them:
+ * Six programs, in the order `render()` runs them:
  *
  *  1. {@link BLUR_FRAGMENT_SHADER} — one axis of a separable Gaussian, over the
  *     whole render target. Run twice per blur span (h then v), and more than twice
@@ -12,6 +12,9 @@
  *  3. {@link SHAPE_FRAGMENT_SHADER} — arrow, rect, ellipse, highlight and the solid
  *     `mask`, as signed distance fields evaluated in **output pixels**.
  *  4. {@link TEXT_FRAGMENT_SHADER} — glyph quads out of a caller-supplied atlas.
+ *  5. {@link STROKE_COVERAGE_FRAGMENT_SHADER} — one hand-drawn stroke's polyline,
+ *     as capsules, accumulated into a scratch target with `MAX` blending.
+ *  6. {@link STROKE_COMPOSITE_FRAGMENT_SHADER} — that coverage, put down as ink once.
  *
  * ## Why the SDFs are in output pixels and the antialiasing is a fixed 1 px
  *
@@ -364,5 +367,109 @@ void main() {
   float a = texture(u_atlas, v_uv).a;
   if (a <= 0.0) discard;
   fragColor = vec4(u_fill.rgb, u_fill.a * a * u_opacity);
+}
+`;
+
+// ---- the stroke pass (phase 12) ---------------------------------------------
+
+/**
+ * Vertices per segment quad, and floats per vertex.
+ *
+ * A segment is two triangles. Each vertex carries its own output-pixel position and,
+ * **flat**, the segment's two endpoints — so the fragment stage evaluates a capsule
+ * SDF against the real segment rather than against an interpolated approximation of
+ * it. Six floats a vertex, thirty-six a segment.
+ */
+export const STROKE_VERTS_PER_SEGMENT = 6;
+export const STROKE_FLOATS_PER_VERTEX = 6;
+
+/**
+ * Segments in one draw. A longer stroke is drawn in several, into the same target.
+ *
+ * Batching rather than truncating, because a stroke that stops halfway along is a
+ * silently wrong picture and this file's whole discipline is that a failure is
+ * either loud or absent. 512 segments is 18,432 floats — 73 KB of `DYNAMIC_DRAW`,
+ * uploaded once per batch.
+ */
+export const MAX_STROKE_SEGMENTS_PER_BATCH = 512;
+
+/**
+ * The polyline's coverage, accumulated in a scratch target.
+ *
+ * **Why a scratch and not straight into the frame.** Consecutive capsules overlap by
+ * construction — that is what makes the joins round — so drawing them one after the
+ * other with ordinary `SRC_ALPHA` blending composites the ink over itself at every
+ * joint. At full opacity that is invisible; at the 35% a highlighter draws with, or
+ * anywhere in a `blendMs` crossfade, it is a string of dark beads along the line. So
+ * coverage is accumulated with `blendEquation(MAX)` into a scratch, where overlap is
+ * idempotent, and the stroke is composited **once** from it.
+ */
+export const STROKE_VERTEX_SHADER = `#version 300 es
+in vec2 a_px;
+in vec4 a_seg;
+
+uniform vec2 u_outputSize;
+
+flat out vec4 v_seg;
+out vec2 v_px;
+
+void main() {
+  vec2 ndc = vec2(a_px.x / u_outputSize.x * 2.0 - 1.0,
+                  1.0 - a_px.y / u_outputSize.y * 2.0);
+  gl_Position = vec4(ndc, 0.0, 1.0);
+  v_px = a_px;
+  v_seg = a_seg;
+}
+`;
+
+/** One capsule's coverage, written to every channel so the composite can read any. */
+export const STROKE_COVERAGE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+
+/** Half the stroke width, output pixels. */
+uniform float u_half;
+
+flat in vec4 v_seg;
+in vec2 v_px;
+out vec4 fragColor;
+
+${SDF_LIBRARY}
+
+void main() {
+  float d = sdSegment(v_px, v_seg.xy, v_seg.zw) - u_half;
+  float a = coverage(d);
+  if (a <= 0.0) discard;
+  fragColor = vec4(a);
+}
+`;
+
+/**
+ * Put the accumulated coverage down as ink, once.
+ *
+ * The colour is a uniform and the scratch carries only coverage, so a stroke costs
+ * one texture whatever colour it is — the same arrangement the text pass uses with
+ * its atlas, and for the same reason.
+ */
+export const STROKE_COMPOSITE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D u_src;
+uniform vec2 u_outputSize;
+uniform vec4 u_ink;
+uniform float u_opacity;
+
+in vec2 v_px;
+out vec4 fragColor;
+
+void main() {
+  // The scratch is a full-target render target: v = 0 is its bottom row and v_px is
+  // top-left origin, so the y is flipped exactly once here — the same single flip
+  // \`REGION_FRAGMENT_SHADER\` does.
+  vec2 uv = vec2(v_px.x / u_outputSize.x, 1.0 - v_px.y / u_outputSize.y);
+  float cov = texture(u_src, uv).a;
+  float a = cov * u_ink.a * u_opacity;
+  if (a <= 0.0) discard;
+  fragColor = vec4(u_ink.rgb, a);
 }
 `;

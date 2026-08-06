@@ -29,10 +29,13 @@ import {
   type CaptureEndReport,
   type CaptureOptions,
   type ChunkMsg,
+  type ClearMsg,
   type EditDocument,
   type EditOp,
+  type EraseMsg,
   type LoomApi,
   type MetaMsg,
+  type OverlayStatus,
   type PartEndMsg,
   type PermissionKind,
   type PermissionReport,
@@ -42,6 +45,7 @@ import {
   type RecordingId,
   type RecordingSummary,
   type SetupState,
+  type StrokeMsg,
   type TrackKey,
   type Unsubscribe,
 } from '@loom/ipc';
@@ -181,6 +185,43 @@ const api: LoomApi = {
     failed: (message: string): void => {
       ipcRenderer.send(CHANNEL.captureFailed, message);
     },
+  },
+
+  /**
+   * The live drawing overlay (phase 12).
+   *
+   * Every method is a `send`, including the two the *overlay page* calls on itself
+   * — `setArmed` as the pointer enters and leaves the palette. That is not laziness
+   * about return values: `setIgnoreMouseEvents` is a property of a `BrowserWindow`,
+   * so only main can set it, and a renderer that could ask for the answer back
+   * would be a renderer waiting on the main process sixty times a second while the
+   * user moves the mouse.
+   *
+   * Main accepts `stroke`/`erase`/`clear` only from the overlay window and
+   * `setOpen`/`setArmed` only from the HUD and the overlay, which is where that
+   * check belongs — the preload is shared by every window in the app, so a
+   * capability is only ever as narrow as main makes it.
+   */
+  overlay: {
+    setOpen: (open: boolean): void => {
+      ipcRenderer.send(CHANNEL.overlaySetOpen, open);
+    },
+    setArmed: (armed: boolean): void => {
+      ipcRenderer.send(CHANNEL.overlaySetArmed, armed);
+    },
+    stroke: (message: StrokeMsg): void => {
+      ipcRenderer.send(CHANNEL.overlayStroke, message);
+    },
+    erase: (message: EraseMsg): void => {
+      ipcRenderer.send(CHANNEL.overlayErase, message);
+    },
+    clear: (message: ClearMsg): void => {
+      ipcRenderer.send(CHANNEL.overlayClear, message);
+    },
+    onStatus: (callback: (status: OverlayStatus) => void): Unsubscribe =>
+      subscribe(CHANNEL.overlayStatus, (payload) => {
+        callback(payload as OverlayStatus);
+      }),
   },
 };
 

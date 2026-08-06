@@ -19,7 +19,7 @@ import { parseSchemaId, type SchemaFamily } from '../schema.ts';
 import { isUlid } from '../ids.ts';
 import { PROJECT_STATES, type ProjectDoc } from '../types/project.ts';
 import type { RecordingDoc } from '../types/recording.ts';
-import type { EditDocument } from '../types/edit.ts';
+import { GENERATOR_TYPES, type EditDocument } from '../types/edit.ts';
 import type { FrameIndexDoc, CursorIndexDoc } from '../types/sidecar.ts';
 import type { SettingsDoc } from '../types/settings.ts';
 import {
@@ -358,11 +358,7 @@ function validateTrack(sink: IssueSink, input: unknown, path: string, seenIds: S
 function validateGenerator(sink: IssueSink, input: unknown, path: string): void {
   const g = requireObject(sink, input, path);
   if (g === null) return;
-  requireEnum(sink, g['type'], `${path}.type`, [
-    'cursor-follow',
-    'auto-zoom-on-click',
-    'duck-under-mic',
-  ] as const);
+  requireEnum(sink, g['type'], `${path}.type`, GENERATOR_TYPES);
   requireObject(sink, g['params'], `${path}.params`);
   requireObject(sink, g['inputs'], `${path}.inputs`);
   requireIsoTimestamp(sink, g['generatedAt'], `${path}.generatedAt`);

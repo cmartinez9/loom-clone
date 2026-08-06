@@ -58,8 +58,29 @@ export interface Channel<V extends ChannelValue = ChannelValue> {
   clamp?: [number, number];
 }
 
+/**
+ * The generators a track may declare itself the output of.
+ *
+ * A closed list, and one array rather than a union written twice: the validator
+ * reads this, so adding a generator is one edit and a document carrying an unknown
+ * one is refused rather than quietly accepted by a type that has no runtime.
+ *
+ * `live-drawing` is phase 12's, and it is a generator in exactly §3.5's sense even
+ * though nothing is computed: `events/drawing.ndjson` is an input the user cannot
+ * edit, the track is rewritten wholesale when it is re-imported, and their own
+ * annotations live in a different track and therefore survive by construction.
+ */
+export const GENERATOR_TYPES = [
+  'cursor-follow',
+  'auto-zoom-on-click',
+  'duck-under-mic',
+  'live-drawing',
+] as const;
+
+export type GeneratorType = (typeof GENERATOR_TYPES)[number];
+
 export interface GeneratorSpec {
-  type: 'cursor-follow' | 'auto-zoom-on-click' | 'duck-under-mic';
+  type: GeneratorType;
   params: Record<string, number | number[]>;
   /** Fingerprint of the inputs, e.g. `{ clicks: 'sha256:41ba…' }`. If the hash no
    * longer matches, the UI offers "regenerate" rather than serving stale motion. */

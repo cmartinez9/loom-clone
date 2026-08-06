@@ -53,7 +53,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BOXES, TIMESTAMP_COUNT } from './golden/fixture.ts';
+import { BOXES, REVEAL_POINT_COUNT, TIMESTAMP_COUNT } from './golden/fixture.ts';
 import type { GoldenReport } from './golden/report.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -293,7 +293,11 @@ describe('the annotations are actually in the picture', () => {
     'draws every kind, in its own box',
     async () => {
       const { report } = await gate();
-      const kinds = Object.keys(BOXES).filter((name) => name !== 'parked' && name !== 'fading');
+      const kinds = Object.keys(BOXES).filter(
+        // `parked` and `fading` are windowed and `revealing` is authored to draw
+        // nothing at t=0; each carries its own check below instead.
+        (name) => name !== 'parked' && name !== 'fading' && name !== 'revealing',
+      );
       // Judged at the unzoomed timestamps. Zoomed in, some of the fixture's boxes
       // are genuinely off the visible region and drawing nothing there is the
       // *correct* answer — the zoomed frames are covered by `outsideExpected` and by
@@ -443,6 +447,19 @@ describe('text', () => {
   );
 
   it(
+    'no stroke was lost to a scratch target the compositor could not allocate',
+    async () => {
+      // The stroke pass's counterpart to the count above, and the other condition
+      // the annotation surface degrades through rather than refusing. Nothing in
+      // this run deliberately trips it, so any reading at all is ink that silently
+      // did not draw on a frame the gate then compared byte for byte.
+      const { report } = await gate();
+      expect(report.strokesWithoutScratch).toBe(0);
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
     'CONTROL: the atlas rasterised real ink from the shipped face',
     async () => {
       const { report } = await gate();
@@ -517,6 +534,70 @@ describe('the track window gates an annotation, in pixels', () => {
           ).toBeLessThan(unit * 0.08);
         }
       }
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
+    'reveals a stroke by arc length, as it was drawn',
+    async () => {
+      // Phase 12. `progress` is an ordinary curve channel and the compositor
+      // truncates the polyline by **arc length**, which is invisible to a "did it
+      // draw" check — the same gap `blendMs` had, and the same shape of answer.
+      //
+      // Growth rather than an absolute count: how many pixels a fraction of a
+      // zig-zag covers depends on the stroke width, the joins and the coverage
+      // ramp, and predicting it here would be a second implementation of the thing
+      // being judged. What is asserted is what a truncation by point index, or no
+      // truncation at all, both fail.
+      const { report } = await gate();
+      const flat = frames(report).filter((frame) => frame.zoomAmount <= 1.0001);
+      const zero = flat.filter((frame) => frame.revealProgress <= 0);
+      expect(zero.length, 'the fixture never sampled progress 0').toBeGreaterThan(0);
+      for (const frame of zero) {
+        expect(
+          frame.probes['revealing']?.changed ?? 0,
+          `the revealing stroke drew at t=${frame.t.toFixed(3)}s, where progress is 0`,
+        ).toBe(0);
+      }
+
+      const growing = flat
+        .filter((frame) => frame.revealProgress > 0)
+        .sort((a, b) => a.revealProgress - b.revealProgress);
+      expect(growing.length, 'the fixture never revealed the stroke').toBeGreaterThan(6);
+      let previous = -1;
+      for (const frame of growing) {
+        const changed = frame.probes['revealing']?.changed ?? 0;
+        expect(
+          changed,
+          `the revealing stroke shrank at t=${frame.t.toFixed(3)}s ` +
+            `(progress ${frame.revealProgress.toFixed(3)})`,
+        ).toBeGreaterThanOrEqual(previous);
+        previous = changed;
+      }
+
+      // And it really is a reveal rather than a stroke that appears whole: the last
+      // sampled progress must cover materially more than the first.
+      const first = growing[0]?.probes['revealing']?.changed ?? 0;
+      const last = growing[growing.length - 1]?.probes['revealing']?.changed ?? 0;
+      expect(first, 'the reveal drew nothing at its first non-zero progress').toBeGreaterThan(20);
+      expect(
+        last,
+        `the reveal did not grow: ${String(first)} pixels at the start, ${String(last)} at the end`,
+      ).toBeGreaterThan(first * 1.5);
+
+      // The part that says **arc length** rather than "some monotonic thing". A
+      // truncation by point index reaches a new point at most `REVEAL_POINT_COUNT`
+      // times however finely progress is sampled, so it can produce at most that
+      // many distinct pictures — and it passes every assertion above. Shortening the
+      // last segment as well produces a new one at every sample.
+      const distinct = new Set(growing.map((frame) => frame.probes['revealing']?.changed ?? 0));
+      expect(
+        distinct.size,
+        `the reveal took only ${String(distinct.size)} distinct values across ` +
+          `${String(growing.length)} sampled progresses, which is what a truncation by ` +
+          'point index looks like rather than one by arc length',
+      ).toBeGreaterThan(REVEAL_POINT_COUNT);
     },
     TIMEOUT_MS,
   );

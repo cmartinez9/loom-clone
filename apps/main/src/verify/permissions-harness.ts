@@ -18,6 +18,12 @@
  * | 4 | post-grant click event rate and latency                            | `accessibility-clicks` |
  * | 5 | a revoked Microphone recorded as a lost device (phase 2, item 8)   | `microphone-revocation` |
  *
+ * Phase 12 then added a sixth of a different kind — `overlay-content-protection`,
+ * the live drawing overlay's half of row 3. It is not a carried obligation; it is
+ * §8's phase-12 gate sentence *"absent from the raw capture"*, and it is here for the
+ * reason row 3 is: the measurement is a capture of the screen, and a machine without
+ * the Screen Recording grant cannot take one. See {@link checkOverlayContentProtection}.
+ *
  * ## Why it lives in the app rather than beside it
  *
  * macOS keys every permission on the bundle identifier. A separate test binary would
@@ -44,7 +50,9 @@ import { readMediaStatus, type PermissionManager } from '../permissions.ts';
 import type { ProjectStore } from '../project-store.ts';
 import type { RecorderSession } from '../recorder/session.ts';
 import type { WindowRegistry } from '../windows.ts';
+import { captureDisplay, isMarker, markerFraction, paintMarker } from './marker.ts';
 import { clickVerdict, sealReport, type CheckResult, type VerifyReport } from './checks.ts';
+import { WINDOW_ROLES } from '../windows.ts';
 import { appUrl, type RecordingId } from '@loom/ipc';
 import { concludeAccessibility, describeAccessibility } from '@loom/permissions';
 
@@ -122,28 +130,6 @@ export interface HarnessOptions {
   micRevocationWindowMs?: number;
 }
 
-/** A colour no part of the Pressroom palette contains, so a match is unambiguous. */
-const MARKER = { r: 0xff, g: 0x00, b: 0xff };
-
-/**
- * Whether a captured pixel is the marker.
- *
- * **Not an exact match, and the reason is measured rather than defensive.** The
- * marker is painted as sRGB `#FF00FF`; this machine's display is Display P3, and a
- * capture comes back in the display's colour space. sRGB magenta lands near
- * (234, 51, 239) there — 51 away from zero on green, which a tight per-channel
- * tolerance rejects. The first run of this check reported 0.0% inside the *control*
- * window, which is exactly what the control exists to catch.
- *
- * So the test is the shape of the colour rather than its coordinates: strongly red
- * and blue, weakly green. Nothing in the Pressroom palette is — paper is neutral
- * (r≈g≈b), vermilion and ochre have low blue, pine has low red — so a false positive
- * would need something magenta already on screen inside a 420×92 rectangle we placed.
- */
-function isMarker(r: number, g: number, b: number): boolean {
-  return r > 150 && b > 150 && g < 130 && r - g > 70 && b - g > 70;
-}
-
 export async function runVerification(options: HarnessOptions): Promise<VerifyReport> {
   const startedAt = new Date().toISOString();
   const checks: CheckResult[] = [];
@@ -154,6 +140,7 @@ export async function runVerification(options: HarnessOptions): Promise<VerifyRe
   checks.push(await checkScreenEnumeration());
   checks.push(await checkFrameAuthorisation(options.windows));
   checks.push(await checkContentProtection(options.windows));
+  checks.push(await checkOverlayContentProtection(options.windows));
   checks.push(await checkAccessibilityClicks(options, permissions));
   checks.push(await checkMicrophoneRevocation(options));
 
@@ -536,86 +523,442 @@ async function checkContentProtection(windows: WindowRegistry): Promise<CheckRes
   }
 }
 
+// ------------------------------- 3b. the drawing overlay's content protection
+
 /**
- * Paint a window a flat marker colour without changing which window it is.
+ * Phase 12's §8 gate sentence, in pixels: *"strokes appear live, are **absent** from
+ * the raw capture, and are deletable in the editor."*
  *
- * `insertCSS` rather than loading a different page: the window under test has to
- * remain the real HUD, created through the real registry with the real role, or the
- * flag being checked is not the flag that ships.
+ * **Content protection is an observation of PIXELS, not a TCC answer.** This check is
+ * in the permissions harness because it needs the Screen Recording grant in order to
+ * **look** — not because it is testing a permission. Nobody reading it later should
+ * mistake it for a permission probe: what it asks is whether a window macOS was told
+ * to keep out of captures is in one, and the grant is only the camera it holds while
+ * asking. It is nonetheless subject to `sealReport` exactly like every other check
+ * here — it is **not** in `alwaysHonest`, which is `bundle-identity`'s alone, because
+ * `bundle-identity` is what *establishes* trust and this is not.
+ *
+ * The live-ink and deletable halves of that sentence are `npm test`'s and stay there
+ * (`test/phase12-overlay.test.ts`, `packages/edl/test/drawing.test.ts`); they need no
+ * grant. This half moved here because a host without Screen Recording gets a black
+ * rectangle rather than an error, and the codebase's rule is that *"we could not
+ * look"* must never be reported as *"we looked and it was fine"* — a `blocked` that
+ * names the grant, never a pass and never a skip-on-missing-grant branch in a test.
+ *
+ * ## Five readings, because an absence is the easiest thing in the world to fake
+ *
+ * 1. **The control** — a second window from the shipping role's *own* constructor
+ *    options, the same page, the same paint, receiving every call the overlay
+ *    receives, with `setContentProtection` the single difference. It must show the
+ *    marker first: an absence in the protected window's rectangle proves nothing when
+ *    the capture is black, the coordinates are wrong or the window never painted.
+ * 2. **The overlay's own rectangle**, painted the marker.
+ * 3. **The same rectangle with the overlay hidden**, 700 ms later. A window that is
+ *    genuinely absent leaves whatever is behind it, so taking it away must change
+ *    nothing — which separates "the residue is the user's desktop" from "the residue
+ *    is ours" with no interpretation in between.
+ * 4. **A marker-painted *unprotected* window placed UNDER the overlay**, with the
+ *    overlay repainted a colour that is not the marker. Every overlay pixel that
+ *    reached the capture would cover a marker pixel, so this reading falls by exactly
+ *    the size of any leak — and unlike reading 2 it does not depend on what happens
+ *    to be on the user's screen.
+ * 5. **A whole-frame marker scan.** Every other reading is taken inside a rectangle
+ *    this file computed, and a rectangle computed wrong reports an absence that is
+ *    really a miss. Scanning the entire frame removes the coordinates from the claim.
+ *
+ * Plus a bare patch of desktop as a baseline, so the control's reading is assertable
+ * as a *signal* rather than as a high number — `isMarker` matches a shape of colour
+ * rather than a triple, which is what phase 2's first run discovered by reporting 0%
+ * inside its own control.
  */
-async function paintMarker(window: BrowserWindow): Promise<void> {
-  const hex = `#${MARKER.r.toString(16).padStart(2, '0')}${MARKER.g
-    .toString(16)
-    .padStart(2, '0')}${MARKER.b.toString(16).padStart(2, '0')}`;
+async function checkOverlayContentProtection(windows: WindowRegistry): Promise<CheckResult> {
+  const id = 'overlay-content-protection';
+  const title = 'setContentProtection keeps the drawing overlay out of captured pixels';
+  const obligation =
+    'the live drawing overlay is absent from the raw capture (architecture report §8, ' +
+    'phase 12’s gate)';
+
+  const display = screen.getPrimaryDisplay();
+  const size = { width: 520, height: 320 };
+  const protectedBounds = { x: display.bounds.x + 120, y: display.bounds.y + 140, ...size };
+  const controlBounds = { x: display.bounds.x + 120, y: display.bounds.y + 500, ...size };
+  const bare = bareDesktopRect(display, size, controlBounds);
+
+  let control: BrowserWindow | null = null;
+  let backdrop: BrowserWindow | null = null;
+  try {
+    // The windows the checks above left on screen go away first, and this is not
+    // tidiness: `checkContentProtection` paints the recorder HUD the **marker colour**
+    // and leaves it at the display's (120, 140) — inside this check's own protected
+    // rectangle. If that window's protection ever failed, its magenta would be read
+    // here as the overlay leaking, and one defect would be reported as two in the
+    // wrong place. The library window `checkFrameAuthorisation` opened is hidden for
+    // the weaker version of the same reason: every reading below wants the desktop
+    // behind it, which is what the vitest gate this moved from had.
+    windows.get('recorder-hud')?.hide();
+    windows.get('library')?.hide();
+
+    // The real overlay, through the real registry, so the flag under test is the
+    // shipped one — `WindowRegistry.show` is where `OverlayController.setOpen` gets
+    // it. Resized so the control fits beside it: the flag is set on the role and is
+    // not a function of size.
+    const overlay = windows.show('drawing-overlay');
+    try {
+      await whenReady(overlay);
+    } catch (error) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          `The drawing overlay never loaded: ${message(error)}. A window that did not paint ` +
+          'is absent from a capture whether or not content protection works, so there is ' +
+          'nothing here to conclude from.',
+      };
+    }
+    applyOverlayWindowCalls(overlay, protectedBounds);
+
+    // The control: the role's own options, and **every** call `setOpen` makes except
+    // the one under test. A control that differed in its window level, its collection
+    // behaviour or its mouse policy would be a second explanation for a difference in
+    // the pixels — and the whole value of a control is that there is only one.
+    control = new BrowserWindow({
+      ...WINDOW_ROLES['drawing-overlay'].options,
+      x: controlBounds.x,
+      y: controlBounds.y,
+      width: controlBounds.width,
+      height: controlBounds.height,
+      show: false,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    });
+    try {
+      await control.loadURL(appUrl('overlay.html'));
+    } catch (error) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          `The control window never loaded: ${message(error)}. Without a control that shows ` +
+          'the marker, an absence of it in the protected window is not evidence of anything.',
+      };
+    }
+    applyOverlayWindowCalls(control, controlBounds);
+
+    await paintMarker(overlay);
+    await paintMarker(control);
+    // The window server needs a moment to composite both before anything is captured;
+    // the HUD's check waits the same 700 ms for the same reason.
+    await delay(700);
+
+    const shot = await captureDisplay(display);
+    if (shot === null) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'Could not capture the primary display, so nothing could be looked at. Without the ' +
+          'Screen Recording grant there are no pixels to check this against.',
+      };
+    }
+
+    const control_ = markerFraction(shot, display, controlBounds);
+    const protected_ = markerFraction(shot, display, protectedBounds);
+    const desktop_ =
+      bare === null
+        ? { fraction: 0, mean: [0, 0, 0] as [number, number, number], sampled: 0 }
+        : markerFraction(shot, display, bare);
+    const frame = scanFrameForMarker(shot);
+
+    // Reading 3: the same rectangle, overlay hidden.
+    overlay.hide();
+    await delay(700);
+    const withoutOverlay = await captureDisplay(display);
+    if (withoutOverlay === null) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'The second capture — the same rectangle with the overlay hidden — produced no ' +
+          'picture, so the residue in the first one could not be attributed to anything.',
+      };
+    }
+    const gone_ = markerFraction(withoutOverlay, display, protectedBounds);
+
+    // Reading 4: a marker-painted unprotected window under the overlay.
+    backdrop = new BrowserWindow({
+      ...WINDOW_ROLES['drawing-overlay'].options,
+      x: protectedBounds.x,
+      y: protectedBounds.y,
+      width: protectedBounds.width,
+      height: protectedBounds.height,
+      show: false,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    });
+    try {
+      await backdrop.loadURL(appUrl('overlay.html'));
+    } catch (error) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          `The backdrop window never loaded: ${message(error)}. Without something under the ` +
+          'overlay for a leak to cover, the occlusion reading says nothing.',
+      };
+    }
+    backdrop.showInactive();
+    await paintFlat(backdrop, '#FF00FF');
+    await paintFlat(overlay, NOT_MARKER);
+    overlay.showInactive();
+    // Raised again after the backdrop, so the overlay is unambiguously on top of it:
+    // a leak has something to cover.
+    overlay.setAlwaysOnTop(true, 'screen-saver');
+    await delay(700);
+    const throughOverlay = await captureDisplay(display);
+    if (throughOverlay === null) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'The third capture — a marker window under the overlay — produced no picture, so ' +
+          'the strongest form of the claim could not be taken.',
+      };
+    }
+    const backdrop_ = markerFraction(throughOverlay, display, protectedBounds);
+
+    const controlArea = controlBounds.width * controlBounds.height;
+    const data = {
+      control: control_,
+      protected: protected_,
+      protectedWithOverlayGone: gone_,
+      backdropThroughOverlay: backdrop_,
+      desktop: desktop_,
+      frameMarkerPixels: frame.count,
+      frameMarkerBox: frame.box,
+      protectedBounds,
+      controlBounds,
+      desktopBounds: bare,
+      captureSize: shot.getSize(),
+      screenAccess: readMediaStatus('screen'),
+    };
+
+    // The control first, always. If the harness cannot see a window it is *supposed*
+    // to see, its opinion about a window it should not see is worthless.
+    if (control_.fraction < CONTROL_MIN) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          'The control window — the same role’s options, the same page, the same calls, ' +
+          `content protection off — showed the marker in only ` +
+          `${(control_.fraction * 100).toFixed(1)}% of its rectangle; its mean colour was ` +
+          `rgb(${control_.mean.join(', ')}). The capture, the coordinates or the paint is ` +
+          'wrong, so the overlay’s result proves nothing.',
+        data,
+      };
+    }
+    // And the control's reading is a *signal*, not the ambient magenta of whatever is
+    // on this machine's desktop. This tightens the claim; it does not relax it.
+    if (control_.fraction - desktop_.fraction < CONTROL_MIN) {
+      return {
+        id,
+        title,
+        obligation,
+        status: 'blocked',
+        detail:
+          `The control showed ${(control_.fraction * 100).toFixed(1)}% marker and a bare patch ` +
+          `of desktop the same size showed ${(desktop_.fraction * 100).toFixed(1)}%, so the ` +
+          'control’s marker is indistinguishable from the desktop behind it.',
+        data,
+      };
+    }
+
+    const problems: string[] = [];
+    if (protected_.fraction > PROTECTED_MAX) {
+      problems.push(
+        `the drawing overlay appeared in the captured pixels: ` +
+          `${(protected_.fraction * 100).toFixed(1)}% of its rectangle — ` +
+          'setContentProtection(true) is not keeping the ink out of the recording',
+      );
+    }
+    // Judged against `PROTECTED_MAX` rather than a new number: the same hundredth of a
+    // rectangle the primary reading allows, now applied to the *difference* the
+    // overlay makes rather than to the total.
+    if (Math.abs(protected_.fraction - gone_.fraction) >= PROTECTED_MAX) {
+      problems.push(
+        `hiding the overlay changed its own rectangle by ` +
+          `${((protected_.fraction - gone_.fraction) * 100).toFixed(3)}% — that difference is ` +
+          'the overlay reaching the capture',
+      );
+    }
+    if (backdrop_.fraction <= BACKDROP_MIN) {
+      problems.push(
+        `only ${(backdrop_.fraction * 100).toFixed(2)}% of a marker window placed under the ` +
+          'overlay came back through it — the missing part is the overlay, in the capture, ' +
+          'covering it',
+      );
+    }
+    if (frame.count >= controlArea * 1.5) {
+      problems.push(
+        `there is more marker in the capture (${String(frame.count)} px) than the control’s ` +
+          `own ${String(controlArea)} px rectangle can account for, so something else painted ` +
+          'with it — the overlay — reached the frame',
+      );
+    }
+    if (frame.count <= controlArea * 0.5) {
+      problems.push(
+        `only ${String(frame.count)} marker pixels are in the whole capture against the ` +
+          `control’s own ${String(controlArea)} px rectangle, so the frame scan did not find ` +
+          'the window it is measured against',
+      );
+    }
+
+    return {
+      id,
+      title,
+      obligation,
+      status: problems.length === 0 ? 'pass' : 'fail',
+      detail:
+        problems.length === 0
+          ? `The control showed the marker across ${(control_.fraction * 100).toFixed(1)}% of ` +
+            `its rectangle and the overlay across ${(protected_.fraction * 100).toFixed(3)}%; ` +
+            `the same rectangle with the overlay hidden read ` +
+            `${(gone_.fraction * 100).toFixed(3)}%, so that residue is the desktop and not ` +
+            `ours; a marker window under the overlay came back through it at ` +
+            `${(backdrop_.fraction * 100).toFixed(2)}%, so the overlay occludes nothing; and ` +
+            `${String(frame.count)} marker pixels are in the whole capture against the ` +
+            `control’s own ${String(controlArea)} px rectangle, so it is nowhere else in the ` +
+            'frame either.'
+          : problems.join('; '),
+      data,
+    };
+  } finally {
+    if (control !== null && !control.isDestroyed()) control.destroy();
+    if (backdrop !== null && !backdrop.isDestroyed()) backdrop.destroy();
+    windows.get('drawing-overlay')?.destroy();
+  }
+}
+
+/**
+ * The thresholds, from phase 2's own reading and not softened.
+ *
+ * Its control cleared 99.3% and its protected HUD 0.0%. `CONTROL_MIN` is the same 50%
+ * {@link checkContentProtection} uses to decide the instrument works at all;
+ * `PROTECTED_MAX` is its same 1%, which is a hundredth of the rectangle and is there
+ * because a capture is resampled to DIP size and an edge pixel is a blend of two
+ * windows.
+ */
+const CONTROL_MIN = 0.5;
+const PROTECTED_MAX = 0.01;
+
+/**
+ * How much of a marker window placed **under** the overlay must come back through
+ * it, and where the number comes from.
+ *
+ * Not a tuned threshold. The capture is resampled to the display's DIP size, so the
+ * backdrop's own border pixels blend with the desktop outside it: the rectangle is
+ * 520x320 = 166,400 px with a perimeter of 1,680, so a full one-pixel border is
+ * **1.01%** of it and is lost to resampling no matter what the window under test
+ * does. 99% is exactly that bound. Measured on this machine: 99.852%, so the real
+ * loss is a seventh of one border pixel and the margin is about 7x.
+ */
+const BACKDROP_MIN = 0.99;
+
+/**
+ * A colour `isMarker` does not match, and nothing in the Pressroom palette is either.
+ * If the overlay leaks, this is what covers the backdrop.
+ */
+const NOT_MARKER = '#00FF66';
+
+/**
+ * Every call `OverlayController.setOpen` makes to put the overlay on screen, applied
+ * identically to the window under test and to its control.
+ *
+ * The bounds are this check's rather than the display's, because the two windows have
+ * to fit beside each other; everything else is the shipping arrangement, and the
+ * control gets it too so that the only difference between them is the flag.
+ */
+function applyOverlayWindowCalls(
+  window: BrowserWindow,
+  bounds: { x: number; y: number; width: number; height: number },
+): void {
+  window.setBounds(bounds);
+  window.setAlwaysOnTop(true, 'screen-saver');
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  window.setIgnoreMouseEvents(true, { forward: true });
+  window.showInactive();
+}
+
+/**
+ * A patch of bare desktop, the same size, well clear of both windows.
+ *
+ * `null` on a display too narrow to hold one — the reading is context, not the check,
+ * and inventing a rectangle that overlapped a window would make it worse than absent.
+ */
+function bareDesktopRect(
+  display: Electron.Display,
+  size: { width: number; height: number },
+  controlBounds: { x: number; y: number; width: number; height: number },
+): { x: number; y: number; width: number; height: number } | null {
+  const x = display.bounds.x + display.bounds.width - size.width - 60;
+  if (x < controlBounds.x + controlBounds.width + 40) return null;
+  return { x, y: display.bounds.y + 140, ...size };
+}
+
+/**
+ * Paint a window a flat colour, without changing which window it is.
+ *
+ * The same `insertCSS` trick {@link paintMarker} uses, with the colour open: the
+ * occlusion reading needs the overlay painted something that is emphatically **not**
+ * the marker, so that a leak of it would *remove* marker pixels rather than add them.
+ */
+async function paintFlat(window: BrowserWindow, hex: string): Promise<void> {
   await window.webContents.insertCSS(
     `html, body { background: ${hex} !important; } body * { visibility: hidden !important; }`,
   );
 }
 
-async function captureDisplay(display: Electron.Display): Promise<NativeImage | null> {
-  const sources = await desktopCapturer
-    .getSources({
-      types: ['screen'],
-      fetchWindowIcons: false,
-      // Ask for the display's own DIP size so one thumbnail pixel is one DIP and the
-      // window rectangles map across without a scale guess.
-      thumbnailSize: { width: display.bounds.width, height: display.bounds.height },
-    })
-    .catch(() => []);
-  const source = sources.find((s) => s.display_id === String(display.id)) ?? sources[0] ?? null;
-  if (source === null) return null;
-  const image = source.thumbnail;
-  return image.isEmpty() ? null : image;
-}
-
 /**
- * How much of `rect` is the marker, plus the mean colour actually found there.
+ * Marker pixels anywhere in the whole capture, and the box they occupy.
  *
- * The mean is reported even on a pass. When this check blocks, "the control rect
- * averaged (244, 240, 228)" says *paper* — the window never painted — while
- * "(20, 18, 12)" says the capture was black, and those are different problems with
- * different fixes. A bare percentage would leave whoever runs this guessing.
+ * `isMarker` is not reimplemented — the shared instrument's own predicate is applied
+ * to every pixel, so the frame and the rectangles agree on what a marker is.
  */
-function markerFraction(
-  image: NativeImage,
-  display: Electron.Display,
-  rect: { x: number; y: number; width: number; height: number },
-): { fraction: number; mean: [number, number, number]; sampled: number } {
+function scanFrameForMarker(image: NativeImage): {
+  count: number;
+  box: { x0: number; y0: number; x1: number; y1: number } | null;
+} {
   const size = image.getSize();
-  const bitmap = image.toBitmap(); // BGRA, row-major, no padding.
-  const scaleX = size.width / display.bounds.width;
-  const scaleY = size.height / display.bounds.height;
-
-  const x0 = Math.max(0, Math.round((rect.x - display.bounds.x) * scaleX));
-  const y0 = Math.max(0, Math.round((rect.y - display.bounds.y) * scaleY));
-  const x1 = Math.min(size.width, Math.round((rect.x - display.bounds.x + rect.width) * scaleX));
-  const y1 = Math.min(size.height, Math.round((rect.y - display.bounds.y + rect.height) * scaleY));
-  if (x1 <= x0 || y1 <= y0) return { fraction: 0, mean: [0, 0, 0], sampled: 0 };
-
-  let hits = 0;
-  let total = 0;
-  let sr = 0;
-  let sg = 0;
-  let sb = 0;
-  for (let y = y0; y < y1; y++) {
-    for (let x = x0; x < x1; x++) {
-      const i = (y * size.width + x) * 4;
-      const b = bitmap[i] ?? 0;
-      const g = bitmap[i + 1] ?? 0;
-      const r = bitmap[i + 2] ?? 0;
-      total++;
-      sr += r;
-      sg += g;
-      sb += b;
-      if (isMarker(r, g, b)) hits++;
+  const bitmap = image.toBitmap();
+  let count = 0;
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (let y = 0; y < size.height; y++) {
+    for (let x = 0; x < size.width; x++) {
+      const at = (y * size.width + x) * 4;
+      if (!isMarker(bitmap[at + 2] ?? 0, bitmap[at + 1] ?? 0, bitmap[at] ?? 0)) continue;
+      count += 1;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
     }
   }
-  if (total === 0) return { fraction: 0, mean: [0, 0, 0], sampled: 0 };
-  return {
-    fraction: hits / total,
-    mean: [Math.round(sr / total), Math.round(sg / total), Math.round(sb / total)],
-    sampled: total,
-  };
+  return { count, box: count === 0 ? null : { x0, y0, x1, y1 } };
 }
 
 /** Mean luma and distinct-luma count, for telling a picture from a black rectangle. */

@@ -148,12 +148,55 @@ const ROLES: Record<WindowRole, RoleSpec> = {
     multiple: false,
     options: { frame: false, transparent: true, alwaysOnTop: true, focusable: false },
   },
+  /**
+   * Phase 12's live drawing overlay: transparent, full-screen, over everything,
+   * and out of the recording.
+   *
+   * Four of these options are load-bearing rather than tidy, and each is a
+   * constraint from the phase's brief made mechanical:
+   *
+   * - **`contentProtected: true`** — the whole point. The strokes are logged to
+   *   `events/drawing.ndjson` and re-composited at edit time, so they must not also
+   *   be burned into the captured pixels. `overlay-content-protection` in
+   *   `apps/main/src/verify/permissions-harness.ts` measures that in a real capture
+   *   against a control window, the way phase 2 measured the HUD's — and it is there
+   *   rather than in `npm test` because looking needs the Screen Recording grant. An
+   *   assertion that this flag was *set* is a different claim, which is why
+   *   `windows.test.ts` asserting the table is not that check.
+   * - **`focusable: false`** — *"must not steal focus from what the user is
+   *   recording"*. On macOS this makes the window non-activating: clicking it, even
+   *   to draw, leaves the app being demonstrated as the key window. The cost is
+   *   real and is why nothing here is dismissed with a key — a non-activating
+   *   window receives mouse events and not keystrokes.
+   * - **`backgroundColor: '#00000000'`** — the registry paints every window
+   *   {@link groundColor} so the first frame is never a white flash, and on a
+   *   transparent window that would be a sheet of paper over the desktop. This is
+   *   the one role that wants no ground at all.
+   * - **`hasShadow: false`, `resizable`/`movable: false`** — a full-screen sheet
+   *   with a drop shadow draws a dark band down the edge of the screen it is over,
+   *   and a window the user can drag off the display they are recording is a window
+   *   whose ink no longer lines up with the recording.
+   *
+   * Mouse events are `OverlayController`'s, not the registry's: the window is
+   * created ignoring them and is armed only while the user is drawing.
+   */
   'drawing-overlay': {
     page: 'overlay.html',
     visible: true,
     contentProtected: true,
     multiple: false,
-    options: { frame: false, transparent: true, alwaysOnTop: true, fullscreenable: false },
+    options: {
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      alwaysOnTop: true,
+      fullscreenable: false,
+      focusable: false,
+      hasShadow: false,
+      resizable: false,
+      movable: false,
+      skipTaskbar: true,
+    },
   },
   capture: {
     page: 'capture.html',
@@ -270,8 +313,7 @@ export class WindowRegistry {
     const id = `${role}:${key}`;
     const existing = this.entries.get(id);
     if (existing !== undefined && !existing.window.isDestroyed()) {
-      if (spec.visible) existing.window.show();
-      existing.window.focus();
+      if (spec.visible) this.reveal(spec, existing.window);
       return existing.window;
     }
 
@@ -318,7 +360,7 @@ export class WindowRegistry {
 
     if (spec.visible) {
       window.once('ready-to-show', () => {
-        window.show();
+        this.reveal(spec, window);
       });
     }
 
@@ -329,6 +371,25 @@ export class WindowRegistry {
     // breaks when packaged" has one fewer place to hide.
     void window.loadURL(appUrl(spec.page));
     return window;
+  }
+
+  /**
+   * Put a window on screen — and **do not activate one that declared it must not
+   * be**.
+   *
+   * `focusable: false` is not decoration on the role that uses it: the drawing
+   * overlay covers the display the user is recording, and an overlay that took
+   * focus would take it from the app they are demonstrating. A registry that
+   * called `focus()` on every window it opened would undo that from the outside,
+   * on a line nobody reading `windows.ts`'s table would think to check.
+   */
+  private reveal(spec: RoleSpec, window: BrowserWindow): void {
+    if (spec.options.focusable === false) {
+      window.showInactive();
+      return;
+    }
+    window.show();
+    window.focus();
   }
 
   get(role: WindowRole, key = 'default'): BrowserWindow | undefined {

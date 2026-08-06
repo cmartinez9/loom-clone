@@ -81,6 +81,7 @@ function failureReport(error: string): GoldenReport {
     privacyFallbacks: 0,
     textTruncations: 0,
     textSpansWithoutAtlas: 0,
+    strokesWithoutScratch: 0,
     atlasGlyphs: 0,
     logs,
   };

@@ -55,6 +55,7 @@ import {
   newAnnotationGeometry,
   readAnnotationGeometry,
   readAnnotationStyle,
+  readStrokePoints,
   type AnnotationGeometry,
   type AnnotationKind,
   type AnnotationStyle,
@@ -70,9 +71,15 @@ import {
   MAX_BLUR_PASSES,
   MAX_BLUR_TAPS,
   MAX_PASS_SIGMA_PX,
+  MAX_STROKE_SEGMENTS_PER_BATCH,
   REGION_FRAGMENT_SHADER,
   SHAPE_FRAGMENT_SHADER,
   SHAPE_VERTEX_SHADER,
+  STROKE_COMPOSITE_FRAGMENT_SHADER,
+  STROKE_COVERAGE_FRAGMENT_SHADER,
+  STROKE_FLOATS_PER_VERTEX,
+  STROKE_VERTEX_SHADER,
+  STROKE_VERTS_PER_SEGMENT,
   TEXT_FRAGMENT_SHADER,
   TEXT_VERTEX_SHADER,
 } from './annotation-shaders.ts';
@@ -117,6 +124,20 @@ interface Prepared {
   /** A style this build refuses. Rethrown every frame; never swallowed once read. */
   error: AnnotationError | null;
   geometry: AnnotationGeometry;
+  /**
+   * A `stroke` span's polyline in its own `-1..1` box, and the cumulative arc
+   * length along it in those units.
+   *
+   * Both read once, here, because neither changes: the shape of a hand-drawn line
+   * is fixed at the instant the pen came up (`@loom/edl`'s `readStrokePoints` says
+   * why it is in `style` rather than in a channel). The lengths are the reveal's
+   * denominator and are measured in box units rather than in output pixels — a box
+   * whose aspect is the one the pen drew at maps the two proportionally, and
+   * measuring in pixels would put an O(n) walk on the frame path to buy a reveal
+   * that is only different when the user has squashed the ink.
+   */
+  points: Float32Array | null;
+  lengths: Float32Array | null;
 }
 
 export class AnnotationPass {
@@ -145,6 +166,16 @@ export class AnnotationPass {
    * which is its own defect.
    */
   textSpansWithoutAtlas = 0;
+
+  /**
+   * Strokes skipped because no scratch target could be allocated.
+   *
+   * The stroke pass's counterpart to {@link textSpansWithoutAtlas}, and the same
+   * bargain: ink that cannot be drawn is skipped and counted, never thrown on, so a
+   * GL context under memory pressure costs the annotation and not the frame. The
+   * privacy kinds do the opposite — see {@link privacyFallbacks}.
+   */
+  strokesWithoutScratch = 0;
 
   readonly #quad: WebGLBuffer;
 
@@ -180,6 +211,26 @@ export class AnnotationPass {
     outputSize: WebGLUniformLocation;
     opacity: WebGLUniformLocation;
   };
+
+  readonly #strokeCoverage: WebGLProgram;
+  readonly #strokeComposite: WebGLProgram;
+  readonly #strokeVao: WebGLVertexArrayObject;
+  readonly #strokeBuffer: WebGLBuffer;
+  readonly #strokeVertices = new Float32Array(
+    MAX_STROKE_SEGMENTS_PER_BATCH * STROKE_VERTS_PER_SEGMENT * STROKE_FLOATS_PER_VERTEX,
+  );
+  readonly #uStrokeCoverage: {
+    outputSize: WebGLUniformLocation;
+    half: WebGLUniformLocation;
+  };
+  readonly #uStrokeComposite: {
+    quad: WebGLUniformLocation;
+    pxRect: WebGLUniformLocation;
+    outputSize: WebGLUniformLocation;
+    ink: WebGLUniformLocation;
+    opacity: WebGLUniformLocation;
+  };
+  readonly #strokeCompositeVao: WebGLVertexArrayObject;
 
   readonly #text: WebGLProgram;
   readonly #textVao: WebGLVertexArrayObject;
@@ -283,6 +334,47 @@ export class AnnotationPass {
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
+    this.#strokeCoverage = linkProgram(gl, STROKE_VERTEX_SHADER, STROKE_COVERAGE_FRAGMENT_SHADER);
+    this.#uStrokeCoverage = {
+      outputSize: requireUniform(gl, this.#strokeCoverage, 'u_outputSize'),
+      half: requireUniform(gl, this.#strokeCoverage, 'u_half'),
+    };
+
+    this.#strokeComposite = linkProgram(gl, SHAPE_VERTEX_SHADER, STROKE_COMPOSITE_FRAGMENT_SHADER);
+    this.#strokeCompositeVao = this.#unitQuadVao(this.#strokeComposite);
+    this.#uStrokeComposite = {
+      quad: requireUniform(gl, this.#strokeComposite, 'u_quad'),
+      pxRect: requireUniform(gl, this.#strokeComposite, 'u_pxRect'),
+      outputSize: requireUniform(gl, this.#strokeComposite, 'u_outputSize'),
+      ink: requireUniform(gl, this.#strokeComposite, 'u_ink'),
+      opacity: requireUniform(gl, this.#strokeComposite, 'u_opacity'),
+    };
+    gl.useProgram(this.#strokeComposite);
+    gl.uniform1i(requireUniform(gl, this.#strokeComposite, 'u_src'), 1);
+
+    const strokeBuffer = gl.createBuffer();
+    const strokeVao = gl.createVertexArray();
+    if (strokeBuffer === null || strokeVao === null) {
+      throw new GlError('createBuffer/createVertexArray returned null (context lost?)');
+    }
+    this.#strokeBuffer = strokeBuffer;
+    this.#strokeVao = strokeVao;
+    gl.bindVertexArray(strokeVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, strokeBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.#strokeVertices.byteLength, gl.DYNAMIC_DRAW);
+    const strokePx = gl.getAttribLocation(this.#strokeCoverage, 'a_px');
+    const strokeSeg = gl.getAttribLocation(this.#strokeCoverage, 'a_seg');
+    if (strokePx < 0 || strokeSeg < 0) {
+      throw new GlError('the stroke program is missing a_px/a_seg');
+    }
+    const stride = STROKE_FLOATS_PER_VERTEX * 4;
+    gl.enableVertexAttribArray(strokePx);
+    gl.vertexAttribPointer(strokePx, 2, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(strokeSeg);
+    gl.vertexAttribPointer(strokeSeg, 4, gl.FLOAT, false, stride, 8);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
     gl.useProgram(null);
   }
 
@@ -359,6 +451,9 @@ export class AnnotationPass {
           case 'text':
             this.#drawText(context, map, geometry, style);
             break;
+          case 'stroke':
+            this.#drawStroke(context, map, geometry, style, prepared);
+            break;
         }
       }
     } finally {
@@ -384,7 +479,15 @@ export class AnnotationPass {
         error = thrown;
       }
     }
-    const prepared: Prepared = { kind, style, error, geometry: newAnnotationGeometry() };
+    const points = kind === 'stroke' ? readStrokePoints(annotation.style) : null;
+    const prepared: Prepared = {
+      kind,
+      style,
+      error,
+      geometry: newAnnotationGeometry(),
+      points,
+      lengths: points === null ? null : cumulativeLengths(points),
+    };
     this.#prepared.set(annotation, prepared);
     return prepared;
   }
@@ -609,6 +712,263 @@ export class AnnotationPass {
     this.#scratchB = null;
   }
 
+  // ---- the stroke pass (phase 12) -------------------------------------------
+
+  /**
+   * One hand-drawn stroke: capsules into a scratch, then the scratch down as ink.
+   *
+   * ## Why the scratch, in one sentence you can check
+   *
+   * Consecutive capsules **must** overlap — that is what makes a joint round rather
+   * than a notch — so compositing them one by one into the frame draws the ink over
+   * itself at every joint. At `alpha = 1` nothing shows; at a highlighter's 0.35, or
+   * anywhere inside a `blendMs` crossfade, the line grows a string of dark beads.
+   * `blendEquation(MAX)` into a scratch makes overlap idempotent and the stroke is
+   * then composited exactly once, at exactly its own alpha.
+   *
+   * ## Why it fails by not drawing
+   *
+   * A stroke is a decoration, so every branch here that cannot proceed **returns**.
+   * That is the opposite of `blur` and `mask` two functions up, and deliberately so:
+   * §7's rule for the overlay is that it is an accessory — ink that fails to render
+   * is visible and costs a line, where a redaction that fails to render is invisible
+   * and costs a secret.
+   */
+  #drawStroke(
+    context: AnnotationContext,
+    map: ReturnType<typeof sourceToOutput>,
+    geometry: AnnotationGeometry,
+    style: AnnotationStyle,
+    prepared: Prepared,
+  ): void {
+    const points = prepared.points;
+    const lengths = prepared.lengths;
+    if (points === null || lengths === null) return;
+    const ink = style.stroke;
+    if (ink[3] <= 0) return;
+
+    // `progress` is 1 for a finished stroke, and a stroke still under the pen is
+    // truncated by arc length rather than by point count — a slow, dense stretch
+    // and a fast, sparse one then reveal at the same speed. A dot has no length at
+    // all and is drawn whole the moment `progress` leaves zero.
+    if (!(geometry.progress > 0)) return;
+    const drawn = (lengths[lengths.length - 1] ?? 0) * geometry.progress;
+
+    const halfPx = Math.max(0.5, (style.strokeWidth * map.scaleX) / 2);
+    const cx = map.originX + map.scaleX * geometry.cx;
+    const cy = map.originY + map.scaleY * geometry.cy;
+    const hx = map.scaleX * geometry.hx;
+    const hy = map.scaleY * geometry.hy;
+    const margin = halfPx + 1;
+    const pxRect: Rect = {
+      x: cx - hx - margin,
+      y: cy - hy - margin,
+      width: 2 * (hx + margin),
+      height: 2 * (hy + margin),
+    };
+
+    const [width, height] = context.outputSize;
+    let scratch: { a: RenderTarget; b: RenderTarget };
+    try {
+      scratch = this.#ensureScratch(width, height);
+    } catch (thrown) {
+      if (!(thrown instanceof GlError)) throw thrown;
+      // No scratch, no ink. Counted rather than thrown for the reason above.
+      this.strokesWithoutScratch += 1;
+      return;
+    }
+
+    const gl = this.gl;
+    // Scissored to the stroke's own rectangle, so clearing the scratch costs the
+    // stroke's area and not the frame's — a page of annotations is otherwise a
+    // full-target clear per span.
+    const sx = Math.max(0, Math.floor(pxRect.x));
+    const sw = Math.min(width - sx, Math.ceil(pxRect.width) + 1);
+    // GL's scissor box has a bottom-left origin and `pxRect` a top-left one, so the
+    // y is flipped exactly once, here.
+    const sy = Math.max(0, Math.floor(height - (pxRect.y + pxRect.height)));
+    const sh = Math.min(height - sy, Math.ceil(pxRect.height) + 1);
+    if (sw <= 0 || sh <= 0) return;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scratch.a.framebuffer);
+    gl.viewport(0, 0, width, height);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(sx, sy, sw, sh);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.blendEquation(gl.MAX);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(this.#strokeCoverage);
+    this.#v2[0] = width;
+    this.#v2[1] = height;
+    gl.uniform2fv(this.#uStrokeCoverage.outputSize, this.#v2);
+    gl.uniform1f(this.#uStrokeCoverage.half, halfPx);
+    gl.bindVertexArray(this.#strokeVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.#strokeBuffer);
+    this.#drawStrokeSegments(points, lengths, drawn, cx, cy, hx, hy, halfPx);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.disable(gl.SCISSOR_TEST);
+
+    // Back to what `render()` set up, before anything else draws.
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+
+    gl.useProgram(this.#strokeComposite);
+    this.#setRect(this.#uStrokeComposite.quad, this.#uStrokeComposite.pxRect, pxRect, [
+      width,
+      height,
+    ]);
+    this.#v2[0] = width;
+    this.#v2[1] = height;
+    gl.uniform2fv(this.#uStrokeComposite.outputSize, this.#v2);
+    this.#setColor(this.#uStrokeComposite.ink, this.#v4c, ink);
+    gl.uniform1f(this.#uStrokeComposite.opacity, geometry.opacity);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, scratch.a.texture);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, context.target.framebuffer);
+    gl.viewport(0, 0, width, height);
+    gl.bindVertexArray(this.#strokeCompositeVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  /**
+   * Fill the vertex buffer with the polyline's capsule quads and draw them.
+   *
+   * Batched at {@link MAX_STROKE_SEGMENTS_PER_BATCH} rather than truncated there: a
+   * stroke that stops halfway along is a wrong picture that looks like a deliberate
+   * one, and this file's rule is that a failure is loud or absent, never partial.
+   *
+   * Each quad is the segment's oriented bounding box grown by `half + 1` in both
+   * directions — along the segment as well as across it, because the caps are round
+   * and a box that stopped at the endpoints would clip them.
+   */
+  #drawStrokeSegments(
+    points: Float32Array,
+    lengths: Float32Array,
+    drawn: number,
+    cx: number,
+    cy: number,
+    hx: number,
+    hy: number,
+    halfPx: number,
+  ): void {
+    const vertices = this.#strokeVertices;
+    const stride = STROKE_FLOATS_PER_VERTEX;
+    const segments = lengths.length - 1;
+    const grow = halfPx + 1;
+    let cursor = 0;
+    let batched = 0;
+
+    // A tap of the pen is one point and no segments. It is still ink — a round dot
+    // of the stroke's own width — so it is emitted as a zero-length capsule, which
+    // is the case `sdSegment`'s `max(dot(ba, ba), 1e-6)` already answers correctly.
+    //
+    // This branch is also the whole of a dot's reveal, and it deliberately never
+    // consults `drawn`: a single point has no arc length, so `drawn` is 0 for it at
+    // every `progress` and a truncation measured against it would draw nothing at
+    // all, forever. `#drawStroke`'s `progress > 0` is the only gate a dot gets, which
+    // is the right one — a dot is either not yet drawn or complete.
+    if (segments < 1) {
+      this.#appendStrokeQuad(
+        vertices,
+        0,
+        cx + (points[0] ?? 0) * hx,
+        cy + (points[1] ?? 0) * hy,
+        cx + (points[0] ?? 0) * hx,
+        cy + (points[1] ?? 0) * hy,
+        grow,
+      );
+      this.#flushStrokeBatch(vertices, STROKE_VERTS_PER_SEGMENT * stride);
+      return;
+    }
+
+    for (let i = 0; i < segments; i++) {
+      const from = lengths[i] ?? 0;
+      if (from >= drawn) break;
+      const to = lengths[i + 1] ?? 0;
+      // The one partly-drawn segment: shortened to exactly where the pen had got
+      // to, so the tip advances smoothly instead of jumping a segment at a time.
+      const fraction = to > from ? Math.min(1, (drawn - from) / (to - from)) : 1;
+
+      const ax = cx + (points[i * 2] ?? 0) * hx;
+      const ay = cy + (points[i * 2 + 1] ?? 0) * hy;
+      const fullBx = cx + (points[i * 2 + 2] ?? 0) * hx;
+      const fullBy = cy + (points[i * 2 + 3] ?? 0) * hy;
+      const bx = ax + (fullBx - ax) * fraction;
+      const by = ay + (fullBy - ay) * fraction;
+
+      this.#appendStrokeQuad(vertices, cursor, ax, ay, bx, by, grow);
+      cursor += STROKE_VERTS_PER_SEGMENT * stride;
+      batched += 1;
+      if (batched === MAX_STROKE_SEGMENTS_PER_BATCH) {
+        this.#flushStrokeBatch(vertices, cursor);
+        cursor = 0;
+        batched = 0;
+      }
+    }
+    if (cursor > 0) this.#flushStrokeBatch(vertices, cursor);
+  }
+
+  /**
+   * Six vertices for one capsule, each carrying the segment it belongs to.
+   *
+   * The quad is the segment's oriented bounding box grown by `grow` in both
+   * directions — **along** it as well as across it, because the caps are round and a
+   * box that stopped at the endpoints would clip them into flat ends.
+   */
+  #appendStrokeQuad(
+    vertices: Float32Array,
+    at: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    grow: number,
+  ): void {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len = Math.hypot(dx, dy);
+    // A zero-length segment is a dot, and a direction cannot be taken from it — the
+    // axes are then the identity and the quad is the cap's own box.
+    const ux = len > 1e-6 ? dx / len : 1;
+    const uy = len > 1e-6 ? dy / len : 0;
+    const nx = -uy;
+    const ny = ux;
+
+    const corners = [
+      ax - ux * grow - nx * grow,
+      ay - uy * grow - ny * grow,
+      bx + ux * grow - nx * grow,
+      by + uy * grow - ny * grow,
+      bx + ux * grow + nx * grow,
+      by + uy * grow + ny * grow,
+      ax - ux * grow - nx * grow,
+      ay - uy * grow - ny * grow,
+      bx + ux * grow + nx * grow,
+      by + uy * grow + ny * grow,
+      ax - ux * grow + nx * grow,
+      ay - uy * grow + ny * grow,
+    ];
+    let cursor = at;
+    for (let v = 0; v < STROKE_VERTS_PER_SEGMENT; v++) {
+      vertices[cursor] = corners[v * 2] ?? 0;
+      vertices[cursor + 1] = corners[v * 2 + 1] ?? 0;
+      vertices[cursor + 2] = ax;
+      vertices[cursor + 3] = ay;
+      vertices[cursor + 4] = bx;
+      vertices[cursor + 5] = by;
+      cursor += STROKE_FLOATS_PER_VERTEX;
+    }
+  }
+
+  #flushStrokeBatch(vertices: Float32Array, floats: number): void {
+    const gl = this.gl;
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertices, 0, floats);
+    gl.drawArrays(gl.TRIANGLES, 0, floats / STROKE_FLOATS_PER_VERTEX);
+  }
+
   // ---- the text pass ---------------------------------------------------------
 
   #drawText(
@@ -705,13 +1065,43 @@ export class AnnotationPass {
     this.#releaseScratch();
     gl.deleteBuffer(this.#quad);
     gl.deleteBuffer(this.#textBuffer);
+    gl.deleteBuffer(this.#strokeBuffer);
     gl.deleteVertexArray(this.#shapeVao);
     gl.deleteVertexArray(this.#blurVao);
     gl.deleteVertexArray(this.#regionVao);
     gl.deleteVertexArray(this.#textVao);
+    gl.deleteVertexArray(this.#strokeVao);
+    gl.deleteVertexArray(this.#strokeCompositeVao);
     gl.deleteProgram(this.#shape);
     gl.deleteProgram(this.#blur);
     gl.deleteProgram(this.#region);
     gl.deleteProgram(this.#text);
+    gl.deleteProgram(this.#strokeCoverage);
+    gl.deleteProgram(this.#strokeComposite);
   }
+}
+
+/**
+ * Cumulative arc length along a polyline, in the span's own box units.
+ *
+ * `out[i]` is the distance from the first point to point `i`, so `out[n-1]` is the
+ * whole length and a `progress` of `p` is drawn up to `p * out[n-1]`. Computed once
+ * per span, in `#prepare`, because the shape never changes.
+ *
+ * Box units rather than output pixels, and the difference is only visible when the
+ * user has scaled the ink anisotropically: at the aspect the pen actually drew at
+ * the two are proportional, and measuring in pixels would put an O(points) walk on
+ * every frame of the reveal to buy a case nobody has yet.
+ */
+function cumulativeLengths(points: Float32Array): Float32Array {
+  const count = points.length >> 1;
+  const out = new Float32Array(count);
+  let total = 0;
+  for (let i = 1; i < count; i++) {
+    const dx = (points[i * 2] ?? 0) - (points[i * 2 - 2] ?? 0);
+    const dy = (points[i * 2 + 1] ?? 0) - (points[i * 2 - 1] ?? 0);
+    total += Math.hypot(dx, dy);
+    out[i] = total;
+  }
+  return out;
 }

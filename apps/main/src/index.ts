@@ -28,6 +28,7 @@ import { PermissionManager } from './permissions.ts';
 import { ProjectStore } from './project-store.ts';
 import { installLoomProtocol, registerLoomScheme } from './protocol.ts';
 import { registerIpc, unregisterIpc } from './ipc.ts';
+import { OverlayController } from './overlay.ts';
 import { RecorderSession } from './recorder/session.ts';
 import { WindowRegistry } from './windows.ts';
 
@@ -96,6 +97,18 @@ const recorder = new RecorderSession({
   // version, which nobody can act on.
   osVersion: process.getSystemVersion(),
 });
+
+/**
+ * The live drawing overlay (phase 12).
+ *
+ * Built after the recorder because it reads the recording clock, and attached back
+ * to it because the recorder has to ask it what to put in `recording.json`. Both
+ * halves are optional from the recorder's side — a `RecorderSession` with nothing
+ * attached behaves exactly as it did before this phase, which is the structural
+ * half of *"a drawing overlay must never break the recording"*.
+ */
+const overlay = new OverlayController({ store, windows, recorder });
+recorder.attachDrawing(overlay);
 
 /**
  * The permission manager — built inside {@link main}, after `settings.json` has been
@@ -186,6 +199,7 @@ async function main(): Promise<void> {
   windows.installHudNoticeFit();
   permissions.install();
   recorder.install();
+  overlay.install();
 
   // macOS never tells an app that a grant was given: the user leaves for System
   // Settings, flips a switch and comes back. Regaining focus is the closest thing to

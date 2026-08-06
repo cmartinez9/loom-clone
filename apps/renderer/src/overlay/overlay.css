@@ -1,0 +1,117 @@
+/* ============================================================================
+   The live drawing overlay — Pressroom, over the user's own desktop.
+
+   This is the only window in the app with **no ground**. It is transparent and
+   it covers the whole display, so every pixel that is not ink or a control is a
+   pixel of the thing the user is demonstrating. A panel, a scrim or a tint here
+   would be a sheet of paper over the screen being recorded.
+
+   `components.css` names this surface in its own rules — *"the recording bar,
+   the draw palette and popovers get `--lift`"* — so the palette is a keylined
+   object that floats, exactly like the HUD, and nothing else here is anything.
+
+   Nothing on the input path animates (`data/loom-design/report.md` §8): the pen
+   is the input path.
+   ============================================================================ */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  /* The window is click-through until main arms it, so nothing here may put a
+     text caret or a resize arrow over the user's desktop. */
+  cursor: default;
+}
+
+/* The ink. Sized in device pixels by `main.ts` and laid out in CSS pixels here,
+   so a stroke is as crisp as the display it is drawn on. */
+#ink {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* While the pen is down the whole surface is a drawing surface, and a crosshair
+   is the only honest cursor for it. */
+body.armed #ink {
+  cursor: crosshair;
+}
+
+/* ---------- the palette ---------- */
+
+.palette {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-raised);
+  border: var(--line) solid var(--keyline);
+  border-radius: var(--r-md);
+  /* Rule 1 of the language: a shadow means "this floats above your desktop".
+     This is the one window where that is literally true. */
+  box-shadow: var(--lift);
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 28px;
+  padding: 0 var(--sp-2);
+  background: transparent;
+  color: var(--fg);
+  border: var(--line) solid transparent;
+  border-radius: var(--r-sm);
+  font: var(--w-med) var(--ui-sm) / var(--ui-lh) var(--font-ui);
+  cursor: pointer;
+}
+
+.tool:hover {
+  background: var(--bg-sunken);
+}
+
+/* Selection is ink inverted — the letterpress move, same as `.btn-primary`. */
+.tool[aria-pressed='true'] {
+  background: var(--select-bg);
+  color: var(--select-fg);
+  border-color: var(--keyline);
+}
+
+.tool-close {
+  border-color: var(--keyline);
+}
+
+.palette-rule {
+  width: var(--line);
+  height: 18px;
+  background: var(--divider);
+}
+
+/* The two pens, shown as what they put on the page rather than as an icon of a
+   pen — the same reasoning `icons.ts` gives for drawing tools rather than
+   pictures of tools. */
+.swatch {
+  width: 14px;
+  height: 14px;
+  border: var(--line) solid var(--keyline);
+  border-radius: 50%;
+}
+
+.swatch-pen {
+  background: var(--accent);
+}
+
+.swatch-highlighter {
+  background: var(--audio);
+  border-radius: var(--r-sm);
+}

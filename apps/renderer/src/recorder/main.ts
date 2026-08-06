@@ -23,7 +23,7 @@ import '@loom/design/css';
 import './recorder.css';
 import { formatDuration } from '@loom/design';
 import { PERMISSIONS } from '@loom/permissions';
-import type { RecorderStatus } from '@loom/ipc';
+import type { OverlayStatus, RecorderStatus } from '@loom/ipc';
 
 const loom = window.loom;
 
@@ -33,6 +33,7 @@ const timer = must('timer');
 const counts = must('counts');
 const recordButton = must('record') as HTMLButtonElement;
 const stopButton = must('stop') as HTMLButtonElement;
+const drawButton = must('draw') as HTMLButtonElement;
 const errorLine = must('error');
 const cameraLine = must('camera');
 const revokedShelf = must('revoked');
@@ -41,6 +42,35 @@ const revokedSettings = must('revoked-settings') as HTMLButtonElement;
 
 /** The last shelf height main was told about. `-1` so the first report is sent. */
 let reportedNoticeHeight = -1;
+
+/**
+ * Whether the drawing overlay is on screen, as **main** last reported it.
+ *
+ * Read back rather than tracked locally, because main owns the window: the overlay
+ * closes itself from its own Done button, and a HUD holding its own belief would
+ * then need two clicks to reopen it.
+ */
+let overlayOpen = false;
+
+drawButton.addEventListener('click', () => {
+  // Fire-and-forget, and no optimistic toggle. The button follows the window; the
+  // window does not follow the button.
+  loom.overlay.setOpen(!overlayOpen);
+});
+
+loom.overlay.onStatus((status: OverlayStatus) => {
+  overlayOpen = status.open;
+  drawButton.setAttribute('aria-pressed', String(status.open));
+  drawButton.classList.toggle('btn-primary', status.open);
+  // The overlay's failures surface on the HUD's own error line, because the overlay
+  // has no words of its own — it is a transparent sheet over the user's desktop —
+  // and because a pen that stopped writing must not be silent about it.
+  if (status.error !== null) {
+    errorLine.textContent = status.error;
+    errorLine.hidden = false;
+    reportNoticeHeight();
+  }
+});
 
 function must(id: string): HTMLElement {
   const element = document.getElementById(id);

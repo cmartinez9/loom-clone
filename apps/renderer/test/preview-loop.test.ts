@@ -145,11 +145,13 @@ class TargetCompositor implements PreviewCompositor {
   refuse = false;
   /** Stands in for a `text` span drawn with no atlas: skipped, counted, not fatal. */
   skipText = false;
+  /** Stands in for a stroke whose coverage pass got no scratch: the same bargain. */
+  skipInk = false;
   renders = 0;
   presents = 0;
   /** Renders that held instead of drawing, because `frameAt` missed. */
   holds = 0;
-  readonly annotations = { textSpansWithoutAtlas: 0 };
+  readonly annotations = { textSpansWithoutAtlas: 0, strokesWithoutScratch: 0 };
 
   render(frames: CompositorFrames): void {
     this.renders += 1;
@@ -160,6 +162,7 @@ class TargetCompositor implements PreviewCompositor {
     }
     this.target = 'unredacted-screen';
     if (this.skipText) this.annotations.textSpansWithoutAtlas += 1;
+    if (this.skipInk) this.annotations.strokesWithoutScratch += 1;
     if (this.refuse) {
       this.target = 'background';
       throw new Error('annotation "a-blur": blur has no usable `center` channel');
@@ -458,7 +461,7 @@ describe('PreviewLoop', () => {
   });
 });
 
-describe('PreviewLoop and the annotation surface’s two failure modes', () => {
+describe('PreviewLoop and the annotation surface’s failure modes', () => {
   function refusingLoop(
     compositor: TargetCompositor,
     source: StubSource = stubSource({ frameAt: () => fakeVideoFrame(0) }),
@@ -508,6 +511,52 @@ describe('PreviewLoop and the annotation surface’s two failure modes', () => {
     compositor.skipText = true;
     scheduler.tick();
     expect(onError).toHaveBeenCalledTimes(2);
+    loop.stop();
+  });
+
+  it('degrades a stroke with no scratch target, and says so with the same latch', () => {
+    // `AnnotationPass.strokesWithoutScratch` is the stroke pass's counterpart to
+    // `textSpansWithoutAtlas`: the pass returns rather than throwing, because ink
+    // that fails to draw is visible and cosmetic where a redaction that fails is
+    // invisible and publishes a secret. A count nobody reads buys none of that — a
+    // stroke lost to GL memory pressure would be completely silent.
+    const compositor = new TargetCompositor();
+    compositor.skipInk = true;
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    for (let i = 0; i < 30; i++) scheduler.tick();
+
+    // Degraded, not refused: the frame still composited and still published.
+    expect(compositor.published).toBe('redacted-composite');
+    expect(loop.running).toBe(true);
+    expect(onError).toHaveBeenCalledOnce();
+    expect((onError.mock.calls[0]?.[0] as Error).message).toMatch(/stroke/);
+
+    // Latched exactly as the atlas is, and cleared by a frame that drew clean.
+    compositor.skipInk = false;
+    for (let i = 0; i < 5; i++) scheduler.tick();
+    expect(onError).toHaveBeenCalledOnce();
+    compositor.skipInk = true;
+    scheduler.tick();
+    expect(onError).toHaveBeenCalledTimes(2);
+    loop.stop();
+  });
+
+  it('reports the two degradations separately, so one does not mask the other', () => {
+    // One shared latch would report whichever condition arrived first and stay
+    // quiet about the other for the rest of the run.
+    const compositor = new TargetCompositor();
+    compositor.skipText = true;
+    compositor.skipInk = true;
+    const { loop, scheduler, onError } = refusingLoop(compositor);
+
+    loop.start();
+    for (let i = 0; i < 10; i++) scheduler.tick();
+
+    const messages = onError.mock.calls.map((call) => (call[0] as Error).message);
+    expect(messages.filter((m) => m.includes('atlas'))).toHaveLength(1);
+    expect(messages.filter((m) => m.includes('stroke'))).toHaveLength(1);
     loop.stop();
   });
 

@@ -45,6 +45,18 @@ const CONSTANTS: Record<string, number> = {
   ARRAY_BUFFER: 0x8892,
   STATIC_DRAW: 0x88e4,
   TRIANGLE_STRIP: 0x0005,
+  TRIANGLES: 0x0004,
+  DYNAMIC_DRAW: 0x88e8,
+  // The blend state the stroke pass turns on and off. Real numbers rather than the
+  // Proxy's default no-op function, so a call trace can say *which* equation ran —
+  // "blendEquation was called" and "coverage is accumulated with MAX" are different
+  // claims and only the second one is the property.
+  FUNC_ADD: 0x8006,
+  MAX: 0x8008,
+  ZERO: 0,
+  ONE: 1,
+  SRC_ALPHA: 0x0302,
+  ONE_MINUS_SRC_ALPHA: 0x0303,
   DEPTH_TEST: 0x0b71,
   BLEND: 0x0be2,
   SCISSOR_TEST: 0x0c11,
@@ -76,6 +88,18 @@ export interface FakeGlOptions {
    * queries and a test can check they stay balanced across a throw.
    */
   timerQuery?: boolean;
+  /**
+   * Record every entry point called, in order, with its numeric arguments.
+   *
+   * Opt-in for the reason the other two are: a call log is an assertion about *how*
+   * a pass is written, and most of what this stub is used for is deliberately an
+   * assertion about what a caller can still observe afterwards. The one thing it is
+   * right for is an algorithm whose correctness is an ordering — the stroke pass
+   * accumulates coverage into a scratch and composites **once**, and whether it does
+   * that is not visible in a frame the real gate renders, because a single opaque
+   * stroke looks the same either way.
+   */
+  traceCalls?: boolean;
 }
 
 export interface FakeGl {
@@ -86,6 +110,8 @@ export interface FakeGl {
   fill: number;
   /** How many times `readPixels` was actually called through to. */
   readPixelCalls: number;
+  /** Every call, in order, when `traceCalls` is on. `name(arg, arg, …)`. */
+  readonly calls: readonly string[];
   readonly clears: number;
   readonly draws: number;
   readonly queryBegins: number;
@@ -105,7 +131,23 @@ export function fakeGl(options: FakeGlOptions = {}): FakeGl {
     queryEnds: 0,
     clearColor: [0, 0, 0, 1],
     pixels: options.trackPixels === true ? new Uint8Array(width * height * 4) : null,
+    calls: [] as string[],
   };
+
+  /** One line of the trace. Objects print as `#`, so a handle's identity never leaks in. */
+  function trace(name: string, args: unknown[]): void {
+    if (options.traceCalls !== true) return;
+    const printed = args
+      .map((arg) =>
+        typeof arg === 'number' || typeof arg === 'boolean' || typeof arg === 'string'
+          ? String(arg)
+          : arg === null || arg === undefined
+            ? 'null'
+            : '#',
+      )
+      .join(',');
+    state.calls.push(`${name}(${printed})`);
+  }
 
   const target = {
     drawingBufferWidth: width,
@@ -137,9 +179,11 @@ export function fakeGl(options: FakeGlOptions = {}): FakeGl {
       state.queryEnds += 1;
     },
     clearColor: (r: number, g: number, b: number, a: number) => {
+      trace('clearColor', [r, g, b, a]);
       state.clearColor = [r, g, b, a];
     },
-    clear: () => {
+    clear: (...args: unknown[]) => {
+      trace('clear', args);
       state.clears += 1;
       const pixels = state.pixels;
       if (pixels === null) return;
@@ -151,7 +195,8 @@ export function fakeGl(options: FakeGlOptions = {}): FakeGl {
         pixels[at + 3] = bytes[3] ?? 255;
       }
     },
-    drawArrays: () => {
+    drawArrays: (...args: unknown[]) => {
+      trace('drawArrays', args);
       state.draws += 1;
       state.pixels?.fill(DRAWN);
     },
@@ -181,8 +226,12 @@ export function fakeGl(options: FakeGlOptions = {}): FakeGl {
     get(base, property) {
       if (property in base) return base[property as keyof typeof base];
       if (typeof property === 'string' && property in CONSTANTS) return CONSTANTS[property];
-      // Every other GL entry point is a no-op that returns nothing.
-      return () => undefined;
+      // Every other GL entry point is a no-op that returns nothing — traced, so a
+      // pass whose correctness is its *ordering* can be asserted on.
+      return (...args: unknown[]) => {
+        trace(String(property), args);
+        return undefined;
+      };
     },
   }) as unknown as WebGL2RenderingContext;
 
@@ -211,6 +260,9 @@ export function fakeGl(options: FakeGlOptions = {}): FakeGl {
     },
     get queryEnds() {
       return state.queryEnds;
+    },
+    get calls() {
+      return state.calls;
     },
   };
 }

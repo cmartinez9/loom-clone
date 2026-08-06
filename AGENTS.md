@@ -80,27 +80,32 @@ packages/design/   "Pressroom": tokens, type scale, icons, self-hosted fonts.
 packages/decode/   the ONE decode path: DemuxIndex, FrameRing, SourceReader.
 packages/compositor/  the ONE compositor: WebGL2 `Compositor`, pure draw calls, plus
                    `AnnotationPass` (blur, mask, arrow, rect, ellipse, highlight,
-                   text). `@loom/compositor/raster` is its one impure subpath — the
-                   glyph rasteriser, the `@loom/format/fs` bargain applied to a
-                   canvas.
+                   text, stroke). `@loom/compositor/raster` is its one impure
+                   subpath — the glyph rasteriser, the `@loom/format/fs` bargain
+                   applied to a canvas.
 packages/edl/      the timeline model (report §3): tracks, channels, keyframes, the
                    two evaluators, `compile`/`resolve`, inverse ops and undo/redo,
                    `src/generators/` — report §6: cursor-follow, auto-zoom-on-click,
-                   the §6.6 comfort budget, and §3.5's regenerate and bake — and what
-                   an annotation span's channels and style MEAN (`annotations.ts`).
-                   Owns the SEMANTICS; `@loom/format` owns the `EditDocument` types
-                   and their schema. `ResolvedState` lives here and the compositor
-                   imports it. `test/corpus/` is phase 10's ten real recordings.
+                   the §6.6 comfort budget, and §3.5's regenerate and bake — what an
+                   annotation span's channels and style MEAN (`annotations.ts`), and
+                   the live overlay's import path (`drawing.ts`). Owns the SEMANTICS;
+                   `@loom/format` owns the `EditDocument` types and their schema.
+                   `ResolvedState` lives here and the compositor imports it.
+                   `test/corpus/` is phase 10's ten real recordings.
 packages/sampler/  the 120 Hz cursor sampler, CGEventTap clicks and cursor bitmaps.
                    `native/` is an Objective-C CLI built by one `clang` call into
                    `dist/native/`; the TypeScript half parses its NDJSON and has no
                    filesystem of its own. Main-process only.
 apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
-                   PermissionManager, loom:// protocol, IPC.
+                   PermissionManager, OverlayController, loom:// protocol, IPC.
+                   `verify/marker.ts` is the paint-capture-count instrument phases 2
+                   and 12 both prove content protection with — one instrument, so
+                   there is one opinion about what counts as evidence.
 apps/renderer/     renderer windows. First-run setup, library, recorder HUD, the hidden
                    capture page (screen in `capture/main.ts`, camera in
-                   `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`)
-                   and the preview loop today; overlay and editor later.
+                   `capture/webcam.ts`, the two audio tracks in `capture/audio.ts`),
+                   the live drawing overlay (`overlay/main.ts`) and the preview loop
+                   today; the editor later.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -454,6 +459,132 @@ window weight_ — the `blendMs` half, which a "did it draw" check cannot see. S
 disk and require the gate to notice. The export _pipeline_ is phase 8's; the gate's
 export loop is two lines written out rather than imported, on purpose.
 
+## The live drawing overlay, in one paragraph
+
+Phase 12. A transparent, full-screen, always-on-top window with
+`setContentProtection(true)` (`drawing-overlay` in `windows.ts`), whose strokes are
+appended to `events/drawing.ndjson` — §2.5's stream shape, **one line per stroke**
+written when the pen comes up, plus `erase` and `clear` events — and imported at edit
+time by `packages/edl/src/drawing.ts` as **one generated annotation track**. No new
+primitive: a stroke is a `kind: 'object'` span of `type: 'stroke'`, placed by
+`center`/`size` like a rectangle, with the polyline itself in `style.points`
+(normalized `-1..1` inside the span's own box, so dragging or scaling the ink is
+ordinary keys rather than a rewrite of every coordinate) and the reveal in a
+`progress` channel the compositor truncates by **arc length**. Deleting it is
+`track.remove`; there is no drawing-shaped special case, which is the whole of §8's
+_"deletable in the editor"_. The reason strokes are logged rather than burned in is
+the middle sentence of that gate: the overlay is out of the captured pixels, so the
+editor re-composites the ink at full resolution over whatever zoom and trim the user
+ends up with.
+
+**The overlay is an accessory, and that inverts the priority blur and mask have.**
+A pen that fails costs a pen; a recording that fails costs the thing the user pressed
+record for. So `apps/main/src/overlay.ts` catches every failure on its path, turns it
+into `OverlayStatus.error`, and never lets one reach `RecorderSession` — including
+`finish()`, which the recorder awaits inside `finalize`. §7.3's _"an audio failure
+never fails a recording"_ is the same argument one level up, and ink is further from
+the point of a recording than audio is. `RecorderSession` with nothing attached
+behaves exactly as it did before this phase.
+
+**Click-through is two states and they are named.** The window is created ignoring
+mouse events with `{ forward: true }` — the forwarding is the mechanism, not a
+detail: it is what lets the page see the pointer arrive over its own palette while
+clicks still fall through to the app underneath, and therefore what makes an overlay
+that swallows nothing still reachable. It is armed only while the user has a pen in
+hand. And it never activates: `focusable: false` on the role, `showInactive()` in
+`OverlayController`, and `WindowRegistry.reveal` refuses to `focus()` any window whose
+role declared itself non-focusable. The cost is that a non-activating window on macOS
+receives mouse events and **not** keystrokes, which is why nothing here is dismissed
+with a key — the palette's Done button, the HUD's Draw toggle and the recording ending
+are the three ways out. The third is `OverlayController.finish()`, and it goes through
+the same `setOpen(false)` the other two do rather than round it: one close path, which
+is also the one that clears `#armed`, so the overlay cannot come back from a later open
+still holding the last recording's mouse capture.
+
+**A stroke's `t` is the recording clock minus an age, never a renderer's timestamp.**
+The two processes share no time origin — a renderer's `performance.now()` starts when
+its document did — so `StrokeMsg` carries `startedMsAgo`/`endedMsAgo` and main
+subtracts them from `RecorderSession.sourceTimeNowSec()`. That reader _interpolates_
+where `elapsedSec()` deliberately does not: the HUD's timer must stall when the
+capture stalls, and a stroke stamped at the last frame's time would be most of a
+second early on an idle desktop, where ScreenCaptureKit emits 1.4 fps.
+
+**The gate is `test/phase12-overlay.test.ts`**, in a real Electron renderer in front
+of a real window server, and it measures §8's first and third sentences. Live ink: real
+`sendInputEvent` gestures into the shipping page, the canvas read back through
+`getImageData`, with the inked box checked against where the hand went and a control —
+the same gestures with the pen up — that must ink nothing. Deletable:
+`packages/edl/test/drawing.test.ts`, through `applyOps` and `EditHistory`, with the log
+the gate's real pen actually wrote fed back through the shipping importer. Ten
+entries in `npm run verify:mutation` break the production source on disk, and each one
+names what has to notice it — `apps/main/test/overlay.test.ts` for the window's own
+rules, `drawing.test.ts` for the import, `stroke-pass.test.ts` and phase 11's golden
+gate for the ink. None of them lands on the renderer gate itself: the one mutation that
+needed it was `setContentProtection` at the role, and it left with the check.
+
+**The middle sentence — absent from the capture — is `overlay-content-protection` in
+`apps/main/src/verify/permissions-harness.ts`, and it is unwitnessed.** Measuring it
+means capturing the screen, which needs the Screen Recording grant, so it lives where
+phase 2 put the identical measurement of the HUD rather than in `npm test`: a harness
+whose contract is that a check which cannot run reports `blocked` and says why. All
+five readings and all three thresholds are phase 2's own, moved across unchanged —
+`CONTROL_MIN = 0.5`, `PROTECTED_MAX = 0.01`, and a `BACKDROP_MIN = 0.99` derived rather
+than tuned. **Content protection is an observation of pixels, not a TCC answer**; the
+grant is only the camera the check holds while asking. It is sealed by `sealReport`
+like everything else and is _not_ in `alwaysHonest`.
+
+Two consequences, both recorded rather than papered over. `npm run verify:mutation` has
+**no** entry for `setContentProtection` at the `drawing-overlay` role — the mutation
+`the-drawing-overlay-is-not-content-protected` was removed with the check, because no
+vitest file can catch it (`windows.test.ts` structurally cannot: the mutation leaves the
+role still _declaring_ the flag and only skips the call), and a mutation reported as
+caught when nothing caught it is worse than the gap. What guards the property now is the
+harness check's own **control window**, which must show the marker before the protected
+window's absence means anything. And the check has **never been run**: see the
+`overlay-content-protection` row in § Phase 2 gate status.
+
+**Absent from the capture is five readings, not one, because an absence is the easiest
+thing in the world to fake.** The instrument is phase 2's, shared rather than
+reimplemented (`apps/main/src/verify/marker.ts`). The figures below were measured on
+this machine from an **unpackaged dev run**, by the vitest gate this check was moved out
+of — not from a signed bundle, and not by the shipped check, which nobody has run. They
+are kept because a dev binary's screen capture is a real screen capture and this is a
+pixel observation rather than a TCC answer, so provenance does not taint them; they are
+what the harness check should reproduce, not evidence that it has:
+
+| reading                                                   |   value | what it rules out                         |
+| --------------------------------------------------------- | ------: | ----------------------------------------- |
+| control — same role, same page, same calls, flag NOT set  |  99.86% | the instrument cannot see a window at all |
+| the overlay's own rectangle, overlay painted the marker   |  0.106% | the overlay is in the capture             |
+| **the same rectangle, overlay hidden**                    |  0.106% | that residue being _ours_                 |
+| **a marker window UNDER the overlay, seen through it**    |  99.86% | the overlay hiding anything               |
+| whole-frame marker scan, against the control's 166,400 px | 166,409 | the overlay being elsewhere in the frame  |
+
+The third row answers the only question the first two leave open. The protected
+rectangle does not read exactly 0.0%, and what it reads is **whatever is on the user's
+desktop behind an invisible window**: hiding the overlay leaves the reading and its
+mean colour unchanged to three decimals. The fourth is the strong form of the claim
+and the reason it exists — _"under 1% marker"_ also passes when the capture is dim,
+the desktop is plain, or the rectangle is slightly wrong, so a marker-painted
+**unprotected** window is placed under the overlay, the overlay is repainted a
+non-marker colour, and the capture must come back holding the whole thing. Its 99%
+floor is derived rather than tuned: the rectangle's perimeter is 1.01% of its area, so
+a one-pixel resampled border is the most that can be lost.
+
+**Two things this measurement got wrong before it got them right**, and both moved
+with it into the harness. A control must differ from the thing under test in **exactly
+one respect**, and the first version differed in three — window level,
+`setVisibleOnAllWorkspaces`, mouse policy — because it was built from the role's
+constructor options alone and never received the calls `OverlayController.setOpen`
+makes; `applyOverlayWindowCalls` now makes them to both windows. And
+**`setContentProtection(false)` does not un-hide a window that was already shown
+protected**, which turned an experiment into hours of reading "the flag is off and it
+is still absent" as a defect in the product — so do not try to test that end of it by
+turning the flag off at runtime. Breaking the flag at the role is what would test it,
+and there is no longer a mutation that does: the property's only guard is the harness
+check's control window, and it has survived a version of this measurement whose control
+was not a control.
+
 ## Sharp edges
 
 - **Audio and video capture clocks do not share an epoch.** Measured by
@@ -520,6 +651,11 @@ export loop is two lines written out rather than imported, on purpose.
   writer once ~60 frames are behind it. Killing purely on a 400 ms timer gave ~80
   frames on an idle machine and ~36 under the full suite, where two lost frames is
   5.6% and the gate failed on arithmetic. See `MIN_HANDED_FRAMES`.
+- **`npm run verify:mutation` edits the production source on disk while it runs, and
+  restores what it read.** So do not touch a source file while it is going: the
+  restore puts back the bytes it read at the start, silently reverting anything you
+  changed in between. It handles `SIGINT`/`SIGTERM` and restores in a `finally`, so
+  killing it is safe — but a concurrent edit is not. Run it, or edit; not both.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
@@ -750,6 +886,23 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   fields (`REMOVABLE_TRACK_KEYS`, derived from the type so a new optional field is a
   compile error rather than a silent gap) — and `applyOpInPlace` refuses a patch value
   of `undefined` outright, so there is only one representation to get right.
+- **A window that declares `focusable: false` must not be focused by the thing that
+  opens it.** `WindowRegistry.reveal` is where that lives, and it covers the
+  countdown as well as the drawing overlay. The registry used to call
+  `window.focus()` unconditionally, which would undo the overlay's whole
+  non-activating arrangement from the outside, on a line nobody reading the §1.2
+  table would think to check.
+- **A transparent role needs `backgroundColor: '#00000000'` of its own.** The
+  registry paints every window `groundColor()` so a first paint is never a white
+  flash; on a full-screen transparent window that is a sheet of paper over the
+  desktop.
+- **Two renderers draw one stroke, and only one of them is on §4.5's list.** The
+  overlay's live canvas is a 2D `CanvasRenderingContext2D` and the editor's is the
+  WebGL2 stroke pass. §4.5's must-be-identical rule is about _preview and export_,
+  which are both the second one; the live pen has to be in the overlay because that
+  is what the presenter is looking at. They are held to agreeing on the _shape_ of a
+  line — round joins, round caps, `strokeWidth` as a fraction of the frame width —
+  and nothing tighter.
 - **An empty `activeRanges` means never active, and "always" is `[[0, 1e9]]`** — the
   idiom §2.6's reference document uses. That is the literal reading of §3.5's "0
   outside activeRanges", and it is what lets a track be parked without deleting it.
@@ -948,18 +1101,19 @@ it through LaunchServices and runs the checks from inside the real bundle. Last 
 2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
 `responsibleForSelf: true`, so `sealReport` downgraded nothing. The run's own outcome
 is `incomplete` rather than `verified`, because `verified` needs every check to pass
-and the click row is `skipped`. The table's last row was added afterwards and has not
-been run at all — the figures above are from the 2026-08-05 bundle and say nothing
-about it.
+and the click row is `skipped`. The table's last **two** rows were added afterwards and
+have not been run at all — the figures above are from the 2026-08-05 bundle and say
+nothing about either of them.
 
-| Check                   | Status      | Evidence                                                                                                                                                                                                                                                       |
-| ----------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bundle-identity`       | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                                                                       |
-| `frame-authorisation`   | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                                                                 |
-| `screen-enumeration`    | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                                                                         |
-| `content-protection`    | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                            |
-| `accessibility-clicks`  | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in this run's window, so it measured no rate. Rate and latency were deferred to phase 10 by captain decision — measured there; see § Post-grant click rate and latency.  |
-| `microphone-revocation` | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8. |
+| Check                        | Status      | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundle-identity`            | **pass**    | Packaged, launched by launchd, signing as the frozen id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `frame-authorisation`        | **pass**    | A non-capture window asking `getDisplayMedia` is refused (`AbortError`) by the installed handler. Needs no grant — refusal happens before TCC.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `screen-enumeration`         | **pass**    | One screen source, with a `display_id` and a thumbnail carrying a real picture rather than the black rectangle a denied grant returns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `content-protection`         | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `accessibility-clicks`       | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in this run's window, so it measured no rate. Rate and latency were deferred to phase 10 by captain decision — measured there; see § Post-grant click rate and latency.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `microphone-revocation`      | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `overlay-content-protection` | **skipped** | Phase 12's, added after that run and **never executed**. The check is written — five readings and phase 2's own thresholds, moved out of `test/phase12-overlay.test.ts` because it needs the Screen Recording grant to look — and its control window is what would make its result mean anything: the protected overlay's absence counts only once the control has shown the marker. Running it at all repackages and re-signs the bundle, which voids the captain's grants, so it awaits the project's single signed-bundle pass. The figures in § The live drawing overlay are from an unpackaged dev run of the vitest gate it replaced, not from this check. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from
 the HUD's rectangle" passes just as well when the capture is black, the coordinates are

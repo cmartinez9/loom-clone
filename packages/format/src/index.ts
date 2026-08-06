@@ -85,6 +85,7 @@ export type {
   Ease,
   EditDocument,
   GeneratorSpec,
+  GeneratorType,
   Keyframe,
   OutputSpec,
   Span,
@@ -93,6 +94,7 @@ export type {
   Track,
   TrackKind,
 } from './types/edit.ts';
+export { GENERATOR_TYPES } from './types/edit.ts';
 
 export type { CursorImage, CursorIndexDoc, FrameIndexDoc } from './types/sidecar.ts';
 export type { SettingsDoc, SetupState } from './types/settings.ts';
@@ -103,10 +105,14 @@ export type {
   CursorLogLine,
   CursorMetaEvent,
   CursorSample,
+  DrawingClearEvent,
+  DrawingEraseEvent,
   DrawingEvent,
+  DrawingStrokeEvent,
+  DrawingTool,
   ModifierMask,
 } from './types/events.ts';
-export { isCursorSample, MODIFIER } from './types/events.ts';
+export { isCursorSample, isDrawingStroke, MODIFIER } from './types/events.ts';
 
 // ---- bundle layout ---------------------------------------------------------
 export {
