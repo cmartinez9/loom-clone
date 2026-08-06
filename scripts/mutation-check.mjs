@@ -1831,6 +1831,77 @@ export const MUTATIONS = [
     mustFail: [P15_GATE, EDITOR_ZOOM],
   },
   {
+    name: 'both-generators-share-one-stacking-rank',
+    breaks:
+      "§3.5's order for the two generated tracks: cursor-follow at the bottom and " +
+      'auto-zoom above it. With one rank they land in whichever order the buttons ' +
+      "were pressed, and cursor-follow on top outranks §6.5 step 3's edge-snapped " +
+      "cluster framing inside every click segment while auto-zoom's `amount` still " +
+      'applies — the shot zooms in on a click and frames somewhere else.\n' +
+      '   `packages/edl/test/generator-stacking.test.ts` pins the arrangement and ' +
+      'does **not** catch this: it exercises what the model can express, and what ' +
+      'was wrong was the index the editor asked for.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find: "  'auto-zoom-on-click': 1,",
+    replace: "  'auto-zoom-on-click': 0,",
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'a-regenerate-re-sorts-the-generated-tracks',
+    breaks:
+      "`regenerateOps`'s `options.at ?? existing`, which exists so a replacement " +
+      'stays at the index it had. Naming one on that path sends every regenerated ' +
+      'track back to its rank, so *Regenerate* on the upper generator silently ' +
+      'drops it under the lower one — a document that validates, a picture that ' +
+      'changed, and nothing on screen that says an ordering moved.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find: '  return replaces ? { type } : { type, at: insertionIndexFor(doc, type) };',
+    replace: '  return { type, at: insertionIndexFor(doc, type) };',
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'a-keyframe-drag-leaves-its-own-window',
+    breaks:
+      "the bound that keeps a dragged key inside its region's own `activeRanges` " +
+      'entry. The neighbour bound alone leaves `lowSec` at 0 for the first key of ' +
+      'the first region, so a drag takes it out of the window; `zoomRegionsOf` then ' +
+      'filters it out, the region reads back three keys and starting at its hold, ' +
+      'and the next region-level edit rebuilds the track from that misreading and ' +
+      'writes it in. The user has no way to see any of it happen.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  const bounds = keyBounds(track, channel.keys, ref.t);',
+    replace: '  const bounds = neighbourBounds(channel.keys, ref.t);',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'the-amount-slider-commits-on-every-step',
+    breaks:
+      'the two phases of a slider gesture. `input` is provisional and `change` ' +
+      'commits, so one drag of the thumb is one op, one revision and one undo step; ' +
+      'committing on every step means undoing a drag takes as many undos as the ' +
+      'pointer moved, which makes undo useless for the one control the captain named ' +
+      'by hand. It also recompiles on each one — it is `EditorProject.preview` that ' +
+      "debounces on §3.6's 100 ms and `commit` that clears that debounce.",
+    file: 'apps/renderer/src/editor/inspector.ts',
+    find: "    spec.onChange(parsed, 'move');",
+    replace: "    spec.onChange(parsed, 'end');",
+    mustFail: [P15_GATE],
+  },
+  {
+    name: 'the-inspector-rebuilds-under-its-own-thumb',
+    breaks:
+      'the guard that lets a control outlive a single event. Without it a rebuild ' +
+      'runs `replaceChildren` over the `<input type="range">` the pointer is holding ' +
+      'and the drag ends on first contact — the control does not work, while every ' +
+      'cheaper check still reports the right number because the last value it was ' +
+      'given did land. Only a gesture of more than one event can see it, which is ' +
+      'why the gate drags the slider rather than dispatching one `input`.',
+    file: 'apps/renderer/src/editor/inspector.ts',
+    find: '    if (this.#gesture !== null) return;',
+    replace: "    if (this.#gesture === 'no-field-is-called-this') return;",
+    mustFail: [P15_GATE],
+  },
+  {
     name: 'a-keyframe-drag-lands-on-its-neighbour',
     breaks:
       'the bound that keeps a dragged key clear of the ones beside it. `setKey` ' +

@@ -412,6 +412,24 @@ export function isKeyEditable(track: Track): boolean {
  * a neighbour would delete that neighbour and report success. {@link neighbourBounds}
  * is what keeps it from ever landing there, and it is applied here rather than in the
  * caller so no control can skip it.
+ *
+ * ## And the key stays inside its own `activeRanges` window
+ *
+ * The neighbour bound alone is not enough, and what it leaves open corrupts a
+ * document silently. The first `amount` key of the first manual region has no
+ * neighbour before it, so its `lowSec` is 0 and a drag could take it **earlier than
+ * the window** {@link buildManualZoomTrack} wrote for that region. {@link
+ * zoomRegionsOf} then filters it out, the region reads back with three keys and a
+ * `startSec` of its hold, the lane's band no longer matches the window, and the next
+ * region-level edit — {@link updateZoomOps} or {@link removeZoomOps}, which rebuild
+ * the whole track from the read-back regions — writes that misreading in. The user
+ * has no way to see any of it happen.
+ *
+ * So the bound is the **intersection** of the neighbour gap and the window the key
+ * lives in, and it is inclusive at both ends because `zoomRegionsOf`'s own filter is:
+ * a key clamped exactly onto its window edge is still one of that region's keys. A
+ * key on a track with no window over it — anything this editor did not write — keeps
+ * the neighbour bound alone.
  */
 export function moveKeyOps(doc: EditDocument, ref: KeyRef, toSec: Seconds): EditOp[] | null {
   const track = doc.tracks.find((t) => t.id === ref.trackId);
@@ -420,7 +438,8 @@ export function moveKeyOps(doc: EditDocument, ref: KeyRef, toSec: Seconds): Edit
   if (channel === undefined) return null;
   const key = channel.keys.find((k) => k.t === ref.t);
   if (key === undefined) return null;
-  const bounds = neighbourBounds(channel.keys, ref.t);
+  const bounds = keyBounds(track, channel.keys, ref.t);
+  if (bounds.lowSec > bounds.highSec) return null;
   const t = clamp(toSec, bounds.lowSec, bounds.highSec);
   if (t === ref.t || !Number.isFinite(t)) return null;
   return [
@@ -484,6 +503,42 @@ export function neighbourBounds(
 }
 
 /**
+ * How far a key may travel: its neighbours, and the window it belongs to.
+ *
+ * The two constraints are independent and both are the user's — one keeps §2.6's
+ * unique, strictly ordered `t`, the other keeps the key inside the region it is part
+ * of. {@link moveKeyOps} argues why the second is not optional.
+ */
+export function keyBounds(
+  track: Track,
+  keys: readonly Keyframe[],
+  t: Seconds,
+): { lowSec: Seconds; highSec: Seconds } {
+  const bounds = neighbourBounds(keys, t);
+  const window = windowContaining(track, t);
+  if (window === null) return bounds;
+  return {
+    lowSec: Math.max(bounds.lowSec, window[0]),
+    highSec: Math.min(bounds.highSec, window[1]),
+  };
+}
+
+/**
+ * The `activeRanges` entry a key sits in, or `null`.
+ *
+ * The `1e-9` on the lower edge is {@link zoomRegionsOf}'s own tolerance, restated
+ * rather than shared so a key this answers "inside" is exactly a key that filter
+ * keeps: the first key of a region sits *on* its window start, and a bound that
+ * disagreed with the reader by one float would drop a key from its own region.
+ */
+function windowContaining(track: Track, t: Seconds): readonly [number, number] | null {
+  for (const range of track.activeRanges) {
+    if (t >= range[0] - 1e-9 && t <= range[1]) return [range[0], range[1]];
+  }
+  return null;
+}
+
+/**
  * The least gap between two keys a drag may leave.
  *
  * A millisecond, which is an eighth of §3.4's 8 ms spring grid — so two keys this
@@ -520,15 +575,14 @@ function clampRegion(input: ZoomRegionInput, sourceDurationSec: Seconds): ZoomRe
   const duration = Math.max(0, sourceDurationSec);
   const shortest = 2 * ZOOM_RAMP_SEC + MIN_HOLD_SEC;
   if (!(duration >= shortest)) return null;
-  let startSec = clamp(input.startSec, 0, duration - shortest);
-  let endSec = clamp(input.endSec, startSec + shortest, duration);
+  // `startSec` is held at `duration - shortest` at the latest, so the low bound the
+  // line below clamps `endSec` against is never past the end of the recording — which
+  // is what makes a region asked for at the very end keep its length and slide
+  // earlier rather than shrink below the two ramps and the minimum hold. It is the
+  // *first* clamp that produces that, not the second.
+  const startSec = clamp(input.startSec, 0, duration - shortest);
+  const endSec = clamp(input.endSec, startSec + shortest, duration);
   if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return null;
-  // The clamp above can only push `endSec` later, so a region asked for at the very
-  // end of the recording keeps its length and slides earlier rather than shrinking.
-  if (endSec > duration) {
-    endSec = duration;
-    startSec = Math.max(0, endSec - shortest);
-  }
   const amount = clamp(
     Number.isFinite(input.amount) ? input.amount : DEFAULT_ZOOM_AMOUNT,
     MIN_ZOOM_AMOUNT,

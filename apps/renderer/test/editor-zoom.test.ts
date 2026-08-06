@@ -524,6 +524,83 @@ describe('keyframe editing', () => {
     expect(roundTrip(doc, ops ?? [])).toEqual(withoutRevision(doc));
   });
 
+  /**
+   * A key dragged out of its own `activeRanges` window is data corruption the user
+   * cannot see: `zoomRegionsOf` filters it out, the region reads back short and
+   * starting at its hold, the lane's band stops matching the window, and the next
+   * region-level edit rebuilds the track from that misreading and writes it in.
+   */
+  describe('a keyframe stays inside the window it belongs to', () => {
+    const amountOf = (document_: EditDocument): number[] =>
+      (document_.tracks[0]?.channels['amount']?.keys ?? []).map((key) => key.t);
+    const windowOf = (document_: EditDocument): [number, number] => {
+      const range = document_.tracks[0]?.activeRanges[0];
+      expect(range, 'the manual track has no window').toBeDefined();
+      return [range?.[0] ?? 0, range?.[1] ?? 0];
+    };
+
+    it('refuses a drag before the window start — the first key is already on it', () => {
+      const window = windowOf(doc);
+      const first = amountKeys[0];
+      expect(first?.t).toBeCloseTo(window[0], 9);
+      // Nothing to do rather than a key at t = 5 on a region that opens at 10: the
+      // neighbour bound alone leaves `lowSec` at 0 for the first key of the first
+      // region, which is what let a drag take it out of its own window.
+      expect(
+        moveKeyOps(doc, first ?? { trackId: '', channel: '', t: 0 }, window[0] - 5),
+      ).toBeNull();
+    });
+
+    it('stops a drag past the window end ON the window end', () => {
+      const window = windowOf(doc);
+      const last = amountKeys[amountKeys.length - 1];
+      const next = apply(doc, moveKeyOps(doc, last ?? { trackId: '', channel: '', t: 0 }, 1000));
+      const times = amountOf(next);
+      expect(times).toHaveLength(4);
+      expect(times[3]).toBeCloseTo(window[1], 9);
+    });
+
+    it('leaves the region readable, and every key inside its window', () => {
+      // The property, not the arithmetic: whatever a drag does, the region has to read
+      // back as the one that was placed. Both directions, because the two bounds come
+      // from different places — a neighbour on one side, the window on the other.
+      for (const [key, to] of [
+        [amountKeys[0], -20],
+        [amountKeys[amountKeys.length - 1], 1000],
+      ] as const) {
+        const ops = moveKeyOps(doc, key ?? { trackId: '', channel: '', t: 0 }, to);
+        const next = ops === null ? doc : apply(doc, ops);
+        const [start, end] = windowOf(next);
+        expect(amountOf(next), `dragged to ${String(to)}`).toHaveLength(4);
+        for (const t of amountOf(next)) {
+          expect(t, `dragged to ${String(to)}`).toBeGreaterThanOrEqual(start);
+          expect(t, `dragged to ${String(to)}`).toBeLessThanOrEqual(end);
+        }
+        const region = zoomRegionsOf(next)[0];
+        expect(region?.startSec, `dragged to ${String(to)}`).toBeCloseTo(10, 6);
+        expect(region?.amount, `dragged to ${String(to)}`).toBeCloseTo(2, 6);
+      }
+    });
+
+    it('keeps the neighbour bound alone for a track with no window over the key', () => {
+      // A baked track whose keys sit outside its own `activeRanges` is not this
+      // editor's to re-frame; the §2.6 bound is the only one that applies there.
+      const { generator, ...rest } = generatedZoom([[8, 14]], 2);
+      const baked: Track = {
+        ...rest,
+        origin: 'manual',
+        generatedFrom: generator!,
+        activeRanges: [[30, 40]],
+      };
+      const withBaked: EditDocument = { ...empty(), tracks: [baked] };
+      const first = zoomKeysOf(withBaked)[0];
+      const ops = moveKeyOps(withBaked, first ?? { trackId: '', channel: '', t: 0 }, 1);
+      expect(ops).not.toBeNull();
+      const next = apply(withBaked, ops);
+      expect(next.tracks[0]?.channels['amount']?.keys[0]?.t).toBeCloseTo(1, 9);
+    });
+  });
+
   it('refuses to delete a key that would leave a channel unable to describe a change', () => {
     // A spring channel with one key is a step from rest to that key, held for the
     // rest of the recording — so deleting down to one is a zoom that never comes back.

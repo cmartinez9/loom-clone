@@ -190,6 +190,15 @@ function describeRun(report: ControlsReport): string {
         `frames=${e.frames.map((f) => `${f.label}:${f.hash}`).join(',')}`,
     ),
     ...report.deltas.map((d) => `  delta ${d.label.padEnd(10)} ${d.meanAbs.toFixed(3)} / 255`),
+    ...(report.slider === null
+      ? ['  slider      never driven']
+      : [
+          `  slider      ${String(report.slider.moves)} moves survived=${String(
+            report.slider.survivedTheDrag,
+          )} revisions=${String(report.slider.revisions)} ` +
+            `(one step costs ${String(report.slider.controlRevisions)}) ` +
+            `asked=${report.slider.asked.toFixed(2)} amount=${report.slider.amount.toFixed(3)}`,
+        ]),
     '',
   ].join('\n');
 }
@@ -285,6 +294,46 @@ describe('the editor’s controls', () => {
       expect(manual.regions, detail).toHaveLength(1);
       expect(manual.regions[0]?.startSec, detail).toBeLessThanOrEqual(INSIDE_SEC);
       expect(manual.regions[0]?.endSec, detail).toBeGreaterThanOrEqual(INSIDE_SEC);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
+    'drags the Amount slider: the element survives its own drag, and it is ONE undo step',
+    async () => {
+      const report = await gate();
+      const detail = describeRun(report);
+      const slider = report.slider;
+      expect(slider, detail).not.toBeNull();
+      if (slider === null) return;
+
+      // Non-vacuous first: a single synthetic `input` is not a drag, and it is
+      // precisely what a slider destroyed by its own first event still survives.
+      expect(slider.moves, detail).toBeGreaterThan(3);
+
+      // The control the captain named by hand has to be usable, and "usable" here is
+      // a mechanical claim: the `<input type="range">` the gesture is holding is still
+      // the one in the document when the gesture ends. Committing on `input` rebuilt
+      // the panel over it, so the thumb stopped after one step — an interaction that
+      // fails on first contact while every cheaper check still reports the right
+      // number, because the *last* value it was given did land.
+      expect(slider.survivedTheDrag, detail).toBe(true);
+
+      // And one gesture is one edit — measured against one step of the same control on
+      // the same document rather than against a number written here. `input` is
+      // provisional and never sent, `change` commits once, so a six-step drag costs
+      // exactly what a single change costs. A commit per step would leave the drag
+      // needing as many undos as the pointer moved, which makes undo useless for the
+      // one control this phase exists for.
+      //
+      // The control has to have cost something first: a step that committed nothing
+      // would satisfy the equality with a slider that does not work at either length.
+      expect(slider.controlRevisions, detail).toBeGreaterThan(0);
+      expect(slider.revisions, detail).toBe(slider.controlRevisions);
+
+      // The drag actually landed on what it asked for last, rather than on some
+      // intermediate value a dropped `change` would have left behind.
+      expect(slider.amount, detail).toBeCloseTo(slider.asked, 2);
     },
     GATE_TIMEOUT_MS,
   );

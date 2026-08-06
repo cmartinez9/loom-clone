@@ -81,6 +81,39 @@ export interface ExportReading {
   frames: { label: string; timelineSec: number; hash: string; mean: [number, number, number] }[];
 }
 
+/**
+ * The Amount slider, driven as a real two-phase gesture.
+ *
+ * A slider is the one control in the inspector whose interaction outlives a single
+ * event, and both things measured here are things a single synthetic `input` cannot
+ * see: that the element the gesture is holding is still the one in the document when
+ * the gesture ends, and that the whole gesture cost the document **one** revision —
+ * one undo step — rather than one per step of the thumb.
+ */
+export interface SliderGesture {
+  name: string;
+  /** How many `input` events went in before the `change` that committed. */
+  moves: number;
+  /** The node the gesture started on was still the document's when it finished. */
+  survivedTheDrag: boolean;
+  /** What the whole drag cost the document, in revisions. */
+  revisions: number;
+  /**
+   * What **one** step and one `change` on the same control cost, measured beside it.
+   *
+   * The control, and the reason nothing here is a magic number: a revision counts
+   * *ops*, and `updateZoomOps` is `track.remove` + `track.add`, so "one edit" is not
+   * "one revision" and writing either number down would pin the batch's shape instead
+   * of the property. What is asserted is that a six-step drag costs what a single
+   * change costs — and that a single change costs something, or the comparison is
+   * satisfied by a control that does not work either.
+   */
+  controlRevisions: number;
+  /** What the gesture asked for last, and what the region reads back as. */
+  asked: number;
+  amount: number;
+}
+
 /** Mean absolute difference between two decoded export frames, per channel averaged. */
 export interface FrameDelta {
   label: string;
@@ -102,5 +135,7 @@ export interface ControlsReport {
   disk: OnDisk[];
   exports: ExportReading[];
   deltas: FrameDelta[];
+  /** `null` until the gesture has been driven, so a run that died before it says so. */
+  slider: SliderGesture | null;
   notes: string[];
 }

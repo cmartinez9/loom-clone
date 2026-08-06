@@ -740,6 +740,39 @@ and makes its keyframes the user's to edit. Both are offered and the panel says 
 is which; **a key on a live generated track is selectable and not draggable**, because
 an edit there sits in the one place the next regenerate is licensed to discard.
 
+**Where a _generated_ track lands is `GENERATOR_RANK` in `generators.ts`, and it is
+§3.5's order rather than a constant anyone may pick**: cursor-follow at the bottom,
+auto-zoom above it, both below every manual track. The rank is load-bearing because
+cursor-follow emits a `center`-only channel with a single always-on `activeRange`, so a
+cursor-follow track sitting _above_ auto-zoom outranks §6.5 step 3's edge-snapped
+cluster framing inside every click segment while auto-zoom's `amount` still applies —
+the shot zooms in on a click and frames somewhere else. `runGenerator` therefore names
+an index **only when there is no track to replace**: on the replacement path
+`regenerateOps` reads `options.at ?? existing`, and naming one there lets a
+_Regenerate_ silently re-order the two generated tracks against each other. **What is
+worth inheriting is how the original defect survived**: both generators were inserted
+at `at: 0`, and `packages/edl/test/generator-stacking.test.ts` — which pins exactly the
+arrangement that was broken — went on passing, because it exercises what the _model_
+can express and the wrong index was the _editor's_. The property belongs to whichever
+code decides it, so the coverage is now in
+`apps/renderer/test/editor-generators.test.ts`, over `runGenerator` itself in **both
+invocation orders**.
+
+**A slider is provisional on `input` and committed on `change`, and the panel does not
+rebuild while one is mid-gesture.** Both halves of `inspector.ts`'s `range`, and each
+closes a different defect that the Amount slider — the captain's own named control —
+had. Committing on `input` ran `replaceChildren` over the very `<input type="range">`
+the pointer was holding, so the drag ended on **first contact**: the focus/caret
+restore in `Inspector.render` can put focus back and cannot put a pointer capture
+back. And it made every step of the thumb an op, a revision and an undo entry, so
+undoing a drag would take as many undos as the pointer moved. The two-phase shape is
+`TimelineUi`'s trim handles and `StageUi`'s drags, deliberately, because a second
+interaction model for the same kind of gesture is a second thing to keep right;
+`InspectorCallbacks` carries the same `phase: 'move' | 'end'` they do. Note which call
+debounces: **`EditorProject.preview` is what waits §3.6's 100 ms, and `commit` clears
+that debounce** — the sentence about a drag costing one compile rather than sixty was
+only ever true of `preview`.
+
 **Annotation geometry is normalized _source_ space, so the pointer has to be converted
 and the conversion is the load-bearing part.** `annotate.ts`'s `outputToSource` is the
 compositor's `sourceSampleRect` + `contentRect` pair inverted, and phase 11's argument
@@ -763,7 +796,12 @@ sample tables: **inside** the manual window they differ (measured 53.6 of 255 me
 absolute), **outside** it they are identical (0.000). The outside reading is the
 control, and it is what a whole class of plausible defects fails — a manual track
 written with `ALWAYS`, a disturbed clip list, a wrong frame selected for a time — every
-one of which changes the picture everywhere. Seven entries in `npm run verify:mutation`
+one of which changes the picture everywhere. **The slider is _dragged_ rather than
+nudged** — several `input`s and one `change` — and that is the only shape that can see
+what one synthetic `input` cannot: the element the gesture is holding is still the
+document's when it ends, and the whole gesture cost `edit.json` **one** revision. A
+single `input` passes over a slider that is destroyed by its own first event, because
+the last value it was given still lands. Twelve entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the one worth
 knowing is `an-annotation-is-placed-in-output-space`, whose guard is deliberately the
 unit test and **not** this gate, which was tried and measured surviving it (the gate
@@ -781,6 +819,39 @@ flag that writes a PNG beside each reading — the way to _look_ at this window,
 
 ## Sharp edges — the editor
 
+- **`StageUi`'s pointer→source mapping has to be refreshed every time the resolved
+  zoom moves, not every time something is selected.** `outputToSource` is the map every
+  pointer on the picture crosses, and it lives on the same `StageState` as the handles
+  over a selected annotation — but nothing is selected for most of this window's life,
+  so a refresh guarded on a selection left the map holding whatever zoom was resolved
+  at the last document, selection or _tool_ change. Scrubbing into a 2.2× segment and
+  then dragging a blur wrote the redaction at the coordinates it would have had at 1×,
+  which is precisely what anchoring annotation geometry in source space exists to
+  prevent. The rubber band round-trips through the same stale map, so it looks right
+  until release. The phase-15 gate does not cover it: it arms the tool _after_ seeking,
+  which is the order in which the map happens to be fresh.
+- **`ZoomRegion.index` is a position in a time-sorted `activeRanges`, so the newest
+  region is not the last one.** `placeZoomOps` sorts the windows by start time;
+  selecting `zoomRegionsOf(...).length - 1` after placing a zoom at 2 s on a document
+  that already had one at 10 s selects the 10 s one, and every field in the panel then
+  tunes a zoom nobody is looking at. `main.ts`'s `selectZoomAt` picks the region that
+  _covers_ the instant that was just placed. (`length - 1` is not the largest index
+  either — `zoomRegionsOf` skips a window whose keys it cannot read.)
+- **A selection is checked against `project.committed`, never `project.document`.** The
+  latter is the _provisional_ document while a drag is live, and a keyframe drag
+  previews its key at the new `t` on every pointermove — so a guard reading it finds no
+  key at the selected `t` and drops the selection on the first move, taking the panel
+  and the lane's marker with it for the rest of the drag. The three things that guard
+  is for — an edit that landed, an undo, a conflict reload — are all committed state.
+- **A manual keyframe is bounded by its region's window as well as by its
+  neighbours.** The neighbour bound leaves `lowSec` at 0 for the first key of the first
+  region, so a drag could take it out of the `activeRanges` entry it belongs to;
+  `zoomRegionsOf` then filters it out, the region reads back three keys and starting at
+  its hold, and the next region-level edit rebuilds the track from that misreading and
+  writes it in — data corruption with nothing on screen that says so. `keyBounds`
+  intersects the two, inclusively at both ends because `zoomRegionsOf`'s own filter is
+  inclusive: the first key of a region sits _on_ its window start, and a bound that
+  disagreed with the reader by one float would drop a key from its own region.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —

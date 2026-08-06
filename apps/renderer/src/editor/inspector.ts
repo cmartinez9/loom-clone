@@ -30,6 +30,20 @@
  * panel's inputs commit on `change` — so a rebuild triggered by somebody else's edit
  * in the middle of a number would eat it. {@link Inspector.render} keeps the focused
  * element when its identity has not changed.
+ *
+ * ## A slider is a gesture, and a gesture is one edit
+ *
+ * A `<input type="range">` is the one control here whose interaction outlives a single
+ * event, and it needs both halves of {@link range} to be right. **Provisional on
+ * `input`, committed on `change`** — the shape `TimelineUi`'s trim handles and
+ * `StageUi`'s drags already use, so one drag of the thumb is one undo step rather than
+ * sixty, and it is `EditorProject.preview` (not `commit`) that debounces the recompile
+ * on §3.6's own 100 ms. And **the panel does not rebuild while the gesture is live**:
+ * committing on `input` ran `replaceChildren` over the very element the pointer had
+ * hold of, which ends the drag on first contact, and the focus/caret restore below
+ * cannot put an in-flight pointer capture back. {@link Inspector.render} therefore
+ * defers to a control that is mid-gesture; the readout under the thumb is written by
+ * the slider itself, so nothing a person is looking at goes stale.
  */
 
 import { formatTimecodeCentis, icon } from '@loom/design';
@@ -62,18 +76,28 @@ export interface InspectorState {
   sourceDurationSec: Seconds;
 }
 
+/**
+ * Where a control is in its own gesture.
+ *
+ * `'move'` is provisional — shown, never committed, never sent — and `'end'` is the
+ * edit. The same two words `StageCallbacks` and `TimelineCallbacks` use, because a
+ * slider drag and a handle drag are the same kind of thing and a second vocabulary for
+ * it would be a second interaction model.
+ */
+export type ControlPhase = 'move' | 'end';
+
 /** Everything the panels do. One callback per edit; none of them applies one itself. */
 export interface InspectorCallbacks {
   onPlaceZoom: () => void;
   onOverrideZoom: () => void;
-  onUpdateZoom: (index: number, patch: Partial<ZoomRegionInput>) => void;
+  onUpdateZoom: (index: number, patch: Partial<ZoomRegionInput>, phase: ControlPhase) => void;
   onRemoveZoom: (index: number) => void;
   onSelect: (selection: Selection) => void;
   onSeek: (sourceSec: Seconds) => void;
   onMoveKey: (view: KeyView, toSec: Seconds) => void;
   onSetKeyValue: (view: KeyView, value: number | number[]) => void;
   onRemoveKey: (view: KeyView) => void;
-  onStyleAnnotation: (spanId: string, patch: Record<string, unknown>) => void;
+  onStyleAnnotation: (spanId: string, patch: Record<string, unknown>, phase: ControlPhase) => void;
   onRetimeAnnotation: (spanId: string, times: { startSec?: Seconds; endSec?: Seconds }) => void;
   onRemoveAnnotation: (spanId: string) => void;
   onGenerate: (type: RunnableGenerator) => void;
@@ -89,6 +113,14 @@ export interface InspectorElements {
 export class Inspector {
   readonly #elements: InspectorElements;
   readonly #callbacks: InspectorCallbacks;
+  /**
+   * The `name` of a control that is mid-gesture, or `null`.
+   *
+   * Set by {@link Inspector.#slider} while the thumb is between its first `input` and
+   * its `change`. Nothing else is a gesture: every other field here commits on
+   * `change` alone, so it is never holding an element a rebuild would take away.
+   */
+  #gesture: string | null = null;
 
   constructor(elements: InspectorElements, callbacks: InspectorCallbacks) {
     this.#elements = elements;
@@ -96,6 +128,13 @@ export class Inspector {
   }
 
   render(state: InspectorState): void {
+    // A control that is mid-gesture owns its own element until the gesture ends.
+    // `replaceChildren` here would remove the `<input type="range">` the pointer has
+    // hold of — the drag stops after one step, which is the control not working
+    // rather than the control needing polish. The provisional document a drag shows
+    // reaches the picture through `PreviewHost`; this panel catches up on release.
+    if (this.#gesture !== null) return;
+
     // What has focus, and where the caret is, so a rebuild does not eat a number
     // somebody is halfway through typing. Keyed by the field's `name`, which is
     // stable across rebuilds because it names what the field edits.
@@ -191,15 +230,15 @@ export class Inspector {
   }
 
   #zoomRegionFields(region: ZoomRegion, state: InspectorState): HTMLElement[] {
-    const update = (patch: Partial<ZoomRegionInput>): void => {
-      this.#callbacks.onUpdateZoom(region.index, patch);
+    const update = (patch: Partial<ZoomRegionInput>, phase: ControlPhase): void => {
+      this.#callbacks.onUpdateZoom(region.index, patch, phase);
     };
     return [
       body(
         // The magnification, on a slider and in a number beside it. Both write the
         // same op; the slider is for finding a framing by eye and the number is for
         // repeating one, and neither is the source of truth — the document is.
-        range({
+        this.#slider({
           name: 'zoom-amount',
           label: 'Amount',
           min: MIN_ZOOM_AMOUNT,
@@ -207,8 +246,8 @@ export class Inspector {
           step: 0.05,
           value: region.amount,
           format: (value) => `${value.toFixed(2)}×`,
-          onInput: (amount) => {
-            update({ amount });
+          onChange: (amount, phase) => {
+            update({ amount }, phase);
           },
         }),
         pair({
@@ -217,7 +256,7 @@ export class Inspector {
           value: region.center,
           step: 0.01,
           onChange: (center) => {
-            update({ center });
+            update({ center }, 'end');
           },
         }),
         time({
@@ -226,7 +265,7 @@ export class Inspector {
           value: region.startSec,
           max: state.sourceDurationSec,
           onChange: (startSec) => {
-            update({ startSec });
+            update({ startSec }, 'end');
           },
         }),
         time({
@@ -235,7 +274,7 @@ export class Inspector {
           value: region.endSec,
           max: state.sourceDurationSec,
           onChange: (endSec) => {
-            update({ endSec });
+            update({ endSec }, 'end');
           },
         }),
         actions(
@@ -352,14 +391,14 @@ export class Inspector {
           label: 'Text',
           value: typeof style['text'] === 'string' ? style['text'] : '',
           onChange: (value) => {
-            this.#callbacks.onStyleAnnotation(view.span.id, { text: value });
+            this.#callbacks.onStyleAnnotation(view.span.id, { text: value }, 'end');
           },
         }),
       );
     }
     if (view.kind === 'blur') {
       fields.push(
-        range({
+        this.#slider({
           name: 'span-blur',
           label: 'Strength',
           min: 4,
@@ -367,8 +406,8 @@ export class Inspector {
           step: 1,
           value: typeof style['blurPx'] === 'number' ? style['blurPx'] : 24,
           format: (value) => `${String(Math.round(value))} px`,
-          onInput: (blurPx) => {
-            this.#callbacks.onStyleAnnotation(view.span.id, { blurPx });
+          onChange: (blurPx, phase) => {
+            this.#callbacks.onStyleAnnotation(view.span.id, { blurPx }, phase);
           },
         }),
       );
@@ -384,7 +423,7 @@ export class Inspector {
           label: 'Colour',
           value: typeof style[key] === 'string' ? style[key] : DEFAULT_COLOUR,
           onChange: (value) => {
-            this.#callbacks.onStyleAnnotation(view.span.id, { [key]: value });
+            this.#callbacks.onStyleAnnotation(view.span.id, { [key]: value }, 'end');
           },
         }),
       );
@@ -409,6 +448,32 @@ export class Inspector {
       );
     }
     return [body(...fields)];
+  }
+
+  /**
+   * A slider, wired to this panel's own gesture guard.
+   *
+   * The only reason it is a method rather than another free builder below: the guard
+   * is per-inspector state and the slider is the one control that has to reach it.
+   * Every slider in this file goes through here, so there is no second answer to what
+   * a drag costs.
+   */
+  #slider(spec: {
+    name: string;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+    value: number;
+    format: (value: number) => string;
+    onChange: (value: number, phase: ControlPhase) => void;
+  }): HTMLElement {
+    return range({
+      ...spec,
+      onGesture: (active) => {
+        this.#gesture = active ? spec.name : null;
+      },
+    });
   }
 
   // ------------------------------------------------------------------ zoom
@@ -679,6 +744,25 @@ function pair(spec: {
   return field(spec.label, wrapper);
 }
 
+/**
+ * A slider: two phases, one edit, and an element that survives its own drag.
+ *
+ * `input` is **provisional** and `change` **commits** — the shape `TimelineUi`'s trim
+ * handles and `StageUi`'s drags already use. Both halves matter and each closes a
+ * different defect. A slider that committed on `input` put one op, one revision and
+ * one undo entry on the stack per step of the thumb, so undoing a drag afterwards
+ * would mean pressing undo as many times as the pointer moved. And it recompiled on
+ * every one of them: it is `EditorProject.preview` that debounces on §3.6's own
+ * 100 ms and `commit` deliberately clears that debounce, so *"a drag costs one compile
+ * rather than sixty"* was only ever a statement about the call this now makes.
+ *
+ * {@link range} bracketing its own gesture is the other half. Committing on `input`
+ * ran `replaceChildren` over this very element on its first event, which ends the
+ * drag on first contact — the panel's focus/caret restore can put focus back and
+ * cannot put a pointer capture back. The bracket is `input`/`change` rather than
+ * pointer events so a keyboard arrow, which fires both in that order, is one gesture
+ * on the same path.
+ */
 function range(spec: {
   name: string;
   label: string;
@@ -687,7 +771,9 @@ function range(spec: {
   step: number;
   value: number;
   format: (value: number) => string;
-  onInput: (value: number) => void;
+  onChange: (value: number, phase: ControlPhase) => void;
+  /** `true` when the gesture starts, `false` when it ends. */
+  onGesture: (active: boolean) => void;
 }): HTMLElement {
   const wrapper = document.createElement('span');
   wrapper.className = 'fld-c';
@@ -699,14 +785,29 @@ function range(spec: {
   const readout = document.createElement('span');
   readout.className = 'fld-r';
   readout.textContent = spec.format(spec.value);
-  // `input` here and `change` on a typed number, deliberately: a slider's whole
-  // point is that the picture follows the thumb, and `EditorProject` debounces the
-  // recompile on §3.6's own 100 ms so a drag costs one compile rather than sixty.
+  // Written here rather than by a rebuild, which is what lets the panel stand still
+  // for the length of the gesture without anything a person is looking at going stale.
   control.addEventListener('input', () => {
     const parsed = Number.parseFloat(control.value);
     if (!Number.isFinite(parsed)) return;
     readout.textContent = spec.format(parsed);
-    spec.onInput(parsed);
+    // Armed **before** the callback, because the callback is what re-renders.
+    spec.onGesture(true);
+    spec.onChange(parsed, 'move');
+  });
+  control.addEventListener('change', () => {
+    const parsed = Number.parseFloat(control.value);
+    // Disarmed **before** the commit, so the rebuild it causes actually happens: the
+    // panel has to come back in step with the document the gesture produced.
+    spec.onGesture(false);
+    if (!Number.isFinite(parsed)) return;
+    readout.textContent = spec.format(parsed);
+    spec.onChange(parsed, 'end');
+  });
+  // A backstop rather than the mechanism: a gesture interrupted by the window going
+  // away never gets its `change`, and a guard left armed would freeze this panel.
+  control.addEventListener('blur', () => {
+    spec.onGesture(false);
   });
   wrapper.append(control, readout);
   return field(spec.label, wrapper);
