@@ -60,8 +60,22 @@ const EDL_BUDGET = 'packages/edl/test/budget.test.ts';
 const PHASE11 = 'test/phase11-golden.test.ts';
 const EDL_ANNOTATIONS = 'packages/edl/test/annotations.test.ts';
 const COMPOSITOR_GEOMETRY = 'packages/compositor/test/annotation-geometry.test.ts';
-/** Phase 12's gate: the live overlay, in a real Electron renderer and a real capture. */
-const PHASE12 = 'test/phase12-overlay.test.ts';
+/**
+ * Phase 12's gates: the live overlay in a real Electron renderer, and the pieces
+ * around it.
+ *
+ * There is deliberately **no** mutation here for `setContentProtection` at the
+ * `drawing-overlay` role. That measurement needs a screen capture and therefore the
+ * Screen Recording grant, so it lives in `apps/main/src/verify/permissions-harness.ts`
+ * as `overlay-content-protection` rather than in `npm test`, and no vitest file can
+ * catch a mutation that removes it: `apps/main/test/windows.test.ts` structurally
+ * cannot, because the mutation leaves the role still *declaring* `contentProtected`
+ * and only skips the call. The property is guarded instead by that harness check's own
+ * **control window** — same role options, same page, same calls, the flag never set —
+ * which must show the marker before the protected window's absence means anything.
+ * A mutation kept here would be reported as caught when nothing had caught it, which
+ * is worse than the gap it papers over.
+ */
 const EDL_DRAWING = 'packages/edl/test/drawing.test.ts';
 const OVERLAY = 'apps/main/test/overlay.test.ts';
 const COMPOSITOR_STROKE = 'packages/compositor/test/stroke-pass.test.ts';
@@ -598,21 +612,6 @@ const MUTATIONS = [
 
   // ---- phase 12: the live drawing overlay ----------------------------------
 
-  {
-    name: 'the-drawing-overlay-is-not-content-protected',
-    breaks:
-      "the whole of §8's phase-12 gate. With the flag off the overlay is in every " +
-      'captured frame — so the ink is burned into the recording as well as ' +
-      're-composited from `drawing.ndjson` over it, which is the one outcome this ' +
-      'phase exists to prevent. The gate has to notice it in *pixels*: an assertion ' +
-      'that the flag was set would still be green here if macOS stopped honouring it.',
-    file: 'apps/main/src/windows.ts',
-    find: '    if (spec.contentProtected) window.setContentProtection(true);',
-    replace:
-      "    if (spec.contentProtected && spec.page !== 'overlay.html') {\n" +
-      '      window.setContentProtection(true);\n    }',
-    mustFail: [PHASE12],
-  },
   {
     name: 'the-overlay-swallows-every-click',
     breaks:

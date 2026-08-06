@@ -5,9 +5,11 @@
  * in the editor"* is answered, and answered the way the brief requires — through the
  * **existing** §2.7 op vocabulary, with the inverse that undoes it, rather than
  * through a drawing-shaped special case. *"Absent from the raw capture"* is
- * `test/phase12-overlay.test.ts`'s, because it is a claim about pixels a screen
- * capture actually contains and cannot be made in a unit test. *"Strokes appear
- * live"* is that gate's too, for the same reason.
+ * `overlay-content-protection` in `apps/main/src/verify/permissions-harness.ts`,
+ * because it is a claim about pixels a screen capture actually contains — which
+ * cannot be made in a unit test, and cannot be made at all without the Screen
+ * Recording grant. *"Strokes appear live"* is `test/phase12-overlay.test.ts`'s, for
+ * the first half of that reason.
  *
  * What this file adds beyond those is the reading a log has to survive: a torn last
  * line, a stroke rubbed out mid-recording, a tap of the pen, and a document that

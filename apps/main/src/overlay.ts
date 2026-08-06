@@ -6,8 +6,10 @@
  * gate for this phase is three sentences: *"strokes appear live, are **absent** from
  * the raw capture, and are deletable in the editor"*. The middle one is what
  * `contentProtected: true` on the `drawing-overlay` role in `windows.ts` buys, and
- * `test/phase12-overlay.test.ts` is what proves it in captured pixels rather than in
- * an assertion that the flag was set.
+ * `overlay-content-protection` in `apps/main/src/verify/permissions-harness.ts` is
+ * what proves it in captured pixels rather than in an assertion that the flag was
+ * set — from the signed bundle, because capturing the screen needs the grant.
+ * `test/phase12-overlay.test.ts` keeps the other two.
  *
  * ## The rule this file exists to keep
  *

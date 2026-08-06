@@ -8,8 +8,10 @@
  *    window is what the presenter is looking at, so the ink has to be here before
  *    it is anywhere else. Nothing waits on main.
  * 2. **They are absent from the raw capture.** Not this file's doing:
- *    `setContentProtection(true)` on the role in `apps/main/src/windows.ts` is,
- *    and `test/phase12-overlay.test.ts` measures it in captured pixels.
+ *    `setContentProtection(true)` on the role in `apps/main/src/windows.ts` is, and
+ *    `overlay-content-protection` in `apps/main/src/verify/permissions-harness.ts`
+ *    measures it in captured pixels — from the signed bundle, because looking needs
+ *    the Screen Recording grant.
  * 3. **They are deletable in the editor.** Also not this file's doing — a stroke
  *    becomes a span on one generated track (`packages/edl/src/drawing.ts`), which
  *    an ordinary `track.remove` deletes. What *is* this file's doing is that the

@@ -157,9 +157,12 @@ const ROLES: Record<WindowRole, RoleSpec> = {
    *
    * - **`contentProtected: true`** — the whole point. The strokes are logged to
    *   `events/drawing.ndjson` and re-composited at edit time, so they must not also
-   *   be burned into the captured pixels. `test/phase12-overlay.test.ts` measures
-   *   that in a real capture against a control window, the way phase 2 measured the
-   *   HUD's; an assertion that this flag was *set* is a different claim.
+   *   be burned into the captured pixels. `overlay-content-protection` in
+   *   `apps/main/src/verify/permissions-harness.ts` measures that in a real capture
+   *   against a control window, the way phase 2 measured the HUD's — and it is there
+   *   rather than in `npm test` because looking needs the Screen Recording grant. An
+   *   assertion that this flag was *set* is a different claim, which is why
+   *   `windows.test.ts` asserting the table is not that check.
    * - **`focusable: false`** — *"must not steal focus from what the user is
    *   recording"*. On macOS this makes the window non-activating: clicking it, even
    *   to draw, leaves the app being demonstrated as the key window. The cost is

@@ -510,19 +510,44 @@ capture stalls, and a stroke stamped at the last frame's time would be most of a
 second early on an idle desktop, where ScreenCaptureKit emits 1.4 fps.
 
 **The gate is `test/phase12-overlay.test.ts`**, in a real Electron renderer in front
-of a real window server, and it measures all three sentences. Live ink: real
+of a real window server, and it measures §8's first and third sentences. Live ink: real
 `sendInputEvent` gestures into the shipping page, the canvas read back through
 `getImageData`, with the inked box checked against where the hand went and a control —
 the same gestures with the pen up — that must ink nothing. Deletable:
 `packages/edl/test/drawing.test.ts`, through `applyOps` and `EditHistory`, with the log
-the gate's real pen actually wrote fed back through the shipping importer. Eleven
+the gate's real pen actually wrote fed back through the shipping importer. Ten
 entries in `npm run verify:mutation` break the production source on disk and require
-these to notice — including turning `setContentProtection` off for this one role, which
-`windows.test.ts` cannot see because the role still _declares_ the flag.
+these to notice.
+
+**The middle sentence — absent from the capture — is `overlay-content-protection` in
+`apps/main/src/verify/permissions-harness.ts`, and it is unwitnessed.** Measuring it
+means capturing the screen, which needs the Screen Recording grant, so it lives where
+phase 2 put the identical measurement of the HUD rather than in `npm test`: a harness
+whose contract is that a check which cannot run reports `blocked` and says why. All
+five readings and all three thresholds are phase 2's own, moved across unchanged —
+`CONTROL_MIN = 0.5`, `PROTECTED_MAX = 0.01`, and a `BACKDROP_MIN = 0.99` derived rather
+than tuned. **Content protection is an observation of pixels, not a TCC answer**; the
+grant is only the camera the check holds while asking. It is sealed by `sealReport`
+like everything else and is _not_ in `alwaysHonest`.
+
+Two consequences, both recorded rather than papered over. `npm run verify:mutation` has
+**no** entry for `setContentProtection` at the `drawing-overlay` role — the mutation
+`the-drawing-overlay-is-not-content-protected` was removed with the check, because no
+vitest file can catch it (`windows.test.ts` structurally cannot: the mutation leaves the
+role still _declaring_ the flag and only skips the call), and a mutation reported as
+caught when nothing caught it is worse than the gap. What guards the property now is the
+harness check's own **control window**, which must show the marker before the protected
+window's absence means anything. And the check has **never been run**: see the
+`overlay-content-protection` row in § Phase 2 gate status.
 
 **Absent from the capture is five readings, not one, because an absence is the easiest
 thing in the world to fake.** The instrument is phase 2's, shared rather than
-reimplemented (`apps/main/src/verify/marker.ts`). Measured on this machine:
+reimplemented (`apps/main/src/verify/marker.ts`). The figures below were measured on
+this machine from an **unpackaged dev run**, by the vitest gate this check was moved out
+of — not from a signed bundle, and not by the shipped check, which nobody has run. They
+are kept because a dev binary's screen capture is a real screen capture and this is a
+pixel observation rather than a TCC answer, so provenance does not taint them; they are
+what the harness check should reproduce, not evidence that it has:
 
 | reading                                                   |   value | what it rules out                         |
 | --------------------------------------------------------- | ------: | ----------------------------------------- |
@@ -543,16 +568,19 @@ non-marker colour, and the capture must come back holding the whole thing. Its 9
 floor is derived rather than tuned: the rectangle's perimeter is 1.01% of its area, so
 a one-pixel resampled border is the most that can be lost.
 
-**Two things this gate got wrong before it got them right.** A control must differ
-from the thing under test in **exactly one respect**, and the first version differed
-in three — window level, `setVisibleOnAllWorkspaces`, mouse policy — because it was
-built from the role's constructor options alone and never received the calls
-`OverlayController.setOpen` makes. And **`setContentProtection(false)` does not
-un-hide a window that was already shown protected**, which turned an experiment into
-hours of reading "the flag is off and it is still absent" as a defect in the product.
-The mutation that removes the flag at the role is the only trustworthy way to test
-that end of it, and it must be re-run whenever this gate's shape changes: it survived
-once, on a version of this gate whose control was not a control.
+**Two things this measurement got wrong before it got them right**, and both moved
+with it into the harness. A control must differ from the thing under test in **exactly
+one respect**, and the first version differed in three — window level,
+`setVisibleOnAllWorkspaces`, mouse policy — because it was built from the role's
+constructor options alone and never received the calls `OverlayController.setOpen`
+makes; `applyOverlayWindowCalls` now makes them to both windows. And
+**`setContentProtection(false)` does not un-hide a window that was already shown
+protected**, which turned an experiment into hours of reading "the flag is off and it
+is still absent" as a defect in the product — so do not try to test that end of it by
+turning the flag off at runtime. Breaking the flag at the role is what would test it,
+and there is no longer a mutation that does: the property's only guard is the harness
+check's control window, and it has survived a version of this measurement whose control
+was not a control.
 
 ## Sharp edges
 
@@ -1070,9 +1098,9 @@ it through LaunchServices and runs the checks from inside the real bundle. Last 
 2026-08-05, ad-hoc signed, with the captain's grants in place: `packaged: true`,
 `responsibleForSelf: true`, so `sealReport` downgraded nothing. The run's own outcome
 is `incomplete` rather than `verified`, because `verified` needs every check to pass
-and the click row is `skipped`. The table's last row was added afterwards and has not
-been run at all — the figures above are from the 2026-08-05 bundle and say nothing
-about it.
+and the click row is `skipped`. The table's last **two** rows were added afterwards and
+have not been run at all — the figures above are from the 2026-08-05 bundle and say
+nothing about either of them.
 
 | Check                   | Status      | Evidence                                                                                                                                                                                                                                                       |
 | ----------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1082,6 +1110,7 @@ about it.
 | `content-protection`    | **pass**    | Control window showed the marker across **99.3%** of its rectangle; the protected HUD showed it across **0.0%**. §11's assumption, finally watched.                                                                                                            |
 | `accessibility-clicks`  | **skipped** | Tap confirmed live (`tapEnabled: true` under the granted bundle), and nothing clicked in this run's window, so it measured no rate. Rate and latency were deferred to phase 10 by captain decision — measured there; see § Post-grant click rate and latency.  |
 | `microphone-revocation` | **skipped** | Added after that run and **never executed**: it needs `--mic-revocation` and a person switching Microphone off mid-recording, and running the harness at all repackages and re-signs the bundle, which voids the captain's grants. See carried-forward item 8. |
+| `overlay-content-protection` | **skipped** | Phase 12's, added after that run and **never executed**. The check is written — five readings and phase 2's own thresholds, moved out of `test/phase12-overlay.test.ts` because it needs the Screen Recording grant to look — and its control window is what would make its result mean anything: the protected overlay's absence counts only once the control has shown the marker. Running it at all repackages and re-signs the bundle, which voids the captain's grants, so it awaits the project's single signed-bundle pass. The figures in § The live drawing overlay are from an unpackaged dev run of the vitest gate it replaced, not from this check. |
 
 The `content-protection` row is the one worth understanding. "The marker is absent from
 the HUD's rectangle" passes just as well when the capture is black, the coordinates are
