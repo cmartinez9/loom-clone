@@ -166,9 +166,11 @@ carries the readings an unpackaged dev run of the test it replaced produced, and
 plainly that they are not evidence the shipped check has reproduced them.
 
 `npm run verify:mutation` proves those gates are real by breaking the production source
-behind them one property at a time — editing it on disk — and requiring a test to fail
-each time. The one property it deliberately leaves uncovered, because no test in
-`npm test` can catch it, is named in `AGENTS.md` rather than papered over.
+behind them one property at a time — editing it on disk rather than a copy of it — and
+requiring a test to fail each time. `scripts/mutation-check.mjs`'s registry is what it
+breaks and where that list lives. The one property it deliberately leaves uncovered,
+because no test in `npm test` can catch it, is named in `AGENTS.md` rather than papered
+over.
 
 ## Requirements
 
