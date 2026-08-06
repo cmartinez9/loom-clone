@@ -9,8 +9,8 @@ a recording is a folder on your disk that you can open in Finder.
 phase 3's audio and A/V sync machinery and phase 4's webcam track and multi-part
 recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
 WebGL2 compositor, phase 7's timeline model, phase 10's cursor-follow and auto-zoom
-generators and phase 11's annotations, built early and out of order because they are
-self-contained.
+generators, phase 11's annotations and phase 12's live drawing overlay, built early
+and out of order because they are self-contained.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -100,12 +100,34 @@ be placed refuses the frame instead of compositing without it, and one that cann
 blurred is filled opaque rather than quietly weakened. `npm test` proves it by drawing
 24 fixed timestamps through the shipping preview loop and through a fixed-timestamp
 export loop and requiring **max per-pixel delta 0**, plus a third annotation-free frame
-at every timestamp so a pair that both drew nothing cannot pass. No shipping window
-lets you author one yet; the editor is later.
+at every timestamp so a pair that both drew nothing cannot pass. The editor that lets
+you place one is later; the only annotations a shipping window writes today are the
+strokes below.
 
-`npm run verify:mutation` proves all six gates are real by breaking capture, the
-timeline model, the generators and the annotation path one way at a time — editing the
-production source on disk — and requiring a test to fail each time.
+The property phase 12 establishes: **the ink is on the screen and not in the
+recording.** The HUD's Draw button lays a transparent sheet over the display — a pen,
+a marker, undo, clear and Done — and that window is content-protected, so what the
+presenter draws is in front of the room and absent from the captured frames. The
+strokes are appended to `events/drawing.ndjson` instead and imported at edit time as
+one generated annotation track on the same timeline as everything above, so they are
+re-composited at full resolution over whatever zoom and trim the edit ends up with,
+and removing them is the ordinary track deletion any other track gets rather than a
+drawing-shaped special case. The overlay is an accessory and never a dependency: it
+does not take focus from the app being recorded, it takes clicks only while a pen is
+in hand, and a failure anywhere on its path costs the pen rather than the recording.
+`npm test` proves the live ink and the deletion — real pointer gestures into the
+shipping page, read back out of the canvas, with a pen-up control that must ink
+nothing. **Absent from the capture is the part `npm test` cannot settle**: seeing it
+means capturing the screen, so it lives in `npm run verify:permissions` beside phase
+2's identical measurement of the HUD. That check has never been run — `AGENTS.md`
+carries the readings an unpackaged dev run of the test it replaced produced, and says
+plainly that they are not evidence the shipped check has reproduced them.
+
+`npm run verify:mutation` proves those gates are real by breaking capture, the
+timeline model, the generators, the annotation path and the drawing overlay one way at
+a time — editing the production source on disk — and requiring a test to fail each
+time. The one property it deliberately leaves uncovered, because no test in
+`npm test` can catch it, is named in `AGENTS.md` rather than papered over.
 
 ## Requirements
 

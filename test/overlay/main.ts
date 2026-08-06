@@ -33,7 +33,7 @@
  * `npm test` may depend on a grant, and nothing here may skip because one is missing.
  */
 
-import { app, BrowserWindow, screen } from 'electron';
+import { app, type BrowserWindow, screen } from 'electron';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
