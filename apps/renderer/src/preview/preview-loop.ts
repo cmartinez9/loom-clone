@@ -2,7 +2,7 @@
  * The preview loop.
  *
  * Architecture report §4.3 writes it out, and this is that pseudo-code with the
- * bookkeeping filled in:
+ * bookkeeping filled in **and one domain error corrected**:
  *
  * ```
  * requestAnimationFrame(now):
@@ -11,8 +11,31 @@
  *   screen = screenReader.frameAt(state.sourceTime)     # borrowed
  *   compositor.render({screen, ...}, state)
  *   compositor.present()
- *   screenReader.prime(t, 0.5)                          # off the critical path
+ *   screenReader.prime(state.sourceTime, 0.5)           # off the critical path
  * ```
+ *
+ * ## The one place this diverges from §4.3, and why it is the report that is wrong
+ *
+ * §4.3's own line is `screenReader.prime(t, 0.5)` — the **timeline** time — while the
+ * line above it reads `frameAt(state.sourceTime)`. Both cannot be right: §3.1 gives
+ * the two domains and `packages/edl/src/clips.ts` is unambiguous that the clip list is
+ * the *only* map between them, so an argument is either one or the other. Every method
+ * on {@link PreviewSource} is `SourceReader`'s, and every one of them is in **source**
+ * time — `prime`, `release` and `hasSourceFrameAt` exactly as much as `frameAt`, which
+ * §4.3 already spells correctly. §4.3 was written before §3.1 had a clip list to
+ * disagree with, so it reads as though the two were the same number; they are equal
+ * only over an identity clip list, which is every document this app can produce until
+ * an editing UI exists. **§4.3 of the architecture report needs the same correction
+ * this docblock carries.**
+ *
+ * What it costs to get wrong is latent rather than loud, which is why it survived: the
+ * first `sourceStart > 0`, trim or speed change makes preview prime the decoder at the
+ * wrong instant, `frameAt(sourceTime)` miss every frame, and §4.3's hold leave one
+ * stale picture on screen — with §10.2's watchdog asking `hasSourceFrameAt` about a
+ * different instant than the one that missed, so the loud failure degrades into a
+ * silent freeze under a scrub bar that still looks correct. Phase 8's export loop
+ * (`apps/renderer/src/export/render-loop.ts`) drives the same four methods off
+ * `state.sourceTime`; these two are the §4.5 pair that must not disagree.
  *
  * It lives in the renderer rather than in a package because it is the *consumer*
  * that wires the two phase-6 packages together: §1.3 keeps `compositor` to pure draw
@@ -77,7 +100,15 @@ export interface PreviewCompositor {
   readonly annotations?: { readonly textSpansWithoutAtlas: number };
 }
 
-/** What the loop needs from a decoded source. `SourceReader` satisfies it as-is. */
+/**
+ * What the loop needs from a decoded source. `SourceReader` satisfies it as-is.
+ *
+ * **Every time here is a *source* time** — seconds into the raw recording, §3.1's
+ * first domain — because every one of these is a question about the media. The loop
+ * holds a *timeline* time and the two are equal only over an identity clip list, so
+ * the conversion is `resolve(...).sourceTime` and it belongs on the caller's side of
+ * this interface, once per frame. Nothing below may be handed `PreviewLoop.time`.
+ */
 export interface PreviewSource {
   /** Borrowed — the loop draws from it within the same turn and never closes it. */
   frameAt(t: Seconds): VideoFrame | null;
@@ -139,8 +170,12 @@ export interface PreviewLoopOptions {
    * Reported when the loop has wanted a frame that the source says exists, and not
    * got one, for {@link STALL_TIMEOUT_MS}. §10.2: *"a watchdog … that fails loudly
    * after 5 s with no progress instead of hanging. A clear error beats a spinner."*
+   *
+   * `atSec` is the **source** instant that could not be produced — the domain the
+   * question was asked in — and `timelineSec` is where the playhead was while it went
+   * unanswered. They are the same number only over an identity clip list.
    */
-  onStall?: (info: { atSec: Seconds; forMs: number }) => void;
+  onStall?: (info: { atSec: Seconds; timelineSec: Seconds; forMs: number }) => void;
 }
 
 /** §10.2's watchdog interval. */
@@ -156,7 +191,7 @@ export class PreviewLoop {
   readonly #lookaheadSec: number;
   readonly #retainBehindSec: number;
   readonly #onError: (error: Error) => void;
-  readonly #onStall: (info: { atSec: Seconds; forMs: number }) => void;
+  readonly #onStall: (info: { atSec: Seconds; timelineSec: Seconds; forMs: number }) => void;
 
   readonly #frames: CompositorFrames = { screen: null, textAtlas: null };
 
@@ -323,7 +358,10 @@ export class PreviewLoop {
     this.#scrubbing = options.scrubbing ?? false;
     this.#lastTickMs = null;
     this.#resetStallWatch();
-    this.#prime();
+    // The seek's own prime happens outside a frame, so there is no resolved state to
+    // read `sourceTime` off; `resolve` is 0.3 µs on a 30-minute timeline and this is
+    // a pointer move, not the 16 ms budget.
+    this.#prime(this.#sourceTime());
   }
 
   /** Render exactly one frame, on the caller's schedule. Returns its duration in ms. */
@@ -403,17 +441,31 @@ export class PreviewLoop {
     // Every callback that can reach the caller sits below the measurement, for the
     // reason `#prime` states: a handler of theirs must not be charged to a frame the
     // phase-6 gate judges on the single worst one, with no allowance.
-    this.#watchStall(frame !== null, t, started);
+    //
+    // `sourceTime`, not `t`, for the same reason `frameAt` above takes it: the source
+    // is asked about the instant the *media* is at. `state` is the timeline's own
+    // object and `resolve` overwrites it, so it is read out here rather than kept.
+    const sourceTime = state.sourceTime;
+    this.#watchStall(frame !== null, sourceTime, t, started);
     this.#watchTextAtlas(drew);
 
     // Off the critical path, after the budget has been measured (§4.3).
-    this.#prime();
-    this.#screen.release(t - this.#retainBehindSec);
+    this.#prime(sourceTime);
+    // Behind the *source* read head. Released in timeline time this is wrong in both
+    // directions: with a large `sourceStart` it names an instant before the media
+    // begins and frees nothing, and on a fast clip it names one the playhead has not
+    // reached and closes frames still to be drawn.
+    this.#screen.release(sourceTime - this.#retainBehindSec);
     return elapsed;
   }
 
-  #prime(): void {
-    void this.#screen.prime(this.#time, this.#lookaheadSec).catch((error: unknown) => {
+  /** The source instant the playhead is on. See {@link PreviewSource}. */
+  #sourceTime(): Seconds {
+    return resolve(this.#timeline, this.#time).sourceTime;
+  }
+
+  #prime(sourceTime: Seconds): void {
+    void this.#screen.prime(sourceTime, this.#lookaheadSec).catch((error: unknown) => {
       this.#onError(error instanceof Error ? error : new Error(String(error)));
     });
   }
@@ -464,8 +516,19 @@ export class PreviewLoop {
     );
   }
 
-  #watchStall(hit: boolean, t: Seconds, nowMs: number): void {
-    if (hit || !this.#screen.hasSourceFrameAt(t)) {
+  /**
+   * §10.2's watchdog.
+   *
+   * `sourceTime` is what the source is asked about and what is reported: the whole
+   * question is whether the *media* has a frame the ring failed to produce, and asked
+   * at the timeline instant instead it is a question about a different moment of the
+   * recording — which over any non-identity clip list answers "no frame here", resets
+   * the watch on every frame, and turns §10.2's *"fails loudly after 5 s with no
+   * progress"* into a silent freeze. `timelineSec` rides along because that is the
+   * number a scrub bar is showing while it happens.
+   */
+  #watchStall(hit: boolean, sourceTime: Seconds, timelineSec: Seconds, nowMs: number): void {
+    if (hit || !this.#screen.hasSourceFrameAt(sourceTime)) {
       this.#resetStallWatch();
       return;
     }
@@ -473,7 +536,7 @@ export class PreviewLoop {
     const forMs = nowMs - this.#missingSinceMs;
     if (forMs >= STALL_TIMEOUT_MS && !this.#stallReported) {
       this.#stallReported = true;
-      this.#onStall({ atSec: t, forMs });
+      this.#onStall({ atSec: sourceTime, timelineSec, forMs });
     }
   }
 

@@ -537,6 +537,19 @@ export loop is two lines written out rather than imported, on purpose.
   than superseding it, and "the ring does not hold `t`" only means re-seek when the
   ring has moved _past_ `t` or the decoder has gone idle. Getting either wrong turns
   every rendered frame into a seek that discards the decode it just started.
+- **Every `SourceReader`/`PreviewSource` method is in _source_ time, and §4.3's
+  pseudo-code says otherwise.** `frameAt`, `prime`, `release` and `hasSourceFrameAt` all
+  ask about the media, so all four take `resolve(...).sourceTime`; a loop's own
+  playhead is _timeline_ time and `packages/edl/src/clips.ts` is the only map between
+  them. The report's §4.3 block mixes the two — `frameAt(state.sourceTime)` above
+  `prime(t, 0.5)` — and **§4.3 needs the correction the docblock in `preview-loop.ts`
+  now carries**; it was written before §3.1 had a clip list to disagree with. Nothing
+  catches this by accident: the two numbers are equal over an identity clip list, which
+  is every document this app produces until an editing UI exists, and both golden and
+  phase-6 gates stub the reader so the argument is discarded. The regression test that
+  does catch it is the `SOURCE time` describe in `apps/renderer/test/preview-loop.test.ts`
+  — a real `compile` over a non-zero `sourceStart`, asserting the argument the reader
+  was handed. Any new consumer of a `SourceReader` gets the same test or the same bug.
 - **`Compositor.render` does not clear when it is handed no frame — it returns.** §4.3's
   "a miss holds the previous frame" is kept by leaving the render target alone; a clear
   before the null check turns every backward scrub into a black flash. The loop cannot
