@@ -10,10 +10,12 @@
  * windows, and the reasons are not only consistency:
  *
  *  - The two things this window does sixty times a second — composite a frame, move
- *    a playhead — are a WebGL draw and two style writes. Neither is a rendering a
- *    virtual DOM can help with, and the design language's own rule is that nothing
- *    on the input path animates or defers (`--t-instant`). A reconciler between a
- *    pointer and a playhead is latency spent for nothing.
+ *    a playhead — are a WebGL draw and one style write. (`paintPlayhead` writes the
+ *    timecode and the transport glyph as well, and does so only when they change,
+ *    which is the whole of what a reconciler would have bought here.) Neither is a
+ *    rendering a virtual DOM can help with, and the design language's own rule is
+ *    that nothing on the input path animates or defers (`--t-instant`). A reconciler
+ *    between a pointer and a playhead is latency spent for nothing.
  *  - §4.3's first anti-stutter rule is that nothing allocates in the loop. Every
  *    framework's answer to state is allocation.
  *  - The preview loop, the compositor and the timeline model are already the hard
@@ -371,17 +373,42 @@ async function start(): Promise<void> {
     el.tlZoom.textContent = `${String(Math.round(view.zoom * 100))}%`;
   }
 
-  /** The cheap per-frame half: two style writes and two text nodes. */
+  /** What {@link paintPlayhead} last wrote, so that it can write only changes. */
+  let paintedTimelineSec = Number.NaN;
+  let paintedDurationSec = Number.NaN;
+  let paintedPlaying: boolean | null = null;
+
+  /**
+   * The cheap per-frame half: one style write, and text only when it changed.
+   *
+   * The playhead's own write is unconditional — it is a single style assignment and
+   * it has to land on the frame the pointer is on. Everything else is guarded,
+   * because this runs on its own `requestAnimationFrame` whether or not anything is
+   * moving. The play/pause glyph is the one that matters: `icon()` returns SVG
+   * *markup*, so assigning it tears down a subtree and re-runs the HTML parser, and
+   * doing that sixty times a second at rest is both the allocation §4.3 forbids in
+   * the loop and work no budget instrument sees, since this frame is deliberately
+   * not `PreviewLoop`'s.
+   */
   function paintPlayhead(): void {
     const timelineSec = host.loop.time;
     timeline.setPlayhead(view, sourceTimeFor(timelineSec));
-    const out = `${formatTimecodeCentis(timelineSec)} / ${formatTimecodeCentis(
-      project.compiled.durationSec,
-    )}`;
-    el.tcode.textContent = out;
-    el.tlTc.textContent = out;
-    el.playpause.innerHTML = icon(host.loop.playing ? 'pause' : 'play', 15);
-    el.playpause.title = host.loop.playing ? 'Pause' : 'Play';
+
+    const durationSec = project.compiled.durationSec;
+    if (timelineSec !== paintedTimelineSec || durationSec !== paintedDurationSec) {
+      paintedTimelineSec = timelineSec;
+      paintedDurationSec = durationSec;
+      const out = `${formatTimecodeCentis(timelineSec)} / ${formatTimecodeCentis(durationSec)}`;
+      el.tcode.textContent = out;
+      el.tlTc.textContent = out;
+    }
+
+    const playing = host.loop.playing;
+    if (playing !== paintedPlaying) {
+      paintedPlaying = playing;
+      el.playpause.innerHTML = icon(playing ? 'pause' : 'play', 15);
+      el.playpause.title = playing ? 'Pause' : 'Play';
+    }
   }
 
   function renderFacts(): void {

@@ -23,10 +23,18 @@
  * duration, no assumed frame rate and no nominal window size in this file.
  */
 
-import { icon, type IconName } from '@loom/design';
+import { formatTimecode, icon, type IconName } from '@loom/design';
 import type { EditDocument, RecordingDoc, Seconds } from '@loom/format';
-import { timeOf, ticks, xOf, zoomAbout, type TimelineView } from './timeline-geometry.ts';
-import { MIN_TRIM_SEC, type Trim } from './trim.ts';
+import {
+  timeOf,
+  ticks,
+  trackPx,
+  visibleSpanSec,
+  xOf,
+  zoomAbout,
+  type TimelineView,
+} from './timeline-geometry.ts';
+import { moveHandle, type Trim } from './trim.ts';
 
 /** What the timeline draws. Everything in it is source time. */
 export interface TimelineState {
@@ -223,8 +231,11 @@ export class TimelineUi {
           );
           return;
         }
-        const span = view.durationSec / Math.max(1, view.zoom);
-        const perPx = span / Math.max(1, view.widthPx);
+        // Through the geometry module, not re-derived: `visibleSpanSec` floors the
+        // span the way every other mapping in this window sees it, and `trackPx` is
+        // the width less both `EDGE_PX` insets — so a wheel scroll moves the time
+        // under the pointer by exactly the pixels the pointer moved.
+        const perPx = visibleSpanSec(view) / trackPx(view);
         this.#callbacks.onViewChange({
           ...view,
           scrollSec: view.scrollSec + (event.deltaX || event.deltaY) * perPx,
@@ -239,7 +250,7 @@ export class TimelineUi {
       const state = this.#state;
       if (state === null) return;
       const from = which === 'start' ? state.trim.startSec : state.trim.endSec;
-      const moved = movedTrim(state.trim, which, from + bySec, state.view.durationSec);
+      const moved = moveHandle(state.trim, which, from + bySec, state.view.durationSec);
       this.#callbacks.onTrimCommit(moved);
     };
     const bind = (element: HTMLElement, which: 'start' | 'end'): void => {
@@ -266,26 +277,12 @@ export class TimelineUi {
     const state = this.#state;
     if (state === null) return null;
     const at = timeOf(state.view, this.#xIn(event));
-    return movedTrim(state.trim, which, at, state.view.durationSec);
+    return moveHandle(state.trim, which, at, state.view.durationSec);
   }
 
   #xIn(event: { clientX: number }): number {
     return event.clientX - this.#elements.lanes.getBoundingClientRect().left;
   }
-}
-
-/**
- * The same clamp `trim.ts` applies, reached through it rather than repeated.
- *
- * Imported as a function rather than inlined because the minimum-length rule is a
- * property of the *document* — a clip with no extent does not validate — and a
- * second copy of it in the pointer handler is a second thing to get wrong.
- */
-function movedTrim(trim: Trim, which: 'start' | 'end', toSec: Seconds, durationSec: Seconds): Trim {
-  const at = Math.min(Math.max(toSec, 0), Math.max(0, durationSec));
-  return which === 'start'
-    ? { startSec: Math.min(at, trim.endSec - MIN_TRIM_SEC), endSec: trim.endSec }
-    : { startSec: trim.startSec, endSec: Math.max(at, trim.startSec + MIN_TRIM_SEC) };
 }
 
 /**
@@ -328,13 +325,28 @@ function heading(lane: Lane): HTMLElement {
   return element;
 }
 
-/** `0:15`, or `0:15.5` once the ruler is zoomed past one tick per second. */
-function rulerLabel(t: Seconds): string {
-  const whole = Math.floor(t);
-  const minutes = Math.floor(whole / 60);
-  const seconds = whole % 60;
-  const base = `${String(minutes)}:${String(seconds).padStart(2, '0')}`;
-  const fraction = t - whole;
+/**
+ * `0:15`, `1:01:01`, or `0:15.5` once the ruler is zoomed past one tick per second.
+ *
+ * The whole-seconds part is `@loom/design`'s {@link formatTimecode} and is not
+ * composed here, so the ruler and the transport readout — `#tcode` and `#tl-tc`, both
+ * `formatTimecodeCentis`, which is the same function with hundredths after it — say
+ * the same thing about the same instant at every length. Composing `M:SS` by hand is
+ * how this printed `61:01` for an hour-plus recording while the readout beside it
+ * printed `1:01:01.00`; the tick ladder runs to half-hour steps, so that is a length
+ * the ruler is expected to draw. `formatTimecode` rounds *down*, which is what a
+ * tick's whole part wants — the label names the instant the tick is on.
+ *
+ * The tenth is appended only when **the tick's own time** is not a whole second,
+ * which is a rule about the number in hand and needs no knowledge of `TICK_LADDER`,
+ * so it cannot drift from it: at every step of a second or more every tick is already
+ * whole and no fraction can appear, and below one second the ladder's 0.1 and 0.5
+ * rungs are exactly the ones a single decimal place can name (which is why 0.25 is
+ * not a rung).
+ */
+export function rulerLabel(t: Seconds): string {
+  const base = formatTimecode(t);
+  const fraction = t - Math.floor(t);
   return fraction < 1e-6 ? base : `${base}.${String(Math.round(fraction * 10))}`;
 }
 

@@ -1,15 +1,20 @@
 /**
- * The two pure halves of the editor's timeline: what a trim means, and where a
- * second lands on screen.
+ * The pure halves of the editor's timeline: what a trim means, where a second lands
+ * on screen, and what the ruler writes beside a tick.
  *
- * Both are arithmetic that is wrong in ways nobody can see by looking at the
- * window — a handle that stops one pixel early, a ruler whose ticks drift off their
- * labels — so they are separated from the DOM and pinned here.
+ * All three are wrong in ways nobody can see by looking at the window — a handle
+ * that stops one pixel early, a ruler whose ticks drift off their labels, a timecode
+ * that only disagrees with the one next to it past an hour — so they are separated
+ * from the DOM and pinned here. `rulerLabel` is imported from `timeline.ts` rather
+ * than copied: it is the label the window actually draws, and the point of testing it
+ * is that it agrees with `@loom/design`.
  */
 
 import { describe, expect, it } from 'vitest';
+import { formatTimecode, formatTimecodeCentis } from '@loom/design';
 import { newEditDocument, type EditDocument } from '@loom/format';
 import { MIN_TRIM_SEC, moveHandle, readTrim, trimOp } from '../src/editor/trim.ts';
+import { rulerLabel } from '../src/editor/timeline.ts';
 import {
   clampZoom,
   scrollSecOf,
@@ -221,5 +226,49 @@ describe('the ruler', () => {
   it('answers nothing rather than looping when it has no width', () => {
     expect(ticks(view({ widthPx: 0 }))).toEqual([]);
     expect(ticks(view({ durationSec: 0, widthPx: 0 }))).toEqual([]);
+  });
+});
+
+describe('the ruler’s labels', () => {
+  it('rolls over into hours, like every other timecode in the window', () => {
+    // Composed by hand this printed `61:01` while the transport readout beside it,
+    // two elements away in the same window, printed `1:01:01.00` for the same
+    // instant. The ladder's top rung is a 1800 s step, so an hour-plus recording is
+    // a length the ruler is expected to draw rather than a hypothetical one.
+    expect(rulerLabel(3661)).toBe('1:01:01');
+    expect(rulerLabel(3600)).toBe('1:00:00');
+  });
+
+  it('is the transport readout’s own timecode, without the hundredths', () => {
+    // The binding relationship, stated as one: `#tcode` and `#tl-tc` are
+    // `formatTimecodeCentis`, which is `formatTimecode` with a hundredths column
+    // after it. A whole-second tick's label is therefore that readout's own prefix,
+    // at every length — which is what a second implementation cannot promise.
+    for (const t of [0, 15, 90, 599, 3599, 3661, 7322]) {
+      expect(rulerLabel(t), `t=${String(t)}`).toBe(formatTimecode(t));
+      expect(formatTimecodeCentis(t).startsWith(`${rulerLabel(t)}.`)).toBe(true);
+    }
+  });
+
+  it('shows a tenth only for a tick that is not on a whole second', () => {
+    // The rule is about the tick's own time and knows nothing of `TICK_LADDER`, so
+    // it cannot drift from it: 40.0 is `0:40` however far the ruler is zoomed in,
+    // and 40.5 is `0:40.5` however far it is zoomed out.
+    expect(rulerLabel(40)).toBe('0:40');
+    expect(rulerLabel(40.5)).toBe('0:40.5');
+    expect(rulerLabel(0.1)).toBe('0:00.1');
+    expect(rulerLabel(3661.5)).toBe('1:01:01.5');
+  });
+
+  it('labels every tick the ruler actually produces, at every zoom', () => {
+    // The whole part of a label is the whole part of the tick's time — no rounding
+    // up, because a timecode names an instant you can seek to.
+    for (const zoom of [1, 3, 20, 200, 480]) {
+      for (const tick of ticks(view({ zoom })).filter((t) => t.major)) {
+        const label = rulerLabel(tick.t);
+        expect(label.startsWith(formatTimecode(tick.t)), `t=${String(tick.t)}`).toBe(true);
+        expect(label, `t=${String(tick.t)}`).toMatch(/^\d+:\d\d(:\d\d)?(\.\d)?$/);
+      }
+    }
   });
 });
