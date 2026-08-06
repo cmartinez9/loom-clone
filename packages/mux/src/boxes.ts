@@ -93,8 +93,14 @@ export function fullBox(
   return box(type, u8(version, flags >>> 16, flags >>> 8, flags), ...payload);
 }
 
-/** The 3x3 unity transformation matrix every `tkhd`/`mvhd` carries. */
-const UNITY_MATRIX = concat([
+/**
+ * The 3x3 unity transformation matrix every `tkhd`/`mvhd` carries.
+ *
+ * Exported because the export movie (`faststart.ts`) writes the same header boxes
+ * with real durations in them, and two copies of a matrix constant is exactly how
+ * one file ends up rotated.
+ */
+export const UNITY_MATRIX = concat([
   u32(0x0001_0000),
   u32(0),
   u32(0),
@@ -109,7 +115,7 @@ const UNITY_MATRIX = concat([
 const ZERO = (count: number): Uint8Array => new Uint8Array(count);
 
 /** 16.16 fixed point, as `tkhd` stores display width and height. */
-function fixed16_16(value: number): Uint8Array {
+export function fixed16_16(value: number): Uint8Array {
   return u32(Math.round(value * 0x1_0000));
 }
 
@@ -153,7 +159,15 @@ export function ftyp(): Uint8Array {
   );
 }
 
-function avcSampleEntry(spec: InitSegmentSpec): Uint8Array {
+/**
+ * `avc1` — the video sample entry, `avcC` and `colr` included.
+ *
+ * Exported so the export movie writes the *same* entry the capture parts carry.
+ * §4.5 puts colour on the list preview and export may not disagree about, and a
+ * second hand-written `avc1` is how a `colr` box quietly stops being emitted on one
+ * of the two paths.
+ */
+export function avcSampleEntry(spec: InitSegmentSpec): Uint8Array {
   // 32-byte fixed-length Pascal string. The name is cosmetic; the length byte is not.
   const compressorName = new Uint8Array(32);
   const label = encoder.encode('Loom H.264');
@@ -362,7 +376,7 @@ export interface AudioInitSegmentSpec {
  * AVFoundation and libavformat: a zero-duration edit is honoured by both, and
  * neither double-trims a decoder that already applies a default AAC delay.
  */
-function editList(mediaTimeSamples: number): Uint8Array {
+export function editList(mediaTimeSamples: number, segmentDurationMovieUnits = 0): Uint8Array {
   return box(
     'edts',
     fullBox(
@@ -370,7 +384,7 @@ function editList(mediaTimeSamples: number): Uint8Array {
       0,
       0,
       u32(1), // entry_count
-      u32(0), // segment_duration — unknown until the fragments stop arriving
+      u32(segmentDurationMovieUnits), // in *movie* timescale units; 0 = unknown
       i32(mediaTimeSamples), // media_time, in media timescale units
       i16(1), // media_rate_integer
       i16(0), // media_rate_fraction
@@ -424,7 +438,8 @@ function esds(spec: AudioInitSegmentSpec): Uint8Array {
   );
 }
 
-function audioSampleEntry(spec: AudioInitSegmentSpec): Uint8Array {
+/** `mp4a` — the audio sample entry, `esds` included. Shared with the export movie. */
+export function audioSampleEntry(spec: AudioInitSegmentSpec): Uint8Array {
   return box(
     'mp4a',
     ZERO(6), // reserved

@@ -49,4 +49,17 @@ export interface SettingsDoc {
   recordingsRoot: string;
   /** First-run state. Added in `loom.settings/2`. */
   setup: SetupState;
+  /**
+   * Where exports go. Absent means `<recordingsRoot>/Exports`.
+   *
+   * Captain decision 9: *"Pick a sensible default output location and let the
+   * captain change it. Do not prompt for a path on every export."* The default is
+   * the line above; this field is the change, remembered — so the picker is a thing
+   * the user opens once rather than a modal in front of every export.
+   *
+   * Optional rather than defaulted into the document, so a `settings.json` written
+   * by an earlier build stays valid and keeps meaning what it said. No migration,
+   * because nothing about the existing field changed.
+   */
+  exportRoot?: string;
 }

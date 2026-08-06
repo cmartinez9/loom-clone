@@ -1,8 +1,8 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
  * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
- * model, phase 10's generators, phase 11's golden-frame gate over annotations and
- * phase 12's live drawing overlay.
+ * model, phase 8's export, phase 10's generators, phase 11's golden-frame gate over
+ * annotations and phase 12's live drawing overlay.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *
@@ -49,6 +49,15 @@ const EDL_RESOLVE = 'packages/edl/test/resolve.test.ts';
 const EDL_CHANNEL = 'packages/edl/test/channel.test.ts';
 const EDL_HISTORY = 'packages/edl/test/history.test.ts';
 const FORMAT_JOURNAL = 'packages/format/test/journal.test.ts';
+/** Phase 8's gate — preview and export pixel-identical — and the tests around it. */
+const PHASE8 = 'test/phase8-gate.test.ts';
+const EXPORT_LOOP = 'apps/renderer/test/export-render-loop.test.ts';
+const EXPORT_MOVIE = 'packages/mux/test/export-movie.test.ts';
+const EXPORT_VERIFY = 'apps/main/test/export-verify.test.ts';
+const EXPORT_SESSION = 'apps/main/test/export-session.test.ts';
+const EXPORT_COPY = 'apps/main/test/export-stream-copy.test.ts';
+const EXPORT_ENCODE = 'apps/renderer/test/export-encode.test.ts';
+const EXPORT_AUDIO = 'apps/renderer/test/audio-source.test.ts';
 /** Phase 10's gate: the comfort budget on ten real recordings, and its control. */
 const PHASE10 = 'packages/edl/test/phase10-gate.test.ts';
 const EDL_CONDITIONING = 'packages/edl/test/conditioning.test.ts';
@@ -343,6 +352,323 @@ const MUTATIONS = [
     find: '      removeTrackKeys(fields, remove, op);',
     replace: '      removeTrackKeys(fields, undefined, op);',
     mustFail: [FORMAT_JOURNAL, EDL_HISTORY],
+  },
+  // ---------------------------------------------------------------- phase 8
+  {
+    name: 'export-encodes-through-a-lost-context',
+    breaks:
+      'the export refuses when the GL context dies. A lost context is SILENT — every ' +
+      'call is a no-op and the canvas keeps its last contents — so without this the ' +
+      'loop keeps compositing, `new VideoFrame(canvas)` keeps handing the encoder ' +
+      'stale pixels, and the export finishes on a file of black frames that passes ' +
+      'every one of §7.5\u2019s five checks and is recorded verified-good. Phase 9 then ' +
+      'deletes the user\u2019s only copy of the raw sources on the strength of it. The ' +
+      'gate\u2019s relaunch predicate does not cover this: it protects the gate\u2019s ' +
+      'measurement, and a real user has no second attempt.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    if (this.#contextLostAt === null && !this.#compositor.contextLost) return;',
+    replace: '    if (true as boolean) return;',
+    mustFail: [EXPORT_LOOP],
+  },
+  {
+    name: 'export-composites-a-stale-frame',
+    breaks:
+      'the exporter checks that the frame it was handed is the one the index puts ' +
+      'at that instant. `FrameRing.frameAtMicros` is hold-last *within the ring*, so ' +
+      'a reader whose decode has not caught up returns an older frame rather than ' +
+      'null — right for preview (§4.3 holds the previous picture) and a wrong frame ' +
+      'written into a file for an export. Without the check the export is stuck on ' +
+      'whatever the ring happened to hold, and the file plays, is the right length, ' +
+      'and shows the wrong picture.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    const expected = this.#screen.selectionMicros?.(sourceTime);',
+    replace: '    const expected = undefined as number | undefined;',
+    mustFail: [EXPORT_LOOP],
+  },
+  {
+    name: 'a-stalled-encoder-is-waited-on-forever',
+    breaks:
+      '§5.3’s backpressure wait is bounded. It waits on the encoder’s *output* ' +
+      'callback, which is right and is only safe while something is guaranteed to ' +
+      'call it: a platform encoder whose backend goes away — the GPU process dying ' +
+      'takes VideoToolbox, the queue and the error callback’s pipe together — calls ' +
+      'neither `output` nor `error`. Unbounded, that is §10.2’s named symptom, an ' +
+      'export that hangs with no error, and it cost the phase-8 gate a 480-second ' +
+      'CI timeout with nothing to read.',
+    file: 'apps/renderer/src/export/encode.ts',
+    find: '  return new Promise((done, fail) => {\n    const waiter = (): void => {',
+    replace:
+      '  return new Promise<void>((done) => {\n    waiters.push(done);\n  });\n' +
+      '  return new Promise((done, fail) => {\n    const waiter = (): void => {',
+    mustFail: [EXPORT_ENCODE],
+  },
+  {
+    name: 'export-writer-registered-after-it-opens',
+    breaks:
+      'an export chunk that arrives while the output file is still being created ' +
+      'queues behind the open instead of being refused. The encoder announces its ' +
+      'decoderConfig and emits its first chunk in the same callback, so meta and the ' +
+      'first chunk are one IPC message apart and opening the file is two awaits ' +
+      'long. Registering the open late loses the first chunk — which is the video’s ' +
+      'keyframe, so the file cannot be decoded from the front.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    this.openExports.set(jobId, entry);',
+    replace: '    void opening.then(() => this.openExports.set(jobId, entry));',
+    mustFail: [PHASE8],
+  },
+  {
+    name: 'two-exports-share-one-destination',
+    breaks:
+      'one live export per output path. Two jobs aimed at one destination share all ' +
+      'three scratch paths: the second’s `create` sweeps the first’s scratch away, ' +
+      'either one’s cancel unlinks the other’s `.partial` mid-assembly, and both ' +
+      'rename over the same output — so a *verified* export is silently replaced by ' +
+      'an unverified one, which is what phase 9 deletes sources on the strength of. ' +
+      '`wx+` used to refuse this; the scratch sweep deletes the files it refused on, ' +
+      'so the check has to be real.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    if (holder !== null) throw new ExportDestinationBusyError(request.outputPath, holder);',
+    replace: '    void holder;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'destination-released-before-the-mux',
+    breaks:
+      'the destination claim spanning the work it protects. `finalize` creates ' +
+      '`<out>.partial`, copies the whole mdat into it, fsyncs, renames it over ' +
+      '`<out>` and unlinks both scratch streams — tens of seconds on a 4K export. ' +
+      'Released a step early, a second job is admitted for all of it, and its sweep ' +
+      'removes the `.partial` the first is about to rename: a complete, correct ' +
+      'export reported as failed at its last step.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      return await writer.finalize();',
+    replace: '      this.openExports.delete(jobId);\n      return await writer.finalize();',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'destination-released-before-the-cancel',
+    breaks:
+      'the same claim spanning the other release site. `cancel()` is what unlinks ' +
+      'the scratch streams and the `.partial`, so a job admitted before it finishes ' +
+      'has its own freshly created scratch removed by the cleanup of the job it ' +
+      'replaced.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      const writer = await open.writer.catch(() => null);',
+    replace:
+      '      this.openExports.delete(jobId);\n' +
+      '      const writer = await open.writer.catch(() => null);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'export-duration-checked-against-the-writer',
+    breaks:
+      '§7.5’s fourth check being answered against the *edit*. `FastStartWriter.plan()`’s ' +
+      'tally is the number `mvhd.duration` was written from, so handing it back as the ' +
+      'expectation makes the check compare the writer with itself: it can then only fail ' +
+      'on header bytes the parse above it has already rejected, and an export that is ' +
+      'not as long as the timeline asked for — a truncated encode, a clip list the ' +
+      'exporter ignored — passes all five checks and is recorded verified-good. Phase 9 ' +
+      'deletes the user’s only copy of the sources on the strength of that record.',
+    file: 'apps/main/src/export/session.ts',
+    find:
+      '      const outcome = await verifyExport(job.outputPath, job.expectedDurationSec, ' +
+      'this.#io(job));',
+    replace:
+      '      const outcome = await verifyExport(job.outputPath, finished.durationSec, ' +
+      'this.#io(job));',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'export-destination-comes-from-the-renderer',
+    breaks:
+      'main owning where an export goes. `ExportSession.start` composes ' +
+      '`<exportRoot>/<name>.mp4`, `beginExport` mkdir -p’s that directory, `finalize` ' +
+      'renames over the output and a failed verification removes it — so a renderer that ' +
+      'could name the directory could make main create directories anywhere on the ' +
+      'volume and replace or delete any .mp4 on it. §0 rule 1 read backwards: a ' +
+      'sandboxed renderer has no filesystem precisely so that it cannot.',
+    file: 'apps/main/src/export/session.ts',
+    find: "    if ('outputDir' in overrides) {",
+    replace: '    if (false as boolean) {',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'a-job-that-never-renamed-can-discard',
+    breaks:
+      'the gate on the one `rm` that points outside a bundle, at a directory the user ' +
+      'chose. The ledger `discardExport` reads is written only when the writer says the ' +
+      'rename actually happened; record it unconditionally and a job whose finalize ' +
+      'threw *before* the rename claims the path anyway — and deletes the user’s ' +
+      'earlier, good export sitting there under the same name.',
+    file: 'apps/main/src/project-store.ts',
+    find: '      if (writer.renamed) this.renamedExports.set(jobId, writer.outputPath);',
+    replace: '      this.renamedExports.set(jobId, writer.outputPath);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'export-holds-the-bundle-lock-for-ever',
+    breaks:
+      'an export handing back the bundle lock and the JournalWriter it took. Held to ' +
+      '`before-quit`, one export keeps the `.lock` for the rest of the session and the ' +
+      'next launch sweeps a lock that was never stale — and `releaseProject` is what ' +
+      'makes that safe to give back while an editor may hold the same project.',
+    file: 'apps/main/src/project-store.ts',
+    find: '    const held = this.holds.get(id);\n    if (held === undefined) return;',
+    replace: '    const held = this.holds.get(id);\n    if (held !== undefined) return;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'a-dead-export-window-hangs-the-job',
+    breaks:
+      'the bound on the one wait that had none. A renderer killed for memory sends no ' +
+      'chunk, no passDone and no exportFailed, so the job waits for ever: it stays in ' +
+      '`#jobs`, the writer and its two `wx+` scratch streams stay open, the destination ' +
+      'is never released and progress freezes — §10.2’s "an export that hangs at 40% ' +
+      'with no error", verbatim.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    this.#watchWindow(job, window);',
+    replace: '    void window;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'an-early-export-failure-leaves-no-record',
+    breaks:
+      'the promise that "no record" and "a record saying it failed" are different ' +
+      'things to wake up to. Only a *verification* failure used to be recorded, so an ' +
+      'encoder this machine cannot configure, a lost GL context, a stalled decode or an ' +
+      'append that threw left nothing at all in project.json — and with retention ' +
+      'coming, that is exactly the case where the user needs to be told something ' +
+      'happened.',
+    file: 'apps/main/src/export/session.ts',
+    find: '        await this.#record(job, { error: message }).catch((recordError: unknown) => {',
+    replace: '        await Promise.resolve().catch((recordError: unknown) => {',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'finalize-claims-a-rename-it-did-not-make',
+    breaks:
+      '`ExportMp4Writer.renamed` reporting the rename rather than the return. finalize ' +
+      'renames and *then* opens and fsyncs the parent directory inside the same try, so ' +
+      'inferring "the file is in place" from finalize having returned leaves an ' +
+      'unverified export under the finished name whenever that fsync fails — the one ' +
+      'artifact §7.5’s rename-then-verify order exists to be able to remove.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: '      this.#renamed = true;',
+    replace: '      this.#renamed = false;',
+    mustFail: [EXPORT_MOVIE, EXPORT_SESSION],
+  },
+  {
+    name: 'mvhd-counts-the-aac-priming',
+    breaks:
+      '`mvhd.duration` being what the file PRESENTS. AAC carries 2112 samples of ' +
+      'priming and the audio `elst` is what tells every player to skip exactly them, ' +
+      'so a `mvhd` written from the raw sample tally disagrees with its own audio ' +
+      '`tkhd` by 44 ms and describes a movie longer than anything plays. §7.5’s ' +
+      'fourth check compares that number against the *timeline* inside a 100 ms ' +
+      'budget, so the over-count spends nearly half of it on sound nobody hears — and ' +
+      'a job that fails verification has its finished file discarded, which makes ' +
+      'this a correct export deleted rather than a cosmetic header.',
+    file: 'packages/mux/src/faststart.ts',
+    find: '    return Math.max(video, this.#audioPresentedSec());',
+    replace:
+      '    return Math.max(video, this.#audio.durationUnits / (this.#options.audio?.sampleRate ?? 1));',
+    mustFail: [EXPORT_MOVIE, EXPORT_SESSION],
+  },
+  {
+    name: 'export-chunk-offsets-off-by-one',
+    breaks:
+      'every chunk offset in the exported moov points at the sample data. Off by a ' +
+      'byte, the file demuxes, reports the right duration, passes four of §7.5’s ' +
+      'five checks and decodes into garbage — which is exactly the damage phase 9 ' +
+      'must never delete the user’s sources on the strength of.',
+    file: 'packages/mux/src/faststart.ts',
+    find: '      offsets[i] = cursor;',
+    replace: '      offsets[i] = cursor + 1;',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'cancelled-export-leaves-its-partial',
+    breaks:
+      'a cancelled export leaves nothing behind. §7.5 obligation 1 read the other ' +
+      'way round: a truncated export is a shorter video that looks finished, and it ' +
+      'must not be there to be mistaken for one.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: `    await this.#removeScratch();
+    await unlink(this.#partialPath).catch(() => undefined);`,
+    replace: '    await Promise.resolve();',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'verification-assumes-the-last-frame-decodes',
+    breaks:
+      '§7.5’s fifth check — *"last frame actually decodes"*. Assuming it turns the ' +
+      'verification into four checks that a truncated or mis-offset file passes, and ' +
+      'phase 9 deletes the only copy of the sources on the strength of the answer.',
+    file: 'apps/main/src/export/verify.ts',
+    find: `  if (!outcome.ok) {`,
+    replace: `  if (false as boolean) {`,
+    mustFail: [EXPORT_VERIFY],
+  },
+  {
+    name: 'early-export-chunks-refused-instead-of-held',
+    breaks:
+      'main holding the chunks that arrive before the writer can be opened. WebCodecs ' +
+      'hands the decoderConfig over WITH the first output chunk, so a chunk always ' +
+      'arrives before the writer exists — and on the recompose path §5.7 runs the ' +
+      'whole audio pass before the video encoder says a word. Refusing them fails ' +
+      'every export of a recording with audio before a single sample reaches disk.',
+    file: 'apps/main/src/export/session.ts',
+    find: '      held.push(message);',
+    replace: '      void message;',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'held-export-chunks-flushed-out-of-order',
+    breaks:
+      'the held chunks reaching the writer in arrival order. Reversing them puts the ' +
+      "video's keyframe after the frames that reference it and the audio backwards, " +
+      'and `addVideoSample` is what has to notice — a sample table that cannot express ' +
+      'the order it was given is a file that plays and shows the wrong thing.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    for (const message of held) this.#appendChunk(job, message);',
+    replace: '    for (const message of held.reverse()) this.#appendChunk(job, message);',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'mid-gop-cut-reported-as-instant',
+    breaks:
+      "§5.3's second condition — cut points snapped to keyframes — in the predicate " +
+      'the export routes on. Without it a mid-GOP trim is reported eligible, the job ' +
+      'commits to a copy with no video pass requested, and the plan then refuses it: ' +
+      'a failed export where recompose would have produced the file asked for.',
+    file: 'apps/main/src/export/stream-copy.ts',
+    find: '    reasons.push(...cutPointReasons(input.edit.clips, input.index));',
+    replace: '    reasons.push();',
+    mustFail: [EXPORT_COPY, EXPORT_SESSION],
+  },
+  {
+    name: 'stale-export-scratch-blocks-the-next-export',
+    breaks:
+      'the sweep of this output’s own scratch before the writer opens. The scratch ' +
+      'streams open `wx+`, so one SIGKILL mid-export means that recording can never ' +
+      'be exported under that name again — an opaque EEXIST pointing at files the ' +
+      'user has no reason to know exist.',
+    file: 'packages/mux/src/fs/export-writer.ts',
+    find: '    await sweepExportScratch(options.outputPath);',
+    replace: '    await Promise.resolve();',
+    mustFail: [EXPORT_MOVIE],
+  },
+  {
+    name: 'only-the-first-part-of-a-straddling-block-is-mixed',
+    breaks:
+      'every part an output block overlaps being mixed. A block is ~21 ms and a §7.4 ' +
+      'reacquire puts a part boundary wherever it falls, so mixing only the first ' +
+      'emits the far side of every seam as silence — §5.4 mechanism 5’s class of ' +
+      'error: small, silent, and permanent once it is in the file.',
+    file: 'apps/renderer/src/export/audio-source.ts',
+    find: '    for (const part of this.#partsCovering(startSec, endSec)) {',
+    replace: '    for (const part of this.#partsCovering(startSec, endSec).slice(0, 1)) {',
+    mustFail: [EXPORT_AUDIO],
   },
   // ---- phase 10: the generators ------------------------------------------
   {

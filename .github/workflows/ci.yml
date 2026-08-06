@@ -85,7 +85,28 @@ jobs:
   # fail. Kept off the per-push job because it re-runs the crash test ten times; a
   # pull request is the point at which "do these gates still measure anything" has to
   # be answered.
+  #
+  # `needs: verify` is the same measurement rule as the one at the top of this file,
+  # applied to the last place it was still being broken. `vitest.config.ts` keeps the
+  # three stopwatch gates off each other inside a run; the `push`/`pull_request` split
+  # above keeps two runs of the workflow off each other. This job was the remaining
+  # overlap: it starts at the same instant as `verify`, on the same shared pool of
+  # macOS hosts, and spends its whole life launching Electron — the crash gate ten
+  # times, the A/V sync gate, the camera-unplug gate, both golden gates — while
+  # `verify` is running the phase-6 gate, which judges its worst single frame with no
+  # allowance and cannot tell a busy host from the defect it exists to catch. Observed
+  # on 2026-08-06: the mutation job entered `npm run verify:mutation` 17 s before the
+  # phase-6 gate's window and the gate reported one frame at 29.10 ms against a p99 of
+  # 1.80 ms and a 2.20 ms worst frame on the run before it, with the gate's own
+  # pure-arithmetic host control stretched from 8.50 ms to 11.40 ms in the same frames
+  # — the shape of a host that took the renderer away.
+  #
+  # Serialising costs a PR the two jobs in sequence rather than in parallel (about
+  # 4 + 7 minutes as measured, against each job's own timeout of 20 and 25). Nothing
+  # stops being verified; it stops being measured next to a machine we are also
+  # loading on purpose.
   mutation:
+    needs: verify
     if: github.event_name == 'pull_request'
     runs-on: macos-14
     timeout-minutes: 25

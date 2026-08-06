@@ -213,7 +213,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
    * `misses` counter is for.
    */
   frameAt(t: Seconds): T | null {
-    const frame = this.#ring.frameAtMicros(this.#selectionMicros(t));
+    const frame = this.#ring.frameAtMicros(this.selectionMicros(t));
     if (frame === null) this.#stats.misses += 1;
     else this.#stats.hits += 1;
     return frame;
@@ -221,7 +221,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
 
   /** Close every frame the ring holds strictly before the one covering `beforeT`. */
   release(beforeT: Seconds): void {
-    this.#ring.releaseBeforeMicros(this.#selectionMicros(beforeT));
+    this.#ring.releaseBeforeMicros(this.selectionMicros(beforeT));
   }
 
   /**
@@ -232,8 +232,15 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
    * puts frame selection on the list preview and export may never disagree about
    * and `DemuxIndex.frameAtTime` is its one implementation. The ring is then asked
    * for a frame by timestamp rather than being handed a time to search for itself.
+   *
+   * **Public because the exporter needs to check its answer.** `FrameRing.frameAtMicros`
+   * is hold-last *within the ring*, so a reader whose ring has not caught up hands
+   * back an older frame rather than `null` — which is right for preview (§4.3 holds
+   * the previous picture) and catastrophic for an export, where it is a wrong frame
+   * written to a file rather than a dropped one. `ExportRenderLoop` compares the
+   * frame it was given against this and keeps priming until they agree.
    */
-  #selectionMicros(t: Seconds): number {
+  selectionMicros(t: Seconds): number {
     const frame = this.index.frameAtTime(t);
     return frame === NO_FRAME ? Number.NEGATIVE_INFINITY : this.index.ptsMicros(frame);
   }
@@ -472,7 +479,7 @@ export class SourceReader<T extends ClosableFrame = VideoFrame> {
     if (this.#decoder?.state !== 'configured') return true;
     if (first < this.#submittedFrom) return true;
     if (index.keyframeAtOrBefore(first) > this.#nextFrame) return true;
-    if (first >= this.#nextFrame || this.#ring.frameAtMicros(this.#selectionMicros(t)) !== null) {
+    if (first >= this.#nextFrame || this.#ring.frameAtMicros(this.selectionMicros(t)) !== null) {
       return false;
     }
 

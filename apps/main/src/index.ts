@@ -17,7 +17,7 @@
  *    race with the user's data.
  */
 
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, clipboard, shell } from 'electron';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHANNEL, type PermissionReport } from '@loom/ipc';
@@ -27,9 +27,11 @@ import { helperPathFor } from './input-sampler.ts';
 import { PermissionManager } from './permissions.ts';
 import { ProjectStore } from './project-store.ts';
 import { installLoomProtocol, registerLoomScheme } from './protocol.ts';
-import { registerIpc, unregisterIpc } from './ipc.ts';
+import { registerExportRenderIpc, registerIpc, unregisterIpc } from './ipc.ts';
 import { OverlayController } from './overlay.ts';
 import { RecorderSession } from './recorder/session.ts';
+import { ExportSession } from './export/session.ts';
+import { copyFileToClipboard } from './export/clipboard.ts';
 import { WindowRegistry } from './windows.ts';
 
 // ---- identity, before anything reads a path ---------------------------------
@@ -116,6 +118,38 @@ const overlay = new OverlayController({ store, windows, recorder });
 recorder.attachDrawing(overlay);
 
 /**
+ * Exports. One hidden window per job, keyed by job id (§1.2's `multiple: true`), and
+ * owned here rather than by the editor — closing the editor mid-export must not kill
+ * the export.
+ *
+ * The three platform capabilities are injected for the same reason `ProjectStore`'s
+ * `trash` is: captain decision 9's contract is *"a file on disk, on the clipboard,
+ * and Finder revealed"*, and each of those is one line of `electron` that the job
+ * logic should not have to import to be testable.
+ */
+const exportSession = new ExportSession({
+  store,
+  openWindow: (jobId) => windows.show('export', jobId),
+  findWindow: (jobId) => windows.get('export', jobId),
+  closeWindow: (jobId) => {
+    windows.get('export', jobId)?.destroy();
+  },
+  broadcast: (progress) => {
+    for (const window of windows.all()) {
+      if (!window.isDestroyed()) window.webContents.send(CHANNEL.exportProgress, progress);
+    }
+  },
+  copyToClipboard: (path) =>
+    copyFileToClipboard(path, (format, buffer) => {
+      clipboard.writeBuffer(format, buffer);
+    }),
+  reveal: (path) => {
+    shell.showItemInFolder(path);
+    return true;
+  },
+});
+
+/**
  * The permission manager — built inside {@link main}, after `settings.json` has been
  * read, and never at module scope.
  *
@@ -200,7 +234,11 @@ async function main(): Promise<void> {
   const permissions = createPermissionManager();
 
   installLoomProtocol({ store, rendererRoot });
-  registerIpc({ store, appVersion: app.getVersion() });
+  registerIpc({ store, appVersion: app.getVersion(), exports: exportSession });
+  registerExportRenderIpc({
+    exports: exportSession,
+    isExportWindow: (window) => windows.roleOf(window) === 'export',
+  });
   windows.installHudNoticeFit();
   permissions.install();
   recorder.install();
@@ -371,6 +409,10 @@ app.on('before-quit', (event) => {
   // `state: "recording"` and recovery handles it — the same path a crash takes.
   recorder
     .shutdown()
+    // Exports next, and before the store closes: a job still holding scratch files
+    // has to remove them, and an unfinished export must leave nothing behind that a
+    // later launch could mistake for output (§7.5).
+    .then(() => exportSession.shutdown())
     .then(() => store.closeAll())
     .catch((error: unknown) => {
       console.error('[main] shutdown flush failed:', error);
