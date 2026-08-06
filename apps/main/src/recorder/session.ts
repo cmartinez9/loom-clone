@@ -336,6 +336,17 @@ interface Active {
    */
   originUs: number | null;
   /**
+   * When that frame arrived in this process, on {@link monotonicUs}'s clock.
+   *
+   * Stamped in {@link RecorderSession.onVideoChunk}, which is where every chunk
+   * enters main, rather than where the origin is *used*: the very first screen chunk
+   * is always held while its part is opened, and opening a part is an atomic
+   * `recording.json` write plus a `beginMediaPart`. Reading the clock on the far side
+   * of those would fold their latency into the origin and label every cursor sample
+   * that much early. `null` until that first frame arrives, and written exactly once.
+   */
+  originAtUs: number | null;
+  /**
    * The microphone and system tracks, once each has announced itself.
    *
    * Same reasoning as {@link Active.video}, and separate from it because an audio
@@ -645,6 +656,7 @@ export class RecorderSession {
         provisional,
         video: new Map(),
         originUs: null,
+        originAtUs: null,
         audio: new Map(),
         audioEnd: new Map(),
         // Kicked off here and awaited at the origin, so the helper's start-up cost
@@ -859,14 +871,18 @@ export class RecorderSession {
    * elapsed time — with the reading taken *before* the origin, so the term is
    * positive and no extrapolation is involved.
    *
-   * **What the residual is, and which way it points.** `originAtUs` is when the
-   * first frame *arrived in this process*, not when the screen produced it; the
-   * encode and the IPC hop in between are unmeasured here, and they make the origin
-   * slightly late, which labels every cursor sample slightly early. Half the probe's
-   * own duration adds to that, unsigned. Both are tens of milliseconds against a
-   * §6.5 pre-roll of 600 ms. Closing the gap properly means relating the capture
-   * renderer's `performance.now()` to this clock, which is new IPC and new §5.4
-   * arithmetic; it is recorded in AGENTS.md as an open item rather than guessed at.
+   * **What the residual is, and which way it points.** Two terms, and they point in
+   * opposite directions, so they partially cancel rather than add. `originAtUs` is
+   * when the first frame *arrived in this process*, not when the screen produced it;
+   * the encode and the IPC hop in between are unmeasured here, and they make the
+   * origin slightly late, which labels every cursor sample slightly early. The
+   * reading's own `atUs` runs the other way: it is taken after the helper exited, at
+   * or after the instant it stamped, which makes the origin slightly small and labels
+   * samples late by at most `clock.uncertaintyUs` (see {@link HelperClockReading}).
+   * Both are tens of milliseconds against a §6.5 pre-roll of 600 ms. Closing the
+   * first properly means relating the capture renderer's `performance.now()` to this
+   * clock, which is new IPC and new §5.4 arithmetic; it is recorded in AGENTS.md as
+   * an open item rather than guessed at.
    */
   private async startSampling(active: Active, originAtUs: number): Promise<void> {
     const clock = await active.inputClock;
@@ -912,13 +928,15 @@ export class RecorderSession {
       () => undefined,
     );
 
-    // The uncertainty is printed rather than assumed small. It is half the width of
-    // the interval the helper's clock was read in, and it is the one term in the
-    // origin that this process can actually see — so a machine where the probe takes
-    // a second says so here rather than producing a quietly misplaced log.
+    // The uncertainty is printed rather than assumed small. It is the full width of
+    // the interval the helper's clock was read in, and under this estimator that is a
+    // one-sided bound rather than a ± — the origin can only be early, so a sample can
+    // only be labelled late. It is the one term in the origin that this process can
+    // actually see, so a machine where the probe takes a second says so here rather
+    // than producing a quietly misplaced log.
     console.log(
-      `[recorder] sampling the pointer, origin known to ±${clock.uncertaintyUs.toFixed(0)} µs; ` +
-        describeClickCapability(sampler.capability),
+      `[recorder] sampling the pointer, origin early by at most ` +
+        `${clock.uncertaintyUs.toFixed(0)} µs; ${describeClickCapability(sampler.capability)}`,
     );
   }
 
@@ -1315,10 +1333,18 @@ export class RecorderSession {
    * Overrunning that budget ends the recording when it is the screen, and costs
    * the camera when it is the camera — the same split §7.3 draws for audio, and
    * the whole of what §7.4 asks for.
+   *
+   * This is also the one place a chunk's *arrival* can be timed. Every chunk comes
+   * through here; `appendHeldChunks` replays into {@link RecorderSession.appendChunk}
+   * directly, on the far side of the part-open write, so a reading taken there would
+   * be measuring the disk (see {@link Active.originAtUs}).
    */
   private onVideoChunk(active: Active, chunk: ChunkMsg, track: VideoTrackKey): void {
     const state = videoTrack(active, track);
     if (state.done) return;
+    if (track === REFERENCE_TRACK && active.originAtUs === null) {
+      active.originAtUs = monotonicUs();
+    }
 
     if (state.part === null) {
       if (state.held.length >= MAX_HELD_CHUNKS) {
@@ -1911,8 +1937,10 @@ export class RecorderSession {
     // The recording clock's origin is the reference track's first frame, and this
     // is where it is learned (§5.4 mechanism 2). It is also the instant the cursor
     // log has to be measured from, so it is where sampling begins — see
-    // {@link RecorderSession.beginSampling}. The monotonic reading is taken here,
-    // synchronously, because everything after this line is a queue.
+    // {@link RecorderSession.beginSampling}. What that instant *was*, on this
+    // process's clock, was stamped when the frame arrived rather than here: the
+    // first screen chunk always reaches this line by way of `appendHeldChunks`,
+    // which runs after the part-open write (see {@link Active.originAtUs}).
     if (state.track === REFERENCE_TRACK && active.originUs === null) {
       active.originUs = chunk.timestampUs;
       // Guarded, not merely careful. Everything below this line is the capture
@@ -1920,7 +1948,7 @@ export class RecorderSession {
       // pressed record for, and no defect in the pointer log — not even a
       // synchronous throw before the first `await` — may reach it.
       try {
-        this.beginSampling(active, monotonicUs());
+        this.beginSampling(active, active.originAtUs ?? monotonicUs());
       } catch (error) {
         console.error('[recorder] the input sampler could not be started:', error);
       }

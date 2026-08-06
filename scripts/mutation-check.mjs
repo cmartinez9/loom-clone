@@ -744,8 +744,8 @@ const MUTATIONS = [
       'setup asked for the Accessibility grant on the promise of that log. Removing ' +
       'the one call puts it straight back.',
     file: 'apps/main/src/recorder/session.ts',
-    find: '        this.beginSampling(active, monotonicUs());',
-    replace: '        void monotonicUs;',
+    find: '        this.beginSampling(active, active.originAtUs ?? monotonicUs());',
+    replace: '        void active.originAtUs;',
     mustFail: [EVENTS],
   },
   {

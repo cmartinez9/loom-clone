@@ -73,18 +73,35 @@ export class ProjectStoreEventSink implements EventLogSink {
  * boot. So they are related the only way they can be, by reading one at a known
  * instant on the other.
  *
- * {@link atUs} is the **midpoint** of the interval the reading was taken in, so the
- * error is at most half the probe's own duration rather than all of it, and it is
- * centred rather than one-sided. {@link uncertaintyUs} is that half-width, reported
- * rather than assumed small — a probe that took a second is a reading nothing should
- * be placed against.
+ * {@link atUs} is the **later** end of the interval the reading was taken in, not its
+ * midpoint. Where in that interval the helper stamped is not unknown, so there is no
+ * difference to split: `probeReport()` evaluates `nowUptimeUs()` in the dictionary
+ * literal it returns — after `AXIsProcessTrusted`, after the `CGEventTap`
+ * create/enable/release, after `measureDisplay` — with only JSON serialisation, one
+ * write and process exit left to run. The stamp therefore sits close to the end of
+ * the interval, and the nearest estimator of it is the reading taken after the helper
+ * exited.
+ *
+ * {@link uncertaintyUs} is consequently the **full** width of the interval and a
+ * one-sided *bound* rather than a half-width: `atUs` is at or after the instant `tUs`
+ * names, never before it. Reported rather than assumed small — a probe that took a
+ * second is a reading nothing should be placed against.
  */
 export interface HelperClockReading {
   /** The helper's `CLOCK_UPTIME_RAW` microsecond. */
   tUs: number;
-  /** When that instant was, on this process's monotonic clock, in microseconds. */
+  /**
+   * When that instant was, on this process's monotonic clock, in microseconds.
+   *
+   * At or after the true instant, by at most {@link uncertaintyUs} — never before.
+   */
   atUs: number;
-  /** Half the width of the interval `tUs` was read in. */
+  /**
+   * The full width of the interval `tUs` was read in.
+   *
+   * A bound on how much later {@link atUs} is than the instant `tUs` names, in one
+   * direction only.
+   */
   uncertaintyUs: number;
 }
 
@@ -107,20 +124,36 @@ export function monotonicUs(): number {
  * Read the helper's clock, so an instant this process observed can be named on it.
  *
  * Costs one run of the native helper (`probe`, which changes nothing and prompts for
- * nothing). `null` when the helper could not be run or did not report a timestamp —
- * and a `null` here means the recording gets no cursor log, deliberately: placing a
- * log against a fabricated origin is worse than not writing one, because the
- * generators would consume it and frame the shot against the wrong second.
+ * nothing). `null` when the helper could not be run or did not report a usable
+ * timestamp — and a `null` here means the recording gets no cursor log, deliberately:
+ * placing a log against a fabricated origin is worse than not writing one, because
+ * the generators would consume it and frame the shot against the wrong second.
+ *
+ * **`0` is refused alongside `null`.** `InputProbe.tUs` is `null` only when the helper
+ * never answered; `parseHelperLine` coerces a missing or non-finite `tUs` on an
+ * otherwise well-formed line to `0`, and that line is shared by every helper message
+ * kind, so narrowing it is a protocol change rather than a fix here. An origin built
+ * on `0` is the machine's uptime, which is exactly the log `MAX_SOURCE_TIME_SEC` in
+ * `@loom/edl` drops sample by sample without saying so.
+ *
+ * **Which way the residual runs.** `atUs` is the reading taken *after* the helper
+ * exited, so it is at or after the instant `tUs` names. The origin derived from it —
+ * `tUs + (originAtUs - atUs)` — is therefore too small by at most
+ * {@link HelperClockReading.uncertaintyUs}, and every `t` in the log, being measured
+ * from that origin, is too large: samples are labelled **late**. That is the opposite
+ * direction to the first frame's unmeasured encode and IPC latency, which makes the
+ * origin too large and labels samples early (AGENTS.md, carried-forward item 10), so
+ * the two partially cancel. Under the midpoint this used to take, they added.
  */
 export async function readHelperClock(helperPath?: string): Promise<HelperClockReading | null> {
   const before = monotonicUs();
   const probe = await probeInput(helperPath === undefined ? {} : { helperPath });
   const after = monotonicUs();
-  if (probe.tUs === null) return null;
+  if (probe.tUs === null || probe.tUs <= 0) return null;
   return {
     tUs: probe.tUs,
-    atUs: (before + after) / 2,
-    uncertaintyUs: (after - before) / 2,
+    atUs: after,
+    uncertaintyUs: after - before,
   };
 }
 

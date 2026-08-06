@@ -263,12 +263,21 @@ never awaited, and every failure is a `console.error` and a recording that carri
 takes one paired reading (a `probe`, fired at `start()` so its cost lands while the
 stream is opening) and the origin is that reading plus the elapsed time to the first
 frame, both measured on `process.hrtime`. Measured on a real synthetic-source run:
-first sample at **t = 0.024 s**, log covering 3.87 s of a 4.05 s recording. What is
-_not_ measured is the encode and IPC between the screen producing that frame and main
-receiving it, which makes the origin slightly late and every sample slightly early —
-tens of milliseconds against §6.5's 600 ms pre-roll. **Closing that gap is an open
-item**, in the carried-forward list below; it needs the capture renderer's
-`performance.now()` related to main's clock, which is new IPC and new §5.4 arithmetic.
+first sample at **t = 0.024 s**, log covering 3.87 s of a 4.05 s recording. **The
+elapsed term is stamped where the frame arrives, in `onVideoChunk`, not where the
+origin is used** — the first screen chunk is always held while its part is opened, and
+`appendHeldChunks` replays it on the far side of an atomic `recording.json` write, so a
+reading taken there would be measuring the disk. **And the paired reading takes `after`,
+not the midpoint**: the helper stamps `tUs` in `probeReport()`'s dictionary literal,
+after the tap create/enable/release and `measureDisplay`, so the stamp sits near the end
+of the interval and there is no difference to split; `uncertaintyUs` is the full width
+and a one-sided bound. What is _not_ measured is the encode and IPC between the screen
+producing that frame and main receiving it, which makes the origin slightly late and
+every sample slightly early — tens of milliseconds against §6.5's 600 ms pre-roll, and
+in the _opposite_ direction to the probe bound, so the two partially cancel. **Closing
+that gap is an open item**, in the carried-forward list below; it needs the capture
+renderer's `performance.now()` related to main's clock, which is new IPC and new §5.4
+arithmetic.
 
 ## The timeline model, in one paragraph
 
@@ -1082,15 +1091,36 @@ What none of them can establish is on hardware — see carried-forward item 8.
 10. **The cursor log's origin carries the first frame's encode and IPC latency.**
     `RecorderSession` names the recording clock's origin on the helper's clock from a
     paired `process.hrtime`/`CLOCK_UPTIME_RAW` reading and the elapsed time to the
-    first screen chunk — but "the first screen chunk" is measured when it _arrives in
-    main_, and the frame was captured a little earlier. The origin is therefore
-    slightly late and every cursor sample slightly early, by whatever encode plus IPC
-    cost that one frame. Measured indirectly at 24 ms of total lead-in on a synthetic
-    run; not measured directly, because doing so needs the capture renderer's
+    first screen chunk. That elapsed term is now stamped in `onVideoChunk`, where the
+    chunk enters main, so it no longer carries the part-open write — but "arrives in
+    main" is still later than "the screen produced it", by that one frame's encode
+    plus IPC. The origin is therefore slightly late and every cursor sample slightly
+    early. Measured indirectly at 24 ms of total lead-in on a synthetic run; not
+    measured directly, because doing so needs the capture renderer's
     `performance.now()` related to main's clock — the same `TrackEpochEstimator`
     problem one process out, and new IPC plus new §5.4 arithmetic rather than a
     constant. Tens of milliseconds against §6.5's 600 ms pre-roll, so it is recorded
-    rather than guessed at. **A crash-recovered bundle is the other half:** the logs
+    rather than guessed at.
+    **The probe bound runs the other way, and is measured.** `readHelperClock` takes
+    `after` as `atUs`, which is at or after the instant the helper stamped, so the
+    origin is slightly _small_ and samples are labelled _late_ — the opposite sign to
+    the encode+IPC term above, so the two partially cancel rather than add. Its bound
+    is the full probe width `after - before`, measured over the real
+    `dist/native/loom-input-sampler probe` with `process.hrtime.bigint()` exactly as
+    `readHelperClock` does. Quiet, n=200: min 14.77 ms, median 16.69 ms, mean 16.92 ms,
+    p95 19.33 ms, max 21.67 ms. Under a 20-way `scripts/gate-load.mjs` saturation,
+    n=100: min 16.35 ms, median 18.46 ms, mean 18.75 ms, p95 21.12 ms, max 26.46 ms.
+    That is the **bound**; the true residual is the strictly smaller post-stamp tail
+    (JSON serialisation, one write, process exit), which could not be measured
+    directly because `process.hrtime` and the helper's clock do not share an epoch —
+    22.78 s apart on this machine, which is the whole reason the pairing exists.
+    **No uncertainty threshold is built, and that is a finding rather than a number to
+    tune** (the shape §6.5's `minDurationSec` already has here): the worst case is
+    under one 30 fps frame and 4.4% of §6.5's 600 ms `preRollSec`, and the distribution
+    has no tail to catch — 6.9 ms of spread quiet, 10.1 ms loaded — so a threshold
+    could only fire on ordinary loaded recordings and would turn an invisible timing
+    error into a missing cursor log, which is the defect this whole path exists to fix.
+    **A crash-recovered bundle is the other half:** the logs
     are declared in `recording.json` when sampling starts, so they are discoverable,
     but their counts stay at the zero a provisional document carries — `recoverBundle`
     rebuilds tracks from the frame indices and does not read `events/`.
