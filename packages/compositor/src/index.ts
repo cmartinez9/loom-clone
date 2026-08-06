@@ -9,8 +9,8 @@
  * `test/phase8-gate.test.ts` drives this compositor from the shipping `PreviewLoop`
  * and the shipping `ExportRenderLoop` in two GL contexts; phase 11's
  * `test/phase11-golden.test.ts` is it for the annotation passes, 24 timestamps
- * through the preview loop and through a fixed-timestamp export loop. Both compare
- * at a max per-pixel delta of 0.
+ * through those same two loops over one painted frame. Both compare at a max
+ * per-pixel delta of 0.
  *
  * One subpath breaks the purity rule on purpose and says why in its own docblock:
  * `@loom/compositor/raster` rasterises glyphs into a `TextAtlas` and needs a canvas

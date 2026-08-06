@@ -153,7 +153,7 @@ same timeline — no new primitive — anchored to the picture rather than to th
 so a zoom cannot slide the content out from under a blur. A blur or mask that cannot
 be placed refuses the frame instead of compositing without it, and one that cannot be
 blurred is filled opaque rather than quietly weakened. `npm test` proves it by drawing
-24 fixed timestamps through the shipping preview loop and through a fixed-timestamp
+24 fixed timestamps through the shipping preview loop and through the shipping
 export loop and requiring **max per-pixel delta 0**, plus a third annotation-free frame
 at every timestamp so a pair that both drew nothing cannot pass. The editor window
 exists now, but it has no tools for authoring one yet; the only annotations a shipping
