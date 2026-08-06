@@ -27,12 +27,20 @@
  *
  * ## Not phase 11's gate
  *
- * `test/golden/` checks that annotations change the picture, where they change it,
- * and that the mask and blur are effects on pixels — over one painted source frame,
- * with the export path standing in as `resolve` + `render`. This one checks the axis
- * that stand-in cannot: a real decoded VFR stream, the shipping `ExportRenderLoop`,
- * two independent contexts, and the encoded file at the end. The seam phase 11 asked
- * for is `ExportRenderLoop.renderAt`, which is what this harness calls.
+ * `test/golden/` checks that annotations are not vacuous, over one painted source
+ * frame: that they changed the picture, that each kind drew inside a box its fixture
+ * computes with its own arithmetic, that the mask's centre is exactly the mask's
+ * colour, and that the blur destroyed the variance it covered.
+ *
+ * **Both harnesses call `ExportRenderLoop.renderAt`.** The seam phase 11 asked for is
+ * the one this file uses, and phase 11's two-line `resolve` + `render` stand-in — which
+ * it carried only while phase 8 was still building that pipeline — was folded onto it
+ * once both branches were on main, with every one of its assertions left where it was.
+ *
+ * So what separates the two gates is the axis and not the seam: this one is the only
+ * one with a real decoded VFR stream, two independent WebGL2 contexts and two
+ * independent frame rings, and the only one that decodes the finished MP4 back out to
+ * check the pictures reached the file. Neither subsumes the other.
  *
  * ## Making the pass mean something
  *
