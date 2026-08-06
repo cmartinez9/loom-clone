@@ -1,7 +1,7 @@
 /**
  * The mutation proof for the gates: phase 1's crash gate, phase 3's A/V sync gate,
- * phase 4's camera-unplug gate, §7.3's revoked-microphone path and phase 7's
- * timeline model.
+ * phase 4's camera-unplug gate, §7.3's revoked-microphone path, phase 7's timeline
+ * model and phase 11's golden-frame gate over annotations.
  *
  *   node scripts/mutation-check.mjs [--only <name>]
  *

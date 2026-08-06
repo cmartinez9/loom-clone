@@ -8,8 +8,8 @@ a recording is a folder on your disk that you can open in Finder.
 **Phase 2 of 14: permissions and first run**, on top of phase 1's capture spine,
 phase 3's audio and A/V sync machinery and phase 4's webcam track and multi-part
 recordings, plus the phase 5 cursor and click sampler, phase 6's decode path and
-WebGL2 compositor, and phase 7's timeline model, built early and out of order because
-they are self-contained.
+WebGL2 compositor, phase 7's timeline model and phase 11's annotations, built early
+and out of order because they are self-contained.
 
 What runs today: the first launch explains the four macOS permissions this app can
 use — Screen Recording, Camera, Microphone and Accessibility — and asks for all four
@@ -76,9 +76,20 @@ after a random sequence of edits matches `resolve()` after those same edits are 
 reloaded and replayed from the journal, and two independent precomputes of a spring
 channel come out byte-identical.
 
-`npm run verify:mutation` proves all four gates are real by breaking capture and the
-timeline model one way at a time — editing the production source on disk — and
-requiring a test to fail each time.
+The property phase 11 establishes: **a redaction that cannot be drawn is never
+published.** Arrows, boxes, ellipses, highlights, text and blur/mask are spans on that
+same timeline — no new primitive — anchored to the picture rather than to the output,
+so a zoom cannot slide the content out from under a blur. A blur or mask that cannot
+be placed refuses the frame instead of compositing without it, and one that cannot be
+blurred is filled opaque rather than quietly weakened. `npm test` proves it by drawing
+24 fixed timestamps through the shipping preview loop and through a fixed-timestamp
+export loop and requiring **max per-pixel delta 0**, plus a third annotation-free frame
+at every timestamp so a pair that both drew nothing cannot pass. No shipping window
+lets you author one yet; the editor is later.
+
+`npm run verify:mutation` proves all five gates are real by breaking capture, the
+timeline model and the annotation path one way at a time — editing the production
+source on disk — and requiring a test to fail each time.
 
 ## Requirements
 
