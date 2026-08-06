@@ -77,8 +77,9 @@
  *
  * The last two have **no compositor pass on `main`**: `Compositor.render` throws when
  * handed a `webcam` or a `cursor` frame, and `ExportRenderLoop`'s preallocated
- * `CompositorFrames` is `{ screen: null }`, so nothing ever passes one. Both paths
- * therefore draw nothing for those rows and agreeing about nothing is not evidence.
+ * `CompositorFrames` is `{ screen: null, textAtlas: null }` — neither key is on it, so
+ * nothing ever passes one. Both paths therefore draw nothing for those rows and
+ * agreeing about nothing is not evidence.
  * Building the passes is separate scheduled work; what this gate owes is that its
  * headline number is not read as covering them.
  *

@@ -61,8 +61,9 @@
  * — frame selection and the zoom state — each with a control that must go non-zero.
  * The other two, **the webcam bubble and the cursor**, have no compositor pass on
  * `main`: `Compositor.render` throws when handed a `webcam` or a `cursor` frame, and
- * `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }`, so neither path draws
- * anything for them and a per-pixel delta of 0 between two blanks says nothing.
+ * `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null, textAtlas: null }` and
+ * carries neither key, so neither path draws anything for them and a per-pixel delta
+ * of 0 between two blanks says nothing.
  * Building those passes is separate scheduled work.
  *
  * So the report carries `coverage` — printed on every run, passing or not — and a

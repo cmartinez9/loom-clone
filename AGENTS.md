@@ -1671,7 +1671,8 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   so.** Frame selection and the zoom state are each perturbed by a control that must go
   non-zero; **the webcam bubble and the cursor are not exercised at all**, because
   neither has a compositor pass — `Compositor.render` throws when handed a `webcam` or
-  a `cursor` frame and `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }` —
+  a `cursor` frame and `ExportRenderLoop`'s `CompositorFrames` is
+  `{ screen: null, textAtlas: null }`, which carries neither key —
   so both paths draw nothing and agreeing about nothing is not evidence. The split is
   `COVERAGE` in `test/export-golden/harness.ts`, printed on every run including a
   passing one, and it is kept honest by a **tripwire**: `probeCoverage` hands the real
