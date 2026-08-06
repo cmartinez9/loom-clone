@@ -983,10 +983,11 @@ was not a control.
   `CONTEXT_LOST_WEBGL` each) when it exited on two consecutive runs. `disposePath`
   hands each one back with `WEBGL_lose_context`, and a release the harness asked for is
   kept out of `contextLost` by name rather than by inference.
-- **The phase-8 golden harness died on CI four times in five, and what closed it was
-  asking the GPU for less — not tuning a switch.** Always the same instant, within a
-  second of `export writer open`: `Failed to allocate texture` inside
-  `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error`.
+- **The phase-8 golden harness dies on CI when the GPU process cannot allocate. Asking
+  the GPU for less thinned it out; tuning a switch did nothing; and it is still not
+  closed.** Always the same instant, within a second of `export writer open`:
+  `Failed to allocate texture` inside `Skia_Wrapped_YUVPlane`, then
+  `Restarting GPU process due to unrecoverable error`.
   Two things were tried first and neither closed it, both worth knowing because both
   _sound_ decisive. **One:** `--force-gpu-mem-available-mb` overrides Skia's GPU
   resource-cache budget, so phase 6's `2048` tells the driver it may hold two gigabytes
@@ -1010,6 +1011,28 @@ was not a control.
   one assertion moved. The knob on a virtualised runner is the GPU bytes a frame of the
   export pass moves — **source area, output area, and the number of live contexts** —
   not the cache budget.
+  **Two turns of that knob did not close it, and there is no third.** Measured on
+  `fm/loom-gate-instrument-validity`, at 1024x576 into 768x432: two of six CI runs died
+  the same way — runs `31094399329` and `31100718641`, each `Failed to allocate texture`
+  inside `Skia_Wrapped_YUVPlane` within a second of `export writer open`, and each
+  exhausting **both** launches `shouldRelaunchGolden` allows, so the gate reported a
+  phase-8 failure about a run that produced no reading. A third turn — 768x432 into
+  512x288, 44% of the area — was applied as a CI auto-fix on `0e2c49e` and **reverted**
+  on `8a421b4`. Read _"Not one assertion moved"_ two paragraphs up in that light, because
+  it is the sentence every reduction is defended with: a fixture size is a **constant, not
+  an assertion**, so shrinking one survives a zero-deleted-`expect` audit while making a
+  gate whose whole job is per-pixel identity materially worse at it. It is a weaker
+  guarantee than it reads as. Turning this knob again is a change to what phase 8
+  establishes and needs the same scrutiny as deleting one of its checks.
+  **What closes it is the third outcome, one gate over.** A run whose every launch lost
+  the context measured nothing, and a gate that calls that a failure is reporting a
+  verdict it never reached — exactly what `instrumentOutOfCalibration` answers for phase
+  6's frame budget. The same remedy for phase 8 — withhold the verdict when every launch
+  lost the GPU context — is in flight as its own task and is **not** phase 6's branch to
+  land. Until it does, a red `test/phase8-gate.test.ts` whose log carries
+  `Failed to allocate texture` and `GPU process gone: abnormal-exit (exit 8704)` is this
+  known crash rather than a regression to chase, and the answer is neither a smaller
+  fixture nor a third launch.
 - **A lost context the export loop notices first still has to reach
   `report.contextLost`.** `ExportRenderLoop` consults `Compositor.contextLost` before and
   after every composite, so when the GPU process dies mid-export it throws
