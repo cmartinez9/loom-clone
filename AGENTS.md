@@ -868,11 +868,30 @@ every run and fail exactly as hard as before. Only the claims from the first exp
 onward are withheld. The predicate is keyed on two measured facts and nothing else — the
 failure carries `ExportContextLostError`'s **own sentence** (`CONTEXT_LOST_SIGNATURE`, a
 substring of its most specific clause, so a reworded message sends the gate back to
-judging every failed export rather than withholding), and **no** export reading survives.
-A §7.5 verification failure, a decode stall, an encoder error, a muxer refusal: every one
-is judged and fails. `test/phase15-verdict.test.ts` is the fence and enumerates ten
-bad-run shapes that must still be judged, including a lost context that measured a delta
-anyway and a different error that merely mentions a context.
+judging every failed export rather than withholding), and **no reading of what reached a
+file** survives. A §7.5 verification failure, a decode stall, an encoder error, a muxer
+refusal: every one is judged and fails, on either export.
+`test/phase15-verdict.test.ts` is the fence and enumerates ten bad-run shapes that must
+still be judged, including a lost context that measured a delta anyway, a second export
+that failed for a real reason after the first finished, and a different error that merely
+mentions a context.
+
+**The second condition is about pictures rather than pipelines, and it took a second CI
+shape to get that right.** The three runs above lost the context at export **A**, so
+nothing about either export survived and counting a _finished_ export as a reading was
+harmless. Run 31161802868 is the shape that showed it was not: export A finished and
+verified, the GPU process then died with `Failed to allocate texture` inside
+`Skia_Wrapped_YUVPlane` 0.16 s after export B's page loaded — the same host-memory
+exhaustion § Sharp edges records against the phase-8 harness — and export B refused at
+output frame 7. One export reading survived, the gate judged, and _"expected +0 to be 2"_
+is a verdict on §4.5's export agreement that nothing on that run measured: the disease
+this mechanism exists for, arriving one export later than it was written for. So
+`exportReadingsTaken` enumerates **decoded frames and the two deltas** — what every
+withheld claim is made of, since each compares _two_ files — and a finished export, which
+says only that the encoder and muxer worked once on this host, is reported in the banner
+by label and byte count rather than counted as a reading. Nothing in the strict direction
+moved: the signature condition is untouched, so a failure of any other kind is still
+judged wherever it lands.
 
 **Be honest about the reach, because a skipped test must not read as coverage.** On the
 paravirtual CI runner this has happened on **every** attempt measured, so **the export

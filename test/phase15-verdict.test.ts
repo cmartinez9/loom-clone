@@ -11,7 +11,7 @@
  * **per claim**, against a report that still carries the editor's readings — so the
  * predicate has to be exact about which failures are the instrument being taken away
  * and which are the product being wrong. Every case below is a run that must be
- * **JUDGED**, except the two that are the real thing.
+ * **JUDGED**, except the last block, which is the one shape that is the real thing.
  */
 
 import { readFileSync } from 'node:fs';
@@ -186,9 +186,16 @@ describe('runs that must be JUDGED rather than withheld', () => {
       }),
     },
     {
-      name: 'the context was lost on one export after the other finished',
+      // The other half of the shape CI run 31161802868 produced. The context surviving
+      // export A is *not* what makes a later failure the instrument's: the signature is,
+      // and a second export that failed any other way is judged however healthy the
+      // first one was.
+      name: 'the SECOND export failed for a real reason after the first finished',
       report: aReport({
-        exports: [anExport({ ok: true, error: '', bytes: 1000 }), anExport({ label: 'B-manual' })],
+        exports: [
+          anExport({ ok: true, error: '', bytes: 1000 }),
+          anExport({ label: 'B-manual', error: 'the exported file’s duration is 9.400s' }),
+        ],
       }),
     },
     {
@@ -219,6 +226,30 @@ describe('the one shape that earns a withheld verdict', () => {
     expect(
       exportInstrumentLost(aReport({ exports: [anExport(), anExport({ label: 'B-manual' })] })),
     ).toBe(true);
+  });
+
+  it('withholds when the context went at the SECOND export, after the first finished', () => {
+    // CI run 31161802868, verbatim: export A finished and verified, the GPU process died
+    // with `Failed to allocate texture` 0.16 s after export B's page loaded, export B
+    // refused at output frame 7, and nothing was ever decoded back out of a file. The
+    // gate judged it and failed on `expected +0 to be 2` — a verdict on §4.5's export
+    // agreement that nothing on that run measured.
+    //
+    // A finished export is a reading of the *pipeline*, not of the picture: every claim
+    // withheld here compares **two** files, so one of them cannot judge any of them. The
+    // evidence is not discarded, it is reported — the assertion below is that the banner
+    // still names it.
+    const report = aReport({
+      exports: [
+        anExport({ ok: true, error: '', bytes: 2_617_452, verified: true }),
+        anExport({ label: 'B-manual' }),
+      ],
+    });
+    expect(exportInstrumentLost(report)).toBe(true);
+    expect(exportReadingsTaken(report)).toEqual([]);
+    expect(describeWithheld(report).join('\n')).toContain(
+      'export A-generated: finished (2617452B)',
+    );
   });
 
   it('is not swayed by the editor half being full', () => {
