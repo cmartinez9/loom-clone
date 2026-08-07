@@ -160,21 +160,32 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * The consequence for this registry: a mutation whose only guard is this gate and whose
  * property lives past the first export is **unproven** on a host that loses the
  * context, exactly as {@link WITHHOLDABLE_GUARDS} describes for phases 6 and 8 — so this
- * gate is listed there too. **Four** entries are in that position today, every one of
+ * gate is listed there too. **Three** entries are in that position today, every one of
  * them a control whose reading is taken after the first export:
  * `a-gesture-that-changes-nothing-strands-its-preview`,
- * `the-amount-slider-commits-on-every-step`,
- * `the-inspector-rebuilds-under-its-own-thumb` and
- * `the-zoom-panel-does-not-follow-the-playhead`. The fix for each is a second guard that
+ * `the-amount-slider-commits-on-every-step` and
+ * `the-inspector-rebuilds-under-its-own-thumb`. The fix for each is a second guard that
  * cannot withhold — never a retry, and never a widening of the predicate.
+ *
+ * `the-zoom-panel-does-not-follow-the-playhead` was the fourth and is **the worked
+ * example of that fix**, because CI run 31148316397 is what the position costs: the
+ * claim that guarded it withheld, the one claim this gate judges on every run still
+ * passed, and `runTests` — which can only read a *file* — reported `SURVIVED`, a hole in
+ * a gate that had not been given the chance to look. The property needed no manual
+ * region at all, so the gate now judges it before the first export, over the generated
+ * track alone, at a third instant *between* the two auto-zoom segments (`BETWEEN_SEC` in
+ * `test/editor-controls/main.ts` says why the other two cannot carry it between them).
+ * The richer claim — the button, and `yours` — still needs a manual region and is still
+ * withheld.
  *
  * One nuance the set cannot express, recorded rather than engineered around:
  * {@link WITHHOLDABLE_GUARDS} is keyed by **file**, and this gate withholds per
- * *claim* — its first two tests are measured before any export and are judged on every
- * run. So a mutation guarded solely by one of those would be reported as
- * solely-withholdable when it is in fact proven. That over-reports, which is the
- * conservative direction for a warning whose whole job is to make an unproven mutation
- * impossible to overlook; none of the four above is in that position anyway.
+ * *claim*, so a mutation guarded solely by a claim this gate judges on every run is
+ * reported as solely-withholdable when it is in fact proven. That over-reports, which is
+ * the conservative direction for a warning whose whole job is to make an unproven
+ * mutation impossible to overlook — and `the-zoom-panel-does-not-follow-the-playhead` is
+ * now exactly that case, which is the honest reason its name is still printed under the
+ * exposure warning below.
  */
 const P15_GATE = 'test/phase15-gate.test.ts';
 /** The fence around that withhold: every bad-run shape that must still be judged. */
@@ -2029,7 +2040,10 @@ export const MUTATIONS = [
       '   Nothing caught it for a whole phase: the document is right, `resolve` is ' +
       'right and the picture is right, so every test passed and a person looking at ' +
       'the `--shots` screenshots found it. The gate now reads the panel off the DOM ' +
-      'at both sides of a region boundary and compares it against the probe.',
+      'at both sides of a region boundary and compares it against the probe.\n' +
+      '   The reading that catches it on **every** host is the one taken before the ' +
+      'first export, between the two generated segments: this claim needs no manual ' +
+      'region, so it is judged where a lost export instrument cannot take it away.',
     file: 'apps/renderer/src/editor/main.ts',
     find: '    if (sourceSec !== paintedPanelSourceSec) {',
     replace: '    if (sourceSec === paintedPanelSourceSec) {',

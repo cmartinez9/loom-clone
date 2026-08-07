@@ -866,9 +866,26 @@ claims of this gate are effectively never judged on CI and are only meaningful o
 Mac** — where they pass, and where the numbers above were measured. The banner says it
 and so does this paragraph. The gate gets **one** launch and that is unchanged; more
 attempts against a host that cannot serve the allocation is the move this project keeps
-refusing. Four `verify:mutation` entries are guarded solely by this gate and are
-therefore unproven on such a host; they are named at `WITHHOLDABLE_GUARDS`, and the fix
-for each is a second guard that cannot withhold.
+refusing. Three `verify:mutation` entries are guarded solely by claims this gate
+withholds and are therefore unproven on such a host; they are named at
+`WITHHOLDABLE_GUARDS`, and the fix for each is a second guard that cannot withhold.
+
+**`the-zoom-panel-does-not-follow-the-playhead` was a fourth, and what it cost is worth
+inheriting: `runTests` can only read a _file_, and this gate withholds per _claim_.** So
+on run 31148316397 the claim that guarded it withheld, the one claim this gate judges on
+every run still passed, and the mutation proof reported `SURVIVED` — a hole in a gate
+that had not been given the chance to look, which is the over-claiming direction in the
+one tool whose job is to prove the gates detect things. The fix is the prescribed one and
+not a widening of `no verdict`: the panel claim needs **no manual region**, so its
+numbers half is now judged before the first export, over the generated track alone, at a
+third instant **between** the two auto-zoom segments. `INSIDE_SEC` and `OUTSIDE_SEC` both
+sit inside a segment's hold and resolve to 2.500 and 2.499 — the same `2.50×` — so a
+frozen panel agrees with itself across that pair, and only a reading where the generator
+has nothing to say can see it; `BETWEEN_SEC` carries the derivation. The richer claim —
+`yours`, and whether _Take manual control_ is offered — still needs a manual region, is
+still taken after export A, and is still withheld. The entry stays printed under the
+exposure warning because that warning is file-keyed: an over-report, in the conservative
+direction, and `P15_GATE`'s docblock says so.
 
 Two consequences worth expecting. Phase 14's gate now asserts
 `['Screen', 'Zoom', 'Notes']` — the annotation lane is an _effect_ lane like Zoom, owned
@@ -1740,10 +1757,19 @@ same pass is not a check that harness runs.
   and no single run looks wrong when that repeats — so it is printed on **every** run
   straight off the registry, deterministic and identical on every host, rather than
   counted over time. The set gained `test/phase15-gate.test.ts` when that gate's export
-  claims became withholdable, so **five** mutations are on the list today —
-  `export-writer-registered-after-it-opens` behind the phase-8 gate, and the four the
-  phase-15 gate alone guards, which the registry names beside the set — and the fix for
-  each is a second guard that cannot withhold, never a retry.
+  claims became withholdable, so **five** mutations are printed today —
+  `export-writer-registered-after-it-opens` behind the phase-8 gate, and the four whose
+  only guard is the phase-15 gate, which the registry names beside the set — and the fix
+  for each is a second guard that cannot withhold, never a retry.
+  **The warning is keyed by _file_ and the phase-15 gate withholds per _claim_, so one of
+  those five is an over-report and the registry says which.** That direction is the safe
+  one for a warning about unproven coverage. The unsafe direction is the same mismatch
+  read by `runTests`, which caught this branch out: a mutation guarded by a claim that
+  withheld, in a file whose other claims were judged, is reported `SURVIVED` rather than
+  `no verdict` — a hole announced in a gate that never looked. `no verdict` is still
+  **every** test in the file withholding and must not be widened; the answer is to move
+  the claim somewhere the instrument cannot take it away, which is what
+  `the-zoom-panel-does-not-follow-the-playhead` now demonstrates (§ The editor's controls).
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.

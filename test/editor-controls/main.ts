@@ -213,6 +213,19 @@ const CLICK_TIMES = [4.0, 4.5, 8.0, 8.6];
 const INSIDE_SEC = 5.0;
 /** Inside the **second** segment's hold — the generator's, all the way through. */
 const OUTSIDE_SEC = 8.8;
+/**
+ * **Between** the two segments, where the generator has nothing to say.
+ *
+ * The third instant, and it exists so that *"the panel follows the playhead"* can be
+ * measured **before** the first export rather than after it. `INSIDE_SEC` and
+ * `OUTSIDE_SEC` both sit inside a segment's hold and resolve to 2.500 and 2.499, which
+ * read as the same `2.50×` — a panel frozen on either one agrees with the other, so the
+ * pair cannot see a readout that stopped following. Here it can: segment 1's
+ * `activeRanges` entry ends at 5.7 plus the `4/(ζω₀)` = 0.45 s tail `auto-zoom.ts`
+ * gives it, and segment 2's begins at 7.4, so 6.5 s is clear of both by more than a
+ * `blendMs` crossfade and resolves to identity.
+ */
+const BETWEEN_SEC = 6.5;
 
 /**
  * The Amount slider's control step, and the drag measured against it.
@@ -1120,8 +1133,28 @@ void app.whenReady().then(async () => {
       'the editor never finished reading the event logs',
     );
     await clickByText(editor, `.gen[data-generator="auto-zoom-on-click"]`, 'Generate');
+    // Wait for the write to land before scrubbing, and it is the panel readings below
+    // that need it rather than the disk one: a send's reply flips the save chip back to
+    // *Saved*, which is an `onChange` and therefore a full `renderControls` at whatever
+    // instant the playhead is on when it arrives. Left unwaited, a slow host can land
+    // that rebuild after a seek and hand the panel a fresh reading it did not follow the
+    // playhead to get — the shape of a race that makes a gate pass for the wrong reason.
+    await until(
+      async () =>
+        (await editor.webContents.executeJavaScript(
+          `document.getElementById('save-state').textContent.trim() === 'Saved'`,
+        )) as boolean,
+      'the generated track never reached the disk',
+    );
     await seekTo(editor, INSIDE_SEC);
     await read(editor, 'generated, inside');
+    // Between the two segments, and taken **here** rather than after the manual region
+    // is placed: this is the reading that lets the standing Zoom panel be judged on a
+    // host whose export instrument goes, because it is measured before the first export
+    // and on a healthy context. `BETWEEN_SEC` says why the other two instants cannot
+    // carry that claim between them.
+    await seekTo(editor, BETWEEN_SEC);
+    await read(editor, 'generated, between');
     await seekTo(editor, OUTSIDE_SEC);
     await read(editor, 'generated, outside');
     await readDisk(recordingsRoot, recording.id, 'after generating');

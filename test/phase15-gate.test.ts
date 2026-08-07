@@ -355,6 +355,43 @@ describe('the editor’s controls', () => {
   );
 
   it(
+    'and the standing Zoom panel follows an ordinary scrub — judged on every run',
+    async () => {
+      const report = await gate();
+      const detail = describeRun(report);
+
+      // **No withhold call, deliberately.** These two readings are taken over the
+      // generated track alone, before the first export and on a healthy context, so
+      // this claim is judged on every host — including the paravirtual runner, where
+      // the export instrument goes and the richer panel claim below is withheld. That
+      // is what makes `the-zoom-panel-does-not-follow-the-playhead` a mutation with a
+      // guard that answers rather than one that is only ever unproven there; the test
+      // below adds the *shape* half, which needs a manual region and cannot be moved
+      // ahead of the export.
+      const zoomed = readingAt(report, 'generated, inside');
+      const between = readingAt(report, 'generated, between');
+
+      // What a person can see, against what the model computed at that instant, on
+      // both sides of a scrub that crosses out of a generated segment.
+      for (const reading of [zoomed, between]) {
+        expect(reading.panel.atPlayhead, detail).toBe(`${reading.zoom.amount.toFixed(2)}×`);
+        expect(reading.panel.centre, detail).toBe(
+          `${reading.zoom.center[0].toFixed(3)}, ${reading.zoom.center[1].toFixed(3)}`,
+        );
+      }
+
+      // Non-vacuous, and this is the pair `INSIDE_SEC`/`OUTSIDE_SEC` cannot make:
+      // both of those sit inside a segment's hold and read as the same `2.50×`, so a
+      // panel frozen on either agrees with the other. Between the segments the
+      // generator has nothing to say, so a readout that stopped following says the
+      // magnification of the segment it was last rebuilt in.
+      expect(between.zoom.amount, detail).toBeLessThan(zoomed.zoom.amount - 0.5);
+      expect(between.panel.atPlayhead, detail).not.toBe(zoomed.panel.atPlayhead);
+    },
+    GATE_TIMEOUT_MS,
+  );
+
+  it(
     'takes manual control: the user’s zoom wins INSIDE its window',
     async ({ skip }) => {
       const report = await gate();
