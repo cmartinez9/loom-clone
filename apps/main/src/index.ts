@@ -236,12 +236,28 @@ if (verifying || app.requestSingleInstanceLock()) {
     });
   }
 
-  app.whenReady().then(main, (error: unknown) => {
-    console.error('[main] failed to start:', error);
-    app.exit(1);
-  });
+  // `.catch` and **not** `.then(main, onRejected)`: the second argument of `then`
+  // handles a rejection of `whenReady()` and nothing that happens inside `main`, so
+  // a throw anywhere past its first `await` — a settings file that will not parse, a
+  // channel registered twice, a protocol that will not install — was an unhandled
+  // rejection with no window and nothing printed. That is precisely the shape this
+  // app failed in for the first person who ran it, and a startup path that can fail
+  // in silence is the masking condition rather than the bug.
+  app.whenReady().then(main).catch(failedToStart);
 } else {
   app.quit();
+}
+
+/**
+ * The one place a failed launch is reported.
+ *
+ * It exits rather than limping on: a main process that got part way through
+ * {@link main} has some of its IPC registered and no window, which is a product that
+ * looks like it is running and answers nothing.
+ */
+function failedToStart(error: unknown): void {
+  console.error('[main] failed to start:', error);
+  app.exit(1);
 }
 
 async function main(): Promise<void> {
@@ -444,7 +460,6 @@ app.on('before-quit', (event) => {
   // last two seconds of ops.
   event.preventDefault();
   shuttingDown = true;
-  unregisterIpc();
   // The recorder first: a recording in flight is finalized properly rather than
   // left for the next launch to recover. If it cannot be, the bundle keeps
   // `state: "recording"` and recovery handles it — the same path a crash takes.
@@ -454,6 +469,26 @@ app.on('before-quit', (event) => {
     // has to remove them, and an unfinished export must leave nothing behind that a
     // later launch could mistake for output (§7.5).
     .then(() => exportSession.shutdown())
+    // **The IPC surface comes down after the producers, never before them**, and
+    // that ordering is load-bearing rather than tidy. `unregisterIpc` removes every
+    // channel in `CHANNEL`, which includes the capture channels the recorder's own
+    // stop depends on — `RecorderSession.shutdown`'s docblock states the rule from
+    // the inside ("`uninstall` comes *after*: it removes the listener the capture
+    // page's 'I have stopped' message arrives on") and this line used to break it
+    // from the outside. What that cost is measurable in the bundle it leaves:
+    // `capture.ended` never arrives, `stop()` waits out its 5 s timeout, and the
+    // recording is finalized with **no end report** — nominal `measuredSampleRate`
+    // in place of the measured one (§5.4's whole point), `endReason: "crash"` on
+    // every part of a recording that did not crash, and no frame or drop counts. The
+    // same removal took `library.list` out from under a library window that was
+    // still on screen, so a quit that takes seconds spent them showing a live window
+    // whose every call threw `No handler registered`.
+    //
+    // `finally` rather than `then`, so a producer that threw still takes the surface
+    // down — the only thing that moved here is *when*, not *whether*.
+    .finally(() => {
+      unregisterIpc();
+    })
     .then(() => store.closeAll())
     .catch((error: unknown) => {
       console.error('[main] shutdown flush failed:', error);
