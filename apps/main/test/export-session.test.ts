@@ -425,6 +425,57 @@ async function projectDoc(id: RecordingId): Promise<ProjectDoc> {
   return JSON.parse(await readFile(join(dir, 'project.json'), 'utf8')) as ProjectDoc;
 }
 
+/** The jobs the stand-in window has been handed, in order, without encoding them. */
+function collectStarts(): ExportJob[] {
+  const started: ExportJob[] = [];
+  harness.window.on('command', (command: ExportCommand) => {
+    if (command.kind === 'start') started.push(command.job);
+  });
+  return started;
+}
+
+/** Wait until the window has actually been handed a job, so "live" is not a guess. */
+async function handedAJob(started: ExportJob[], count = 1): Promise<ExportJob> {
+  for (let i = 0; i < 400; i++) {
+    const job = started[count - 1];
+    if (job !== undefined) return job;
+    await new Promise((done) => setTimeout(done, 5));
+  }
+  throw new Error(`the export window was never handed job ${count}`);
+}
+
+/**
+ * Whether a *second* process could take this bundle's lock, within a moment.
+ *
+ * Polled rather than sampled once: `#finish` broadcasts the terminal phase from the
+ * `catch`/`try`, and the release runs in the `finally` after it, so `settled()`
+ * resolving does not mean the lock has already gone.
+ */
+async function lockBecomesFree(): Promise<boolean> {
+  for (let i = 0; i < 200; i++) {
+    if (await lockIsFree()) return true;
+    await new Promise((done) => setTimeout(done, 5));
+  }
+  return false;
+}
+
+/** Whether a *second* process could take this bundle's lock right now. */
+async function lockIsFree(): Promise<boolean> {
+  const other = new ProjectStore({
+    recordingsRoot: join(harness.root, 'recordings'),
+    settingsPath: join(harness.root, 'other-settings.json'),
+    appVersion: '0.0.0-test',
+    trash: () => Promise.resolve(),
+  });
+  try {
+    await other.openProject(harness.recordingId);
+    await other.closeAll();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('ExportSession', () => {
   it('defaults the destination and the name without prompting for either', async () => {
     const defaults = await harness.session.defaults(harness.recordingId);
@@ -929,38 +980,6 @@ describe('the export destination', () => {
  * open would lose its lock mid-edit.
  */
 describe('the project an export opened', () => {
-  /**
-   * Whether a *second* process could take this bundle's lock, within a moment.
-   *
-   * Polled rather than sampled once: `#finish` broadcasts the terminal phase from the
-   * `catch`/`try`, and the release runs in the `finally` after it, so `settled()`
-   * resolving does not mean the lock has already gone.
-   */
-  async function lockBecomesFree(): Promise<boolean> {
-    for (let i = 0; i < 200; i++) {
-      if (await lockIsFree()) return true;
-      await new Promise((done) => setTimeout(done, 5));
-    }
-    return false;
-  }
-
-  /** Whether a *second* process could take this bundle's lock right now. */
-  async function lockIsFree(): Promise<boolean> {
-    const other = new ProjectStore({
-      recordingsRoot: join(harness.root, 'recordings'),
-      settingsPath: join(harness.root, 'other-settings.json'),
-      appVersion: '0.0.0-test',
-      trash: () => Promise.resolve(),
-    });
-    try {
-      await other.openProject(harness.recordingId);
-      await other.closeAll();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   it('is released when the export is the only thing holding it', async () => {
     answerVerification();
     harness.window.on('command', (command: ExportCommand) => {
@@ -1015,25 +1034,6 @@ describe('the project an export opened', () => {
  * paths each have a test here rather than an assumption.
  */
 describe('two exports of one recording', () => {
-  /** The jobs the stand-in window has been handed, in order, without encoding them. */
-  function collectStarts(): ExportJob[] {
-    const started: ExportJob[] = [];
-    harness.window.on('command', (command: ExportCommand) => {
-      if (command.kind === 'start') started.push(command.job);
-    });
-    return started;
-  }
-
-  /** Wait until the window has actually been handed a job, so "live" is not a guess. */
-  async function handedAJob(started: ExportJob[], count = 1): Promise<ExportJob> {
-    for (let i = 0; i < 400; i++) {
-      const job = started[count - 1];
-      if (job !== undefined) return job;
-      await new Promise((done) => setTimeout(done, 5));
-    }
-    throw new Error(`the export window was never handed job ${count}`);
-  }
-
   async function refusalOf(name: string): Promise<unknown> {
     return harness.session
       .start(harness.recordingId, { name })
@@ -1185,27 +1185,43 @@ describe('two exports of one recording', () => {
  * snapshot and the clear is cancelled by nothing and dropped by `clear()`, leaving its
  * hidden window and its `wx+` scratch streams to outlive the sweep.
  *
- * Both halves are here, because a guard that refuses everything is not a guard: the
- * arrival is refused, and the export that was already running is still swept exactly as
- * it was before.
+ * There are **two** sequences and they are not the same one. A press that arrives after
+ * the sweep began is refused at `start`'s entry. A press that was already past that
+ * entry when the sweep began — parked on one of the four awaits between it and `#jobs`
+ * — is refused at the last instant before the map, and *that* is the one the snapshot
+ * has already looked past. Each has its own test, because a single one of them leaves
+ * half the property with nowhere to break.
+ *
+ * The control is here for the same reason: a guard that refuses everything is not a
+ * guard, so the export that was already running must still be swept exactly as before.
  */
 describe('a quit that is already sweeping', () => {
-  /** The jobs the stand-in window has actually been handed, so "live" is not a guess. */
-  function collectStarts(): ExportJob[] {
-    const started: ExportJob[] = [];
-    harness.window.on('command', (command: ExportCommand) => {
-      if (command.kind === 'start') started.push(command.job);
-    });
-    return started;
+  /**
+   * Hold `openProject` open until the test says otherwise.
+   *
+   * The seam is stubbed rather than raced against a timer, because the property is an
+   * *ordering* — the sweep beginning while a start is parked — and a test that hoped to
+   * hit that ordering would be a test that reports it flaky when it does not.
+   */
+  function parkOpenProject(): { entered: Promise<void>; release: () => void } {
+    const realOpen = harness.store.openProject.bind(harness.store);
+    let announce!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => (announce = resolve));
+    const parked = new Promise<void>((resolve) => (release = resolve));
+    harness.store.openProject = async (id) => {
+      announce();
+      await parked;
+      return realOpen(id);
+    };
+    return { entered, release };
   }
 
-  async function handedAJob(started: ExportJob[]): Promise<ExportJob> {
-    for (let i = 0; i < 400; i++) {
-      const job = started[0];
-      if (job !== undefined) return job;
+  /** Give an admitted job every chance to reach the window, so "it did not" is a reading. */
+  async function letAJobSurface(started: ExportJob[]): Promise<void> {
+    for (let i = 0; i < 40 && started.length === 0; i++) {
       await new Promise((done) => setTimeout(done, 5));
     }
-    throw new Error('the export window was never handed a job');
   }
 
   it('refuses a job that arrives after the sweep has begun, and names why', async () => {
@@ -1245,6 +1261,41 @@ describe('a quit that is already sweeping', () => {
     // nothing of it reached the Exports folder.
     expect(started).toHaveLength(1);
     expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+
+  it('refuses a job that was already in flight when the sweep began', async () => {
+    // The sequence the entry refusal cannot see: `start` is past its first ask, parked
+    // on `openProject`, when the quit begins. Resuming, it would reach `#jobs.set` with
+    // the sweep's snapshot already taken — admitted, never cancelled, and then dropped
+    // by `#jobs.clear()`, leaving its hidden window and its `wx+` scratch behind.
+    const started = collectStarts();
+    const { entered, release } = parkOpenProject();
+
+    const starting = harness.session.start(harness.recordingId, { name: 'InFlight' });
+    await entered;
+
+    // The flag is `shutdown`'s first statement, so it is set before this resolves — and
+    // `#jobs` is empty, which is exactly the snapshot this job would be missing from.
+    await harness.session.shutdown();
+    release();
+
+    const refusal = await starting.then(() => null).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(ExportShuttingDownError);
+    expect(refusal).toBeInstanceOf(Error);
+    if (!(refusal instanceof ExportShuttingDownError)) return;
+    expect(refusal.recordingId).toBe(harness.recordingId);
+
+    // The consequence, not just the throw. A job admitted past the snapshot reaches
+    // `#run`, which opens the hidden window and hands it the job — so a window that was
+    // never *asked* for is how "it did not reach `#jobs`" is read from outside.
+    await letAJobSurface(started);
+    expect(started).toEqual([]);
+    expect(harness.opens()).toBe(0);
+    // ...and nothing of it survives the quit: no scratch streams, no `.partial`.
+    expect(await exportsDirEntries()).toEqual([]);
+    // The refusal came late enough to be holding the bundle, so it gives it back: a
+    // second export of this recording is refused for being busy, or not at all.
+    expect(await lockBecomesFree()).toBe(true);
   }, 60_000);
 
   it('CONTROL: a job already running when the sweep begins is still cancelled and swept', async () => {

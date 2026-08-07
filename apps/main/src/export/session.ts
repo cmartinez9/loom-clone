@@ -438,8 +438,11 @@ export class ExportSession {
    *
    * The third is {@link ExportShuttingDownError}, and it is what keeps the quit's
    * ordering — the IPC surface outliving both producers — from being a way to start
-   * work the sweep has already looked past. It is asked twice: once here, and once
-   * after the awaits below.
+   * work the sweep has already looked past. {@link ExportSession.#refuseIfShuttingDown}
+   * is asked at **two** points, and they close different sequences: at entry, for a
+   * press that arrives after the sweep began; and again at the last instant before
+   * `#jobs`, for a press that was already past the first ask when the sweep began and
+   * resumes from one of the awaits between them.
    */
   async start(id: RecordingId, overrides: ExportSettingsOverride): Promise<{ jobId: string }> {
     if ('outputDir' in overrides) {
@@ -448,7 +451,7 @@ export class ExportSession {
           'through export:chooseFolder',
       );
     }
-    if (this.#shuttingDown) throw new ExportShuttingDownError(id);
+    this.#refuseIfShuttingDown(id);
     const heldBy = this.#exporting.get(id);
     if (heldBy !== undefined) throw new ExportRecordingBusyError(id, heldBy);
     const jobId = (this.#options.newJobId ?? randomUUID)();
@@ -500,13 +503,13 @@ export class ExportSession {
         index: await this.#screenIndex(id, opened.recording),
       });
       const hasAudio = audioSources(id, opened.recording).length > 0;
-      // Asked again, because the refusal above is only half of it: four awaits stand
-      // between it and `#jobs`, and a quit that begins in any of them would find this
-      // job absent from the sweep's snapshot and present in the map it then clears.
+      // The second of the predicate's two asks, and the one the entry ask cannot make:
+      // four awaits stand between them, and a sweep that begins in any of them would
+      // find this job absent from its snapshot and present in the map it then clears.
       // `#newJob` is synchronous, so nothing can interleave between here and the
       // `#jobs.set` below. The `catch` is what makes it safe to refuse this late —
       // the bundle hold and the claim both go back before the throw leaves.
-      if (this.#shuttingDown) throw new ExportShuttingDownError(id);
+      this.#refuseIfShuttingDown(id);
       job = this.#newJob({ jobId, id, settings, outputPath, timeline, eligibility, hasAudio });
     } catch (error) {
       await this.#options.store.releaseProject(id).catch(() => undefined);
@@ -558,6 +561,19 @@ export class ExportSession {
       heldBytes: 0,
       waiters: new Set(),
     };
+  }
+
+  /**
+   * Refuse a job the quit has already begun sweeping past.
+   *
+   * One predicate rather than the condition written out at each of {@link
+   * ExportSession.start}'s two asks: a property split across two copies of a condition
+   * has no single place to be right, and these two have to agree about what "the sweep
+   * has begun" means. What the *call sites* answer for is different at each — which
+   * sequence each one closes — so they stay separately breakable.
+   */
+  #refuseIfShuttingDown(id: RecordingId): void {
+    if (this.#shuttingDown) throw new ExportShuttingDownError(id);
   }
 
   /**

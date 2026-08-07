@@ -2326,6 +2326,20 @@ export const MUTATIONS = [
     replace: '    for (const job of [...this.#jobs.values()]) {',
     mustFail: [EXPORT_SESSION],
   },
+  {
+    name: 'a-job-parked-when-the-sweep-began-is-still-admitted',
+    breaks:
+      'the *second* of `start`’s two asks, which is the one the entry ask structurally ' +
+      'cannot make. Four awaits stand between them, so a press already past the entry ' +
+      'when the quit begins resumes into `#jobs.set` with the sweep’s snapshot already ' +
+      'taken: cancelled by nothing, dropped by `#jobs.clear()`, and its hidden window ' +
+      'and `wx+` scratch left to outlive `app.quit()`. Its own entry rather than the ' +
+      'flag’s, because a property with one place to break has half of itself unproven.',
+    file: 'apps/main/src/export/session.ts',
+    find: '      this.#refuseIfShuttingDown(id);\n' + '      job = this.#newJob({',
+    replace: '      job = this.#newJob({',
+    mustFail: [EXPORT_SESSION],
+  },
 ];
 
 /**
