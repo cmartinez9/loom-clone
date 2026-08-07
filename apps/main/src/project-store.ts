@@ -24,7 +24,7 @@
  */
 
 import { createReadStream } from 'node:fs';
-import { mkdir, open, realpath, rm, stat } from 'node:fs/promises';
+import { mkdir, open, realpath, rm, stat, statfs } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
@@ -104,6 +104,7 @@ import {
   type FinalizedPart,
   type RecoveredPart,
 } from '@loom/mux/fs';
+import type { DiskSpace } from '@loom/ipc';
 
 // `@loom/mux/fs` has exactly one caller, so what a finalized part reports is
 // re-exported from here rather than imported a second time by the recorder.
@@ -506,6 +507,53 @@ export class ProjectStore {
         sizeBytes: await directorySize(summary.path).catch(() => summary.sizeBytes),
       })),
     );
+  }
+
+  /**
+   * Free space on the volume the recordings live on. Architecture report §7.2.
+   *
+   * Here, and nowhere else, because §0 rule 2 puts every syscall against the disk
+   * behind this class — the monitor that consumes this is in `recorder/`, is pure
+   * over the numbers, and is handed this method rather than importing `node:fs` of
+   * its own. That is the same arrangement `apps/main/src/permissions.ts` has for
+   * TCC and it exists for the same reason: one caller means one opinion.
+   *
+   * `bavail`, not `bfree`: the difference is the reserve macOS keeps for root, and
+   * a monitor that counted it would let a recording run into space it cannot have.
+   *
+   * The root rather than a bundle. A recording that has not been created yet has no
+   * directory to ask about, and every bundle is under this root by construction —
+   * `resolveBundleFile` is what keeps it so.
+   *
+   * Throws when the volume cannot be read, and callers are expected to treat that
+   * as *unknown* rather than as *full*: `classifyDisk(null, …)` is the shape of
+   * that answer, and §7.2's monitor is an accessory to a recording that must
+   * continue when its instrument fails.
+   */
+  async diskSpace(): Promise<DiskSpace> {
+    try {
+      return await this.readVolume();
+    } catch (error) {
+      // A first launch has settings but no recordings directory yet, and `statfs` of
+      // a path that is not there is `ENOENT` rather than an answer about its volume.
+      // Creating it is what `create()` would do a moment later anyway — but only on
+      // the one error that means it, and only after the read has been tried. This
+      // method is on §7.2's 2 s poll for the whole length of every recording, and a
+      // reading `statfs` alone could have answered must not be lost to a *write*
+      // failing: an `EACCES` or an `EROFS` ahead of it would band the volume
+      // `unknown`, which refuses nothing and stops nothing.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await mkdir(this.recordingsRoot, { recursive: true });
+      return await this.readVolume();
+    }
+  }
+
+  private async readVolume(): Promise<DiskSpace> {
+    const stats = await statfs(this.recordingsRoot);
+    return {
+      freeBytes: stats.bavail * stats.bsize,
+      totalBytes: stats.blocks * stats.bsize,
+    };
   }
 
   /** Absolute bundle directory for an id, scanning once if it is not yet known. */

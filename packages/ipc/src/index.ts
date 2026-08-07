@@ -100,6 +100,283 @@ export type {
 /** Returned by every `on*` subscription; call it to stop listening. */
 export type Unsubscribe = () => void;
 
+// -------------------------------------------------------------- disk space
+
+/**
+ * Architecture report §7.2, as arithmetic both ends of the contract share.
+ *
+ * §7.2 asks for five things — a preflight refusal below 3 GB, an estimated
+ * capacity, a 2 s poll, a banner below 5 GB, and a clean stop below 1 GB — under
+ * one rule that governs all of them:
+ *
+ * > **Never let a write fail.** Stopping at 1 GB with a good file beats hitting
+ * > `ENOSPC` with a half-written fragment.
+ *
+ * The *measurement* is main's — only main has a filesystem, and within main only
+ * `ProjectStore` may ask it anything (§0, rule 2). The *decision* and the
+ * *sentences* are here, together, for the reason `exportFrameCount` above is here:
+ * main acts on them (it refuses a start and it stops a recording) while the HUD and
+ * the library render them, and a threshold with two copies is a banner that says one
+ * thing beside a monitor that does another. It is the `RETENTION_COPY` bargain
+ * applied to a volume instead of a bundle — the promise and the act read from one
+ * place, so they cannot be phrased differently.
+ *
+ * Nothing here reads a disk. Every function is total over the numbers it is handed,
+ * including the ones a failed reading produces — see {@link DiskLevel.unknown}.
+ */
+
+/** What the volume holding the recordings said when main last asked. */
+export interface DiskSpace {
+  /** Bytes an unprivileged process may still write. */
+  freeBytes: number;
+  totalBytes: number;
+}
+
+/**
+ * §7.2's three bands, plus the one it does not name.
+ *
+ * `unknown` is the band a *failed* reading lands in, and it exists so that nothing
+ * downstream has to decide what a fabricated zero means. A volume we could not
+ * measure must not refuse a recording and must not stop one: the monitor is an
+ * accessory to the capture spine, and a `statfs` that failed is our problem rather
+ * than the user's. Every predicate below therefore answers "no" for `unknown`.
+ */
+export type DiskLevel = 'unknown' | 'ok' | 'low' | 'critical';
+
+/**
+ * How fast a recording eats the disk, and — the half that matters — where the
+ * number came from.
+ *
+ * `measured` is this machine's own arithmetic: bytes this recording has actually
+ * written against its own media seconds while one is running, or the user's own
+ * finished recordings' sizes against their durations before one is. `reference` is
+ * {@link REFERENCE_CAPTURE_RATE_BYTES_PER_SEC}, and it is reached only on a library
+ * with nothing measurable in it — a first run. The distinction is carried rather
+ * than smoothed away because "≈ 42 min available" derived from somebody else's
+ * machine is a different claim from the same sentence derived from this one.
+ */
+export interface CaptureRate {
+  bytesPerSec: number;
+  source: 'measured' | 'reference';
+  /** Recordings the measurement averaged. `0` whenever `source` is `reference`. */
+  sampleCount: number;
+}
+
+/** One poll of the volume, classified. Crosses IPC on every recorder status. */
+export interface DiskReading {
+  /** `null` when the volume could not be read. Never a fabricated zero. */
+  space: DiskSpace | null;
+  rate: CaptureRate;
+  /** Seconds of recording the free space holds at {@link rate}; `null` if unread. */
+  capacitySec: number | null;
+  level: DiskLevel;
+}
+
+/**
+ * §7.2's numbers, in **decimal** GB.
+ *
+ * Decimal rather than binary because these are compared against a figure the user
+ * can check: macOS reports free space in decimal GB in Finder and in About This Mac,
+ * and a banner that fires at "5 GB" when Finder still says 5.3 GB is a banner that
+ * looks wrong to the one person who can verify it.
+ */
+export const DISK_THRESHOLDS = {
+  /** §7.2 preflight: *"refuse to start below 3 GB free"*. */
+  refuseStartBytes: 3_000_000_000,
+  /** §7.2 during: *"< 5 GB ... → non-modal banner, keep recording"*. */
+  bannerBytes: 5_000_000_000,
+  /** §7.2 during: *"< 1 GB → stop cleanly, finalize"*. */
+  stopBytes: 1_000_000_000,
+  /** §7.2 during: *"or < 2 min of headroom"*, at whatever rate is being measured. */
+  bannerHeadroomSec: 120,
+  /** §7.2 during: *"main polls the volume every 2 s"*. */
+  pollIntervalMs: 2_000,
+} as const;
+
+/**
+ * The research report's measured cost of a minute of recording: **76.0 MB/min**
+ * (`~/firstmate/data/loom-research/report.md` §5.6 — 38.56 MB for 30.5 s of screen,
+ * camera, both audio tracks and a 120 Hz cursor log), which is the figure §7.2's
+ * capacity estimate is written against.
+ *
+ * It is a fallback and not a default. It was measured on this machine but not on
+ * this *user's* content, and §5.6's own table spans 4.1 MB/min for an idle screen to
+ * 146 MB/min for full-screen animation — a 35× range that no single constant can
+ * stand in for. {@link measureCaptureRate} prefers the user's own recordings for
+ * exactly that reason, and {@link CaptureRate.source} says which one answered.
+ */
+export const REFERENCE_CAPTURE_RATE_BYTES_PER_SEC = (76.0 * 1_000_000) / 60;
+
+/**
+ * What a minute of recording has actually cost this user, from their own library.
+ *
+ * Sums bytes against seconds rather than averaging per-recording rates, so a
+ * twenty-minute recording counts for twenty times a one-minute one — the estimate is
+ * about bytes per second, and an unweighted mean of rates would let a five-second
+ * test recording outvote a real session.
+ *
+ * Excludes anything that cannot answer the question honestly: a recording still being
+ * captured has no final duration, one whose sources were deleted after export
+ * (§7.5) has a `sizeBytes` that no longer describes what capture wrote, and an
+ * unreadable bundle has no numbers at all. With nothing left, the reference figure
+ * answers and says so.
+ */
+export function measureCaptureRate(summaries: readonly RecordingSummary[]): CaptureRate {
+  let bytes = 0;
+  let seconds = 0;
+  let sampleCount = 0;
+  for (const summary of summaries) {
+    if (summary.unreadable !== undefined) continue;
+    if (summary.sourcesDeleted) continue;
+    if (summary.state === 'recording' || summary.state === 'finalizing') continue;
+    const durationSec = summary.durationSec;
+    if (durationSec === null || !Number.isFinite(durationSec) || durationSec <= 0) continue;
+    if (!Number.isFinite(summary.sizeBytes) || summary.sizeBytes <= 0) continue;
+    bytes += summary.sizeBytes;
+    seconds += durationSec;
+    sampleCount += 1;
+  }
+  if (sampleCount === 0 || seconds <= 0) {
+    return {
+      bytesPerSec: REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,
+      source: 'reference',
+      sampleCount: 0,
+    };
+  }
+  return { bytesPerSec: bytes / seconds, source: 'measured', sampleCount };
+}
+
+/**
+ * Classify one poll. §7.2's three bands, in the order they must be read.
+ *
+ * `critical` is checked first and on free bytes alone: §7.2's stop is *"< 1 GB"*
+ * and nothing else, because the rule the whole section serves is that a write must
+ * never fail — and a rate estimate is the one input that could be wrong in the
+ * direction that lets it.
+ *
+ * `low` is §7.2's *"< 5 GB **or** < 2 min of headroom"*.
+ *
+ * **The headroom clause cannot fire under §5.6's measured rates, and it is kept at
+ * §7.2's value anyway** — the shape `minDurationSec: 1.0` already has in
+ * `packages/edl/src/generators/auto-zoom.ts`: a finding to write down, not a number
+ * to tune. Two minutes of headroom is below the 1 GB stop for any rate under
+ * 500 MB/min, and §5.6's *worst* measured content is 146 MB/min — full-screen
+ * animation at 25 Mbps, which the report itself calls a synthetic case real screen
+ * content never sustains. So on every capture this app can produce, the byte floors
+ * are reached first and the clause is dominated. It is implemented rather than
+ * dropped because it is §7.2's, because it is the clause that would matter if the
+ * bitrate ceiling ever moved, and because a spec clause silently omitted is worse
+ * than one that is inert and says so. `packages/ipc/test/disk.test.ts` pins both
+ * halves: that it fires when a rate is high enough, and that it does not under §5.6.
+ */
+export function classifyDisk(space: DiskSpace | null, rate: CaptureRate): DiskReading {
+  if (space === null || !Number.isFinite(space.freeBytes)) {
+    return { space: null, rate, capacitySec: null, level: 'unknown' };
+  }
+  const perSec = rate.bytesPerSec > 0 ? rate.bytesPerSec : REFERENCE_CAPTURE_RATE_BYTES_PER_SEC;
+  const capacitySec = Math.max(0, space.freeBytes) / perSec;
+  const level: DiskLevel =
+    space.freeBytes < DISK_THRESHOLDS.stopBytes
+      ? 'critical'
+      : space.freeBytes < DISK_THRESHOLDS.bannerBytes ||
+          capacitySec < DISK_THRESHOLDS.bannerHeadroomSec
+        ? 'low'
+        : 'ok';
+  return { space, rate, capacitySec, level };
+}
+
+/**
+ * Whether §7.2's preflight refuses a recording right now.
+ *
+ * A reading we could not take never refuses — see {@link DiskLevel}. Note the floor
+ * sits *between* the banner and the stop on purpose: a start at 4 GB is allowed and
+ * immediately banners, which is §7.2 read literally and is the right shape. The
+ * alternative — refusing at 5 GB, where the banner is — would make the banner
+ * unreachable at the start of a recording and turn a warning into a wall.
+ */
+export function diskRefusesStart(reading: DiskReading): boolean {
+  return reading.space !== null && reading.space.freeBytes < DISK_THRESHOLDS.refuseStartBytes;
+}
+
+/** Whether §7.2's monitor must stop the recording. See {@link classifyDisk}. */
+export function diskRequiresStop(reading: DiskReading): boolean {
+  return reading.level === 'critical';
+}
+
+/** Free space as the sentences below say it: decimal GB, one decimal place. */
+function gigabytes(bytes: number): string {
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+}
+
+/**
+ * The words §7.2's five behaviours are said in, in one place.
+ *
+ * Split so the caller supplies what only the caller can — the HUD appends *"4:52 is
+ * in your library"* out of `@loom/design`'s `formatDuration`, exactly as §7.3's
+ * revocation notice already does — and so nothing here has to import a formatter the
+ * contract has no business depending on.
+ *
+ * Pinned by `packages/ipc/test/disk.test.ts`, so what a user is told about their
+ * disk is a test failure to change rather than an edit nobody reads.
+ */
+export const DISK_COPY = {
+  /**
+   * §7.2 preflight, refused. Names the measurement and the floor, because "not
+   * enough space" without either is a message a user cannot act on.
+   */
+  refusal(reading: DiskReading): string {
+    const free = reading.space === null ? 'The disk' : gigabytes(reading.space.freeBytes);
+    return (
+      `Not enough disk space to record — ${free} free, and a recording needs ` +
+      `${gigabytes(DISK_THRESHOLDS.refuseStartBytes)}. Free some space and try again.`
+    );
+  },
+
+  /**
+   * §7.2's *"Show estimated capacity: '≈ 42 min available'"*, in §7.2's own words,
+   * with where the number came from attached.
+   *
+   * The provenance is not decoration. An estimate from a first run is the research
+   * report's figure for a mixed screen-plus-camera-plus-audio capture, and a user
+   * recording still slides has three times that long — so a bare "≈ 42 min" would be
+   * a number this app cannot stand behind stated as though it could.
+   */
+  capacity(reading: DiskReading): string {
+    if (reading.capacitySec === null) return 'Free space could not be measured.';
+    const minutes = Math.floor(reading.capacitySec / 60);
+    const headline =
+      minutes < 1 ? '≈ under a minute available' : `≈ ${String(minutes)} min available`;
+    return reading.rate.source === 'measured'
+      ? `${headline}, at what your ${reading.rate.sampleCount === 1 ? 'recording has' : 'recordings have'} averaged.`
+      : `${headline}, at a typical recording's size.`;
+  },
+
+  /**
+   * §7.2 during: the non-modal banner. Says what will happen next, for the reason
+   * §7.4's camera banner says the recording continues — a user told only that
+   * something is wrong stops the recording they are still successfully making, and
+   * here the app is about to stop it for them.
+   */
+  banner(reading: DiskReading): string {
+    if (reading.space === null) return 'Free space could not be measured.';
+    const minutes = reading.capacitySec === null ? null : Math.floor(reading.capacitySec / 60);
+    const left =
+      minutes === null || minutes < 1
+        ? 'less than a minute of recording left'
+        : `about ${String(minutes)} min of recording left`;
+    return (
+      `Low disk space — ${gigabytes(reading.space.freeBytes)} free, ${left}. ` +
+      `Recording will stop by itself before the disk fills.`
+    );
+  },
+
+  /**
+   * §7.2 during: what the clean stop says. The caller appends how much was saved,
+   * which is the half that stops this reading as a lost recording.
+   */
+  stopped: 'Recording stopped — the disk is almost full.',
+} as const;
+
 // ---------------------------------------------------------------- library
 
 export interface LibraryApi {
@@ -114,6 +391,18 @@ export interface LibraryApi {
    * "gone, but not yet gone".
    */
   delete(id: RecordingId): Promise<void>;
+  /**
+   * What this launch's crash-recovery pass found (§7.1 step 5).
+   *
+   * A *pull* rather than an event, and that is the whole reason it is on this
+   * interface: recovery runs before any window exists, so there is nobody to push
+   * to. Main holds what the pass returned for the life of the process and answers
+   * whoever asks — which means a library opened five minutes later still learns
+   * about it, and a window reloaded twice does not miss it by a race.
+   *
+   * Empty on an ordinary launch, which is every launch that did not crash.
+   */
+  recovery(): Promise<RecoveryReport[]>;
 }
 
 // ---------------------------------------------------------------- project
@@ -611,6 +900,42 @@ export interface RecorderStatus {
    * Survives the recording it describes — see {@link RevocationNotice}.
    */
   revoked: RevocationNotice | null;
+  /**
+   * The last poll of the volume the recordings live on (§7.2), or `null` before
+   * one has been taken.
+   *
+   * Pushed on every status rather than on a channel of its own, because the banner
+   * it draws lives on the same notice shelf as §7.3's and §7.4's and a shelf
+   * assembled from two independently-timed messages flickers.
+   */
+  disk: DiskReading | null;
+  /**
+   * A recording §7.2's monitor stopped, and what survived it.
+   *
+   * Survives the recording it describes for {@link RevocationNotice}'s reason and
+   * cleared by the same thing: by the time anyone reads it the recorder is `idle`,
+   * and pressing record is what dismisses it.
+   */
+  diskStop: DiskStopNotice | null;
+}
+
+/**
+ * A recording the disk monitor ended, so the HUD can say so with a number (§7.2).
+ *
+ * §7.2 asks the stop to *"tell the user exactly what happened and how long was
+ * saved"*, which is two facts and not one. The recording **stopped**; it did not
+ * **fail**, and it did not lose anything — it finalized to the library with every
+ * frame written up to the moment the monitor called it. This is {@link
+ * RevocationNotice}'s shape for the same reason it has that shape, and separate from
+ * it because a full disk is not a `PermissionKind` and there is no pane to open.
+ */
+export interface DiskStopNotice {
+  /** The recording it stopped — finalized, not discarded. */
+  recordingId: RecordingId | null;
+  /** How much of it survived, so the HUD can say so with a number. */
+  recordedSec: number;
+  /** Free bytes at the moment the monitor called it, measured rather than assumed. */
+  freeBytes: number;
 }
 
 /** What a crash-recovery pass found, so the app can say it out loud (§7.1). */
@@ -629,6 +954,96 @@ export interface RecoveryReport {
 }
 
 /**
+ * §7.1 step 5, in words: *"Show the user: 'Recovered 4:52 of a 4:58 recording.'
+ * Never silently discard, never silently pretend it was clean."*
+ *
+ * Recovery runs **at launch**, before any window exists, and until this it reported
+ * only to a console the user does not have. A repaired recording that appears in the
+ * library looking exactly like every other recording is the *"silently pretend it
+ * was clean"* half of that sentence, arrived at by omission rather than by intent.
+ *
+ * **Every number comes from the {@link RecoveryReport} the repair produced**, never
+ * from a constant. The guarantee this app makes is frame-level — the fragment writer
+ * holds one sample, so what a crash costs is what the dead process still held — and a
+ * sentence carrying a fixed "up to one second" would be describing the design the
+ * report sketched rather than the one that shipped. What is said is what was counted:
+ * the seconds that survived, the frames in them, and the bytes of a torn fragment
+ * that were thrown away.
+ *
+ * Pinned by `packages/ipc/test/disk.test.ts` beside §7.2's, for the same reason.
+ */
+export const RECOVERY_COPY = {
+  /**
+   * The headline over a launch that found something, counting **what was repaired**
+   * rather than what was looked at.
+   *
+   * `recoverOnLaunch` reports every crashed bundle it touched, repaired or not, so a
+   * headline over `reports.length` announces a recovery above a body that says the
+   * recording could not be repaired — *"silently pretend it was clean"* phrased more
+   * kindly, which is the one thing §7.1 step 5 forbids. All three shapes are said in
+   * their own words: a pass that repaired everything, a pass that repaired nothing,
+   * and a mixed one, which names both counts because either alone is a half-truth.
+   */
+  heading(reports: readonly RecoveryReport[]): string {
+    const repaired = reports.filter((report) => report.recovered).length;
+    const damaged = reports.length - repaired;
+    if (repaired === 0) {
+      return `${countOfRecordings(damaged)} could not be recovered after an unexpected quit`;
+    }
+    const recovered = `${countOfRecordings(repaired)} ${repaired === 1 ? 'was' : 'were'} recovered after an unexpected quit`;
+    return damaged === 0 ? recovered : `${recovered}, and ${String(damaged)} could not be`;
+  },
+
+  /**
+   * One repaired recording, in the numbers its own repair measured.
+   *
+   * `truncatedBytes` is stated even when it is zero: "nothing was discarded" is the
+   * outcome the user most wants and the one an omitted clause would hide.
+   */
+  recovered(report: RecoveryReport): string {
+    const kept =
+      `“${report.name}” was repaired: ${formatClock(report.recoveredSec)} and ` +
+      `${report.frameCount.toLocaleString('en-US')} frames were kept`;
+    const lost =
+      report.truncatedBytes === 0
+        ? ', and nothing was discarded'
+        : `, and ${report.truncatedBytes.toLocaleString('en-US')} bytes of an unfinished ` +
+          `fragment were discarded`;
+    return `${kept}${lost}. It is editable in your library.`;
+  },
+
+  /**
+   * One that could not be brought back. It is still in the library and still on
+   * disk — `failRecovery` marks it rather than removing it, because an app that
+   * quietly deletes a recording it could not read has lost the user's footage twice.
+   */
+  failed(report: RecoveryReport): string {
+    return (
+      `“${report.name}” could not be repaired: ${report.error ?? 'the reason was not recorded'}. ` +
+      `It is still in your library, marked damaged.`
+    );
+  },
+} as const;
+
+/** `A recording` / `3 recordings`, for the headline above. */
+function countOfRecordings(count: number): string {
+  return count === 1 ? 'A recording' : `${String(count)} recordings`;
+}
+
+/**
+ * `m:ss`, for the sentences above.
+ *
+ * A local four lines rather than `@loom/design`'s `formatDuration`: the contract has
+ * no business depending on the design system, and every other consumer of these
+ * seconds already formats them itself.
+ */
+function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60);
+  return `${String(minutes)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/**
  * What `recorder.preflight` answers: not "may I record" as a boolean, but the two
  * lists a person can act on.
  *
@@ -638,13 +1053,34 @@ export interface RecoveryReport {
  */
 export interface PreflightReport {
   report: PermissionReport;
-  /** `true` when `recorder.start` would actually produce frames right now. */
+  /**
+   * `true` when `recorder.start` would actually produce frames right now.
+   *
+   * Two things can make it false and they are surfaced separately: a missing
+   * required grant lands in {@link blocking}, and §7.2's disk floor lands in
+   * {@link disk}. `RecorderSession.start` re-checks both rather than trusting a
+   * caller to have asked — a preflight is advice until the thing it advises about
+   * enforces it.
+   */
   ready: boolean;
   /**
-   * Required grants that are missing. Non-empty means `ready` is false.
-   * Only ever `['screen']` — it is the one permission this app cannot work without.
+   * Required grants that are missing. Only ever `['screen']` — it is the one
+   * permission this app cannot work without.
+   *
+   * A **permission** list, and deliberately still only that: §7.2's disk refusal is
+   * not a grant, has no System Settings pane and is fixed by deleting files rather
+   * than by pressing Allow, so folding it in here would send the one surface that
+   * reads this list to the wrong screen.
    */
   blocking: PermissionKind[];
+  /**
+   * §7.2's preflight, as the reading it was decided from.
+   *
+   * Carried whole rather than as a boolean so the surface can show the estimated
+   * capacity §7.2 asks for on a volume that is *not* refusing, which is the common
+   * case and the useful one.
+   */
+  disk: DiskReading;
   /**
    * Optional grants that are missing: features this recording will not have.
    *
@@ -1307,6 +1743,7 @@ export const CHANNEL = {
   /** send-only */
   libraryReveal: 'loom.library.reveal',
   libraryDelete: 'loom.library.delete',
+  libraryRecovery: 'loom.library.recovery',
 
   projectOpen: 'loom.project.open',
   projectApplyOps: 'loom.project.applyOps',
@@ -1399,6 +1836,7 @@ export const INVOKE_CHANNELS: readonly ChannelName[] = [
   CHANNEL.appInfo,
   CHANNEL.libraryList,
   CHANNEL.libraryDelete,
+  CHANNEL.libraryRecovery,
   CHANNEL.permissionsProbe,
   CHANNEL.permissionsRequest,
   CHANNEL.projectOpen,

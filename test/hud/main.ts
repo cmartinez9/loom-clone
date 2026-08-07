@@ -158,6 +158,12 @@ function status(
     camera,
     cameraParts: camera === 'off' ? 0 : 1,
     revoked,
+    // §7.2's notices are measured by `apps/main/test/phase13-disk.test.ts`, which
+    // drives the real monitor. This gate is about §7.3's and §7.4's shelves, so the
+    // disk fields are the "nothing to say" pair — which is also what keeps its
+    // measured heights about the notice it is measuring.
+    disk: null,
+    diskStop: null,
   };
 }
 

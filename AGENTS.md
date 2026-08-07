@@ -36,11 +36,9 @@ npm start           # build, then run the app
 npm run dev         # rebuild on change and restart Electron
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
-npm run verify:mutation   # break capture, the timeline model, export, retention, the
-                          # generators, annotations, the drawing overlay, the event logs,
-                          # the editor and both gates' judgement policies; one way per
-                          # entry in scripts/mutation-check.mjs's MUTATIONS registry, which
-                          # is where the count lives — each must fail a gate
+npm run verify:mutation   # break the production source one way per entry in
+                          # scripts/mutation-check.mjs's MUTATIONS registry, which is where
+                          # the list and the count live — each must fail a gate
 npm run verify:permissions # phase 2 gate: package, ad-hoc sign, run the TCC checks from the bundle
 node scripts/verify-permissions.mjs --app <path>       # ...against a bundle already on disk
 node scripts/verify-permissions.mjs --mic-revocation   # ...plus §7.3's check, which needs you
@@ -111,6 +109,10 @@ apps/main/         Electron main: WindowRegistry, ProjectStore, RecorderSession,
                    §7.5 verification, `retention.ts` — the delete-after-export path
                    and its launch-time resume — the file clipboard, §5.3's
                    stream-copy plan), loom:// protocol, IPC.
+                   `recorder/disk-monitor.ts` is §7.2's 2 s poll and `disk.ts` the four
+                   lines that compose its preflight reading — the decision and the copy
+                   are `@loom/ipc`'s, the syscall is `ProjectStore.diskSpace`'s, and
+                   this is what sits between them.
                    `input-sampler.ts` is the sampler's only seam onto the world — the
                    `EventLogSink` backed by `ProjectStore`, and the clock reading
                    `t0Us` is derived from. `verify/marker.ts` is the paint-capture-count
@@ -427,32 +429,15 @@ deletion unconditional, which is the mutation the gate exists for.
 data-destruction safeguard rather than a documentation nicety.** The export sheet in
 `apps/renderer/src/library/main.ts` _is_ §7.5 obligation 2 — the settled decision that
 the user is **told** before their sources go, and that there is no silent destruction —
-and `RETENTION_COPY.warning` is that promise in words. Nobody has watched it appear on
-a screen. **The failure mode is not cosmetic**: if the sheet does not open at all, or
-opens with the warning clipped, off-screen or below the fold, the user is not told and
-the sources are deleted anyway — and the safeguard fails **silently, with every test
-still green**. `packages/format/test/retention.test.ts` pins the sentences,
+and `RETENTION_COPY.warning` is that promise in words.
+`packages/format/test/retention.test.ts` pins the sentences,
 `apps/renderer/test/export-notice.test.ts` pins which one is chosen, and `main.ts`
 builds the nodes; none of that is the claim that a person can read the warning where it
-is put. Copy asserted in a DOM and copy read by a human are different claims.
-**What _is_ established**, so this is honest in both directions: the library window
-loads and renders with this code without throwing (observed),
-`packages/design/test/no-generic-look.test.ts` passes over `library.css`, and the sheet
-reuses only existing tokens and component classes. What is missing is specifically the
-human observation, and the reason is environmental — `scripts/screenshot.cjs` boots the
-real main process, whose recordings root is `homedir()` with no override but
-`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
-scratch library, and seeding the captain's real recordings root from a task worktree
-was not acceptable. **Where it is discharged**: the project's single signed-bundle
-end-to-end pass, the one run once and deliberately at the end because packaging and
-re-signing void the captain's grants. It belongs to that pass beside
-`microphone-revocation` and `overlay-content-protection`, which report `skipped` in
-§ Phase 2 gate status for the same reason — one item on a known list, not an orphan.
-**And it may not be upgraded to verified on the strength of a test.** No number of
-passing assertions about the copy discharges it; only a human seeing that sheet
-rendered in a running app does. It is recorded here rather than in § Carried forward on
-purpose, and should stay: that list is obligations on phase 2's signed-bundle gate, and
-this is not one of them — moving it there would dilute what that list means.
+is put. It is **one of four such surfaces**, and they are recorded together in § Four
+surfaces nobody has watched render — what each one's absence costs, what _is_
+established, why the human observation is missing, and the single signed-bundle pass
+all four are discharged at. Do not restate any of that here: a second copy of it is a
+claim to keep correct twice.
 
 ## Sharp edges — retention
 
@@ -962,6 +947,259 @@ turning the flag off at runtime. Breaking the flag at the role is what would tes
 and there is no longer a mutation that does: the property's only guard is the harness
 check's control window, and it has survived a version of this measurement whose control
 was not a control.
+
+## The disk monitor, in one paragraph
+
+Report §7.2, phase 13, and it is deliberately three layers. The **decision and the
+copy** are pure and live together in `@loom/ipc` — `DISK_THRESHOLDS`, `classifyDisk`,
+`diskRefusesStart`, `diskRequiresStop`, `measureCaptureRate`, `DISK_COPY` — for
+`exportFrameCount`'s reason (main acts on them, the HUD and library render them, and a
+threshold with two copies is a banner saying one thing beside a monitor doing another)
+and for `RETENTION_COPY`'s (the promise and the act read from one place). The
+**measurement** is `ProjectStore.diskSpace()`, `statfs` on the recordings root, because
+§0 rule 2 puts every syscall against the disk behind that class; `bavail` not `bfree`,
+since the difference is root's reserve. The **act** is
+`apps/main/src/recorder/disk-monitor.ts`, a 2 s poll wired into `RecorderSession` with
+its reader injected — the default is the shipping `store.diskSpace()` and a test drives
+it instead, which is the only way to watch a threshold being crossed without filling a
+real volume. §7.2's stop is the **ordinary `stop()`**: the capture page flushes, parts
+finalize from the end report, the bundle reaches `editable`, and that is what makes the
+file playable rather than the half-written fragment the section exists to prevent. The
+capture page therefore reports a perfectly ordinary `reason: 'stopped'` and only main
+knows why — `Active.stopReason`, set at the instant the monitor decides, is what
+`endReasonFor` reads, and it is what finally **produces** `PartEndReason`'s `disk-full`.
+The preflight floor is enforced in `RecorderSession.start` and not only reported by
+`recorder.preflight`: a refusal that lives in the advice alone is one a menu item or
+`smoke-capture.mjs` walks past. It is carried on `PreflightReport.disk` rather than
+folded into `blocking`, which stays permissions-only — a full disk has no pane to open.
+
+**The monitor is an accessory and the recording outranks it**, the same rule §7.3 gives
+audio and §7.4 the camera, applied to an instrument rather than a device: every callback
+is wrapped, a `statfs` that throws becomes a reading of `level: 'unknown'`, and every
+predicate answers "no" for `unknown` — so a volume this process cannot measure refuses
+nothing and stops nothing. A monitor that could fail a recording would be a new way to
+lose footage installed by the thing meant to prevent one.
+
+**And every wait on the volume has a deadline on it**, `readSpaceBeforeDeadline`, shared
+by the poll, by `RecorderSession.start`'s preflight and by `readDiskForPreflight` —
+`recorder.preflight`'s own reading, which is the one a **window awaits**, so a hang there
+is not a missing number but a reply that never comes: `refreshPermissions()` never
+returns and the library sequences it ahead of `refreshRecovery()`, taking §7.1's recovery
+banner down with §7.2's capacity line and logging nothing.
+`the-preflight-reading-waits-on-the-volume-for-ever` is that mutation. A `statfs` that
+never returns — against the volume being watched _because_ it is
+in trouble — wedged the in-flight guard for good: every later tick returned immediately,
+nothing was published, nothing was logged, and §7.2's stop became unreachable while the
+disk filled. The deadline is half the poll interval (`diskReadDeadlineMs`), so a
+timed-out read lands back inside its own interval and cannot stack polls; it bands the
+volume `unknown` and **says so** in the log, because the silence was half the defect.
+The guard is released on every exit and reset by `start()` behind a generation counter,
+so a poll the previous recording left in flight neither swallows this one's immediate
+reading nor publishes against it. `a-stalled-disk-read-switches-the-monitor-off` is the
+mutation. `ProjectStore.diskSpace()` reads first and `mkdir`s only on `ENOENT` for the
+same reason: on a path a data-loss safeguard polls, a reading `statfs` alone could have
+answered must not be lost to a write failing.
+
+**A deadline abandons a read; it does not retire one, so there is a second guard at a
+second level.** The `fs` request the poll walked away from is still on libuv's
+four-thread pool, which `ProjectStore`'s media writes share — so without
+`SingleFlightDiskRead` a stalled volume would park one more request every 2 s until
+`appendMediaChunk` queued behind them, the instrument slowing the recording it watches.
+It holds **at most one** underlying read and later callers **join** it rather than
+issuing a second, which is also what keeps the stop reachable: a stalled `statfs`
+returns when the mount comes back and the poll waiting on it gets that answer in the
+same tick. The two guards are at different levels **on purpose** — the poll's own flag
+must keep clearing on every deadline or the paragraph above is undone — and
+`apps/main/test/phase13-disk.test.ts` asserts both in one place so a future change
+cannot trade one for the other. What it cannot do is recorded rather than papered over:
+a volume whose metadata stays wedged while writes still succeed leaves the monitor
+blind, because nothing in Node can retire the stuck request, and a blind instrument
+beats a blocked capture spine. `abandoned-disk-reads-pile-up-on-the-threadpool` is the
+mutation.
+
+**The library walk behind the capacity estimate is started, never awaited.**
+`store.list()` is `readdir` plus `stat` over every bundle, and on the volume this
+feature is about those hang exactly as `statfs` does — so awaiting one in
+`RecorderSession.start` would put the wedge back one line above the deadline that
+closed it. It is `void this.measureLibrary()`, bounded by `LIBRARY_RATE_DEADLINE_MS`
+(10 s, its own constant rather than §7.2's poll interval, which would abandon a walk
+that was going to answer), and a walk that could not answer leaves whatever the last
+one measured. `measureLibraryRate` returns `CaptureRate | null` for that reason: a hang
+and a throw are the same "we do not know", and `captureRate()`'s
+`libraryRate ?? REFERENCE_RATE` is the only place that decides what to say instead.
+`the-library-walk-is-awaited-before-the-recording-starts` is the mutation.
+
+**The capacity estimate is measured, and says whose measurement it is.**
+`CaptureRate.source` is `measured` or `reference` and is never smoothed away: during a
+recording the rate is that recording's own bytes (counted at the `appendMediaChunk`
+seam, `Active.bytesWritten`) over its own media seconds past a 2 s floor; before one it
+is `measureCaptureRate` over the user's own library, weighted by seconds; and
+`REFERENCE_CAPTURE_RATE_BYTES_PER_SEC` — research §5.6's 76 MB/min — answers only a
+first run. §5.6 measured a 35× spread between an idle screen and full-screen animation,
+so a bare "≈ 42 min available" from that constant is a sentence about somebody else's
+screen. The library rate is resolved **once per recording**, in `start()`, and reused by
+every poll below the 2 s floor: `store.list()` is a recursive walk of every bundle on
+disk and must never land on the 2 s poll path beside the media appends it would queue
+with. It is an accessory like the rest — a library that cannot be listed costs the
+_provenance_ of the estimate, never the recording. `DISK_COPY.capacity` is rendered on
+the library's masthead, which is §7.2's estimate on a volume that is _not_ refusing:
+the refusal banner covers the other end, and between them the sentence reaches a page.
+It — and the HUD's own disk banner — is **wired and not yet watched rendering**;
+§ Four surfaces nobody has watched render is where that stands.
+
+**§7.2's "< 2 min of headroom" clause cannot fire, and is kept at §7.2's value anyway** —
+the shape `minDurationSec: 1.0` already has in `auto-zoom.ts`. Two minutes of headroom
+is below the 1 GB stop for any rate under 500 MB/min and §5.6's _worst_ measured content
+is 146 MB/min, so the byte floors are always reached first. It is implemented rather than
+dropped because it is the report's, and because a spec clause silently omitted is worse
+than one that is inert and says so; `packages/ipc/test/disk.test.ts` pins both halves.
+
+**The gate is `apps/main/test/phase13-disk.test.ts`**: the real `RecorderSession` writing
+the real H.264 fixture through the real `ProjectStore`, with the volume's answer driven
+down past 5 GB and then past 1 GB, ending `editable` with a part marked `disk-full`, a
+`media/screen.000.mp4` `/usr/bin/avconvert` remuxes, and a frame index carrying every
+frame that went in. **Eight controls**, because each assertion passes for a wrong reason
+without one: a volume that never drops must not stop the recording and must write no
+`disk-full`; that recording's file must play too, so playability is about the interrupted
+run rather than the fixture; a reader that throws on every poll must leave the recording
+running; the banner must have been _published_ below 5 GB and absent above it; a volume
+that _answers_ must be read afresh every poll, or the single read the stalled scenario
+asserts is a guard that stopped reading rather than the stall; a library with nothing in
+it must report `reference`, or `measured` is the label that path always carries; a
+library that answers must reach `measured`, or the `reference` a wedged walk reports is
+the wiring rather than the wedge; and a preflight volume that answers must band `ok`, or
+the `unknown` a stalled one reports is what that function always says. **Eleven**
+`disk`/`preflight`/`monitor` entries in `npm run verify:mutation` break the production
+source on disk — the six phase 13 shipped with, plus
+`a-stalled-disk-read-switches-the-monitor-off`,
+`the-first-seconds-of-a-recording-ignore-the-users-own-library`,
+`abandoned-disk-reads-pile-up-on-the-threadpool`,
+`the-library-walk-is-awaited-before-the-recording-starts` and
+`the-preflight-reading-waits-on-the-volume-for-ever` — none of them guarded only by a
+gate that can withhold.
+
+## Crash recovery is told to the user, and where its numbers come from
+
+Report §7.1 step 5 — _"Show the user: 'Recovered 4:52 of a 4:58 recording.' Never
+silently discard, never silently pretend it was clean."_ The repair has run at launch
+since phase 1 and reported to a `console.log` the user does not have, which is the
+second half of that sentence reached by omission. `RecorderSession.recoverOnLaunch` now
+**keeps** what it found (`recoveryReports()`), because the pass runs before any window
+exists and there is nobody to push to; the library **pulls** it on load through
+`library.recovery()`. `RECOVERY_COPY` in `@loom/ipc` is the words, and **every figure in
+them is the repair's own** — `recoveredSec`, `frameCount`, `truncatedBytes`, measured by
+scanning the fragments that survived. It states no loss window at all: this project's
+guarantee is frame-level (the fragment writer holds one sample), a stale string claiming
+otherwise has already had to be corrected here once, and both
+`packages/ipc/test/disk.test.ts` and `apps/main/test/recovery-notice.test.ts` refuse one.
+
+**The headline counts what was _repaired_, not what was looked at.** `recoverOnLaunch`
+reports every crashed bundle it touched, repaired or not, so a heading over
+`reports.length` announced "A recording was recovered after an unexpected quit" directly
+above "could not be repaired: …" — _"silently pretend it was clean"_ phrased kindly,
+which is the one thing this surface exists to prevent. All three shapes have their own
+words (repaired-only, failed-only, and mixed, which names both counts), all three are
+pinned in the copy test, and
+`the-recovery-heading-counts-recordings-it-could-not-repair` is the mutation.
+
+**Two library state notes were wrong about when recovery happens and are corrected.**
+`needs-recovery` said the bundle would be repaired _"when opened"_; it is repaired at
+launch, and a bundle still in that state when the library renders is one this launch's
+pass began and could not finish — `recoverBundle` writes the state before it repairs
+anything — so the next launch retries it. `recording` said _"was in progress when the
+app last closed"_, which contradicted the pulsing record dot beside it. Both now say
+what actually happened. `apps/main/test/recovery-notice.test.ts` is the gate, over a real
+crashed bundle through the shipping pass, with the control that an ordinary launch has
+nothing to say.
+
+## Four surfaces nobody has watched render, and the one pass that discharges them
+
+**Four user-facing surfaces now exist whose entire job is to tell the user something,
+and no human has watched any of them appear on a screen. That is a hole in four
+safeguards rather than in their paperwork.** The failure mode is the same in each case
+and it is not cosmetic: a banner that does not open, or opens clipped, off-screen or
+below the fold, leaves the user un-told while **every test stays green** — the sources
+are deleted with no warning anybody saw, or the app stops cleanly at 1 GB with a good
+file and the user never learns why, or is never warned early enough to act. A
+protection nobody can read is theatre. §7.4's camera banner is the precedent that makes
+that concrete rather than theoretical: it was correct in the DOM and had **zero pixels
+on screen** for the whole of phase 4, which is what `test/hud-notice.test.ts` exists to
+catch.
+
+The four, and what each one's absence costs:
+
+1. **§7.5 obligation 2's retention warning**, in the library's export sheet
+   (`apps/renderer/src/library/main.ts`, `RETENTION_COPY.warning`) — the settled
+   decision that the user is told **before** their sources go, and that there is no
+   silent destruction. Unseen, the deletion happens anyway.
+2. **§7.1 step 5's recovery banner**, in the library (`recovery-banner`,
+   `renderRecovery`) — _"Never silently discard, never silently pretend it was clean."_
+   Unseen, the app is back to the omission this branch fixed: a repaired recording that
+   looks exactly like every other recording.
+3. **§7.2's capacity line**, on the library's masthead (`disk-capacity`,
+   `renderCapacity`) — the estimate that arrives while there is still time to delete
+   something.
+4. **§7.2's low-disk banner and the notice its stop leaves behind**, on the recorder
+   HUD (`#disk`, `renderDisk`) — the warning during a recording, and then what the
+   clean stop saved.
+
+The first guards destruction; the other three prevent and report loss. The discipline
+is the same either way.
+
+**What _is_ established, so this is honest in both directions.** The pages that host
+them load and render with this code without throwing: `test/editor-gate.test.ts` shows
+the real library window through the real `WindowRegistry` role, the real preload and
+the real `loom://app/library.html`, waits on `document.fonts.ready` and clicks its Open
+button; `test/hud-notice.test.ts` does the same for `recorder.html` and then measures
+§7.3's and §7.4's notices in **pixels** clipped to the viewport, with a `--no-fit`
+control that must read zero. The HUD's shelf arithmetic already carries the disk line —
+`reportNoticeHeight` sums it with the camera, revoked and error lines and
+`WindowRegistry.fitHudNotice` sizes the window to the total, which is the mechanism
+that gate measures for the other two. The copy is pinned:
+`packages/format/test/retention.test.ts` and `apps/renderer/test/export-notice.test.ts`
+for the warning, `packages/ipc/test/disk.test.ts` and
+`apps/main/test/recovery-notice.test.ts` for `DISK_COPY` and `RECOVERY_COPY`. And
+`packages/design/test/no-generic-look.test.ts` walks `apps/renderer/src`, so it passes
+over `library.css` and `recorder.css`; all four surfaces reuse existing tokens and
+component classes.
+
+**What is missing is specifically the human observation, and it is missing for all
+four.** No `npx electron scripts/screenshot.cjs` run was made on the branch that built
+the last three. Every gate named above renders them **hidden**, or does not open a
+window at all: `test/editor-gate.test.ts` builds its `registerIpc` with no `recovery`
+function and no `PermissionManager`, so `library.recovery()` answers `[]` and
+`recorder.preflight()` has no handler — both library banners stay hidden and the export
+sheet is never opened; `test/hud/main.ts` sends `disk: null, diskStop: null`
+deliberately, so the HUD's disk line is never given text; and
+`apps/main/test/phase13-disk.test.ts` and `apps/main/test/recovery-notice.test.ts` mock
+`electron` outright. Copy pinned in a test and copy read by a human are different
+claims.
+
+**The reason is environmental.** `scripts/screenshot.cjs` boots the real
+`dist/main/index.cjs`, whose recordings root is `homedir()` with no override but
+`--verify-permissions` (`apps/main/src/index.ts`), so it could not be pointed at a
+scratch library, and seeding the captain's real recordings root from a task worktree
+was not acceptable. Three of the four need state on top of that which a dev run cannot
+manufacture honestly: an export that has just deleted its sources, a bundle genuinely
+crashed mid-recording, and a volume genuinely inside §7.2's bands.
+
+**Where all four are discharged: the project's single signed-bundle end-to-end pass**,
+the one run once and deliberately at the end because packaging and re-signing void the
+captain's grants and cost a full re-grant cycle (§ Sharp edges — permissions). They
+belong to it beside `microphone-revocation` and `overlay-content-protection`, which
+report `skipped` in § Phase 2 gate status for that same reason — items on a known list,
+not orphans.
+
+**And none of them may be upgraded to verified on the strength of a test.** No number
+of passing assertions about the copy discharges one; only a human seeing that surface
+rendered in a running app does.
+
+**They are recorded here rather than in § Carried forward on purpose, and should
+stay.** That list is obligations on phase 2's signed-bundle gate, and none of these is
+one — moving them there would dilute what that list means. For the same reason there is
+**no row for them in § Phase 2 gate status**: that table is
+`apps/main/src/verify/permissions-harness.ts`'s checks, and a surface waiting on the
+same pass is not a check that harness runs.
 
 ## Sharp edges
 

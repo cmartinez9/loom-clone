@@ -38,6 +38,7 @@ import { app, ipcMain, shell, systemPreferences, type IpcMainInvokeEvent } from 
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  diskRefusesStart,
   requestedCaptureOptions,
   type CaptureOptions,
   type PreflightReport,
@@ -56,6 +57,7 @@ import {
   type PermissionStatus,
 } from '@loom/permissions';
 import type { SetupState } from '@loom/format';
+import { readDiskForPreflight } from './disk.ts';
 import type { ProjectStore } from './project-store.ts';
 
 /**
@@ -471,7 +473,7 @@ export class PermissionManager {
   // ---------------------------------------------------------------- preflight
 
   /**
-   * Whether a capture could start, as two actionable lists.
+   * Whether a capture could start, as the lists a person can act on.
    *
    * Named under `recorder` in §1.4 and implemented here because this is the module
    * that knows the answer. The answer is currently the same for every capture — a
@@ -479,14 +481,30 @@ export class PermissionManager {
    * for one — so `options` does not change the result yet. It is taken so that
    * narrowing the answer to what a recording actually opens lands on this call
    * rather than inventing a second one.
+   *
+   * **§7.2's disk floor is answered here rather than beside here**, because "can I
+   * record right now" has two answers and a caller given only one of them will show
+   * a green tick over a volume with 2 GB left on it. It is carried as its own field:
+   * a full disk is not a grant, has no pane to open, and folding it into
+   * {@link PreflightReport.blocking} would send the one surface that reads that list
+   * to a screen with nothing on it that can help. The measurement itself is
+   * `readDiskForPreflight`'s — this file reads TCC and nothing else, which is the
+   * boundary its header states.
    */
   async preflight(_options: CaptureOptions): Promise<PreflightReport> {
-    const report = await this.probe();
+    const [report, disk] = await Promise.all([
+      this.probe(),
+      readDiskForPreflight(this.options.store),
+    ]);
     return {
       report,
-      ready: canRecord(report),
+      // Both, and in that order only because `canRecord` is the cheaper read. A
+      // recording refused by either is refused; `RecorderSession.start` re-checks
+      // the disk half rather than trusting a caller to have asked.
+      ready: canRecord(report) && !diskRefusesStart(disk),
       blocking: blockingKinds(report),
       degraded: degradedKinds(report),
+      disk,
     };
   }
 

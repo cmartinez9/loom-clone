@@ -42,6 +42,14 @@
           There is no account, no upload and no sync.
         </p>
         <dl class="facts" id="facts"></dl>
+
+        <!--
+          §7.2's *"Show estimated capacity: '≈ 42 min available'"*. It belongs here,
+          on a volume that is **not** refusing — the common case, and the only one
+          where knowing how long you can record is any use. The refusal banner below
+          covers the other end; between them §7.2's estimate is on a screen.
+        -->
+        <p class="disk-capacity" id="disk-capacity" hidden></p>
       </header>
 
       <div class="toolbar">
@@ -70,6 +78,14 @@
         why here rather than by a Start button that does nothing.
       -->
       <div class="perm-banner" id="perm-banner" role="status" hidden></div>
+
+      <!--
+        §7.1 step 5: *"Show the user: 'Recovered 4:52 of a 4:58 recording.' Never
+        silently discard, never silently pretend it was clean."* Recovery runs at
+        launch, before this window exists, so this is filled from a pull —
+        `library.recovery()` — rather than from an event nobody was there to receive.
+      -->
+      <div class="recovery-banner" id="recovery-banner" role="status" hidden></div>
 
       <ul class="rows" id="rows" aria-live="polite"></ul>
     </main>

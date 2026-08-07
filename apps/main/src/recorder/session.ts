@@ -45,7 +45,12 @@ import {
 import {
   CHANNEL,
   DEFAULT_CAPTURE_OPTIONS,
+  DISK_COPY,
+  REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,
+  classifyDisk,
+  diskRefusesStart,
   requestedCaptureOptions,
+  DISK_THRESHOLDS,
   type AudioPartEndMsg,
   type AudioTrackFacts,
   type AudioTrackReport,
@@ -53,7 +58,10 @@ import {
   type CameraState,
   type CaptureEndReport,
   type CaptureOptions,
+  type CaptureRate,
   type ChunkMsg,
+  type DiskReading,
+  type DiskStopNotice,
   type MetaMsg,
   type PartEndMsg,
   type RecorderPhase,
@@ -63,6 +71,13 @@ import {
   type VideoPartReport,
   type VideoTrackFacts,
 } from '@loom/ipc';
+import {
+  DiskMonitor,
+  SingleFlightDiskRead,
+  diskReadDeadlineMs,
+  readSpaceBeforeDeadline,
+  type DiskReader,
+} from './disk-monitor.ts';
 import {
   AUDIO_TRACK_KEYS,
   DEFAULT_RECORDING_NAME,
@@ -93,6 +108,7 @@ import {
   startInputSampler,
   type HelperClockReading,
 } from '../input-sampler.ts';
+import { LIBRARY_RATE_DEADLINE_MS, measureLibraryRate } from '../disk.ts';
 import { readAxTrusted, readMediaStatus } from '../permissions.ts';
 import type { FinalizedAudioPart, ProjectStore } from '../project-store.ts';
 import type { WindowRegistry, WindowRole } from '../windows.ts';
@@ -230,7 +246,42 @@ export interface RecorderSessionOptions {
    * and nothing else.
    */
   inputHelperPath?: string | undefined;
+  /**
+   * How §7.2's monitor asks about free space. Defaults to `store.diskSpace()`.
+   *
+   * Injected so it can be *driven*: §7.2's acceptance criterion is a recording that
+   * stops cleanly with a playable file, and the only way to watch a threshold being
+   * crossed is to move the measurement rather than to fill a real volume. The
+   * default is the shipping path, so a test that does not care gets the real one.
+   */
+  disk?: DiskReader;
+  /** §7.2's 2 s poll. Overridden only by tests. */
+  diskIntervalMs?: number;
 }
+
+/**
+ * Media seconds a recording must have written before its own byte rate is reported
+ * as **measured**.
+ *
+ * Below it there is nothing to divide by that is not mostly the first keyframe, and
+ * `CaptureRate.source` would be claiming a measurement this recording has not taken.
+ * Two seconds is 60 frames at 30 fps and several keyframes at §7.1's one-per-second
+ * cadence — enough that the number describes the content rather than the start.
+ */
+const MEASURED_RATE_FLOOR_SEC = 2;
+
+/**
+ * What a rate reads as when **nothing** has been measured — not this recording, and
+ * not the user's library either.
+ *
+ * A first run, and only a first run. `source: 'reference'` is what stops it being
+ * reported as a measurement, which is the whole reason the field exists.
+ */
+const REFERENCE_RATE: CaptureRate = {
+  bytesPerSec: REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,
+  source: 'reference',
+  sampleCount: 0,
+};
 
 /** One audio track's state while it is being recorded. */
 interface ActiveAudio {
@@ -402,6 +453,27 @@ interface Active {
   writeError: Error | null;
   /** What the camera is doing, for the §7.4 banner. */
   camera: CameraState;
+  /**
+   * Encoded bytes handed to the store for this recording, across every track.
+   *
+   * Counted at the seam rather than measured off the bundle, because §7.2's monitor
+   * runs while the recording does and a `du` of a growing directory every two
+   * seconds is a walk this process has no reason to pay for. It is what the
+   * *recording* has cost, which is exactly the number the capacity estimate needs;
+   * the sidecars and `recording.json` are kilobytes beside it.
+   */
+  bytesWritten: number;
+  /**
+   * Why this recording is being stopped, when something other than the user stopped
+   * it. Today only §7.2's monitor sets it.
+   *
+   * It has to be recorded at the moment the stop is *decided*, because by the time
+   * `finalize` runs the capture page has reported a perfectly ordinary
+   * `reason: 'stopped'` — it was told to stop, and it does not know why. Without
+   * this the recording would finalize as a clean stop and `PartEndReason`'s
+   * `disk-full` would stay the thing nothing produces.
+   */
+  stopReason: PartEndReason | null;
   end: CaptureEndReport | null;
 }
 
@@ -420,6 +492,47 @@ export class RecorderSession {
    * is what dismisses it.
    */
   private revoked: RevocationNotice | null = null;
+  /**
+   * §7.2's monitor, and the two things it leaves behind.
+   *
+   * `lastDisk` is the most recent poll — republished on every status so the HUD's
+   * banner and the recorder's own decision are the same reading. `diskStop` is the
+   * notice a stop wrote, and it lives here rather than on {@link Active} for
+   * {@link RecorderSession.revoked}'s reason: by the time the user reads it, the
+   * recording it describes has been finalized and `active` is `null`.
+   */
+  private readonly diskMonitor: DiskMonitor;
+  /**
+   * The one reader both §7.2's poll and {@link start}'s preflight go through.
+   *
+   * Shared rather than one each, because the guard it carries is about how many `fs`
+   * requests this feature can leave parked on libuv's threadpool at once, and two
+   * instances would be two.
+   */
+  private readonly diskRead: SingleFlightDiskRead;
+  private lastDisk: DiskReading | null = null;
+  private diskStop: DiskStopNotice | null = null;
+  /**
+   * What a second has cost this user across their own library, measured **once per
+   * recording** from {@link start} and reused by every poll below
+   * {@link MEASURED_RATE_FLOOR_SEC}.
+   *
+   * Once, and never on a poll, because `measureLibraryRate` is a recursive walk of
+   * every bundle on disk: §7.2's monitor runs every 2 s for the length of a
+   * recording, and that walk on that path would sit in the store's queues beside the
+   * media appends — and what is queued in memory is exactly what a crash costs.
+   * `null` until a walk has answered, which is the only state {@link REFERENCE_RATE}
+   * answers — and it is left holding the **last** measurement rather than being
+   * cleared by a walk that could not answer, because an earlier reading of this same
+   * library is still a measurement of it and the constant is still somebody else's
+   * screen.
+   */
+  private libraryRate: CaptureRate | null = null;
+  /**
+   * What {@link RecorderSession.recoverOnLaunch} found, held for the life of the
+   * process. See {@link RecorderSession.recoveryReports}.
+   */
+  private recovery: RecoveryReport[] = [];
   /** The live drawing overlay's log, when one is wired. See {@link attachDrawing}. */
   private drawing: DrawingSink | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
@@ -437,8 +550,23 @@ export class RecorderSession {
       stopTimeoutMs: 5_000,
       statusIntervalMs: 250,
       inputHelperPath: undefined,
+      disk: () => options.store.diskSpace(),
+      diskIntervalMs: DISK_THRESHOLDS.pollIntervalMs,
       ...options,
     };
+    this.diskRead = new SingleFlightDiskRead(() => this.options.disk());
+    this.diskMonitor = new DiskMonitor({
+      read: () => this.diskRead.read(),
+      rate: () => this.captureRate(),
+      intervalMs: this.options.diskIntervalMs,
+      onReading: (reading) => {
+        this.lastDisk = reading;
+        this.publish();
+      },
+      onExhausted: (reading) => {
+        this.stopForFullDisk(reading);
+      },
+    });
   }
 
   // ------------------------------------------------------------------- wiring
@@ -602,6 +730,7 @@ export class RecorderSession {
       ipcMain.removeAllListeners(channel);
     }
     this.stopStatusTimer();
+    this.diskMonitor.stop();
   }
 
   // ----------------------------------------------------------------- lifecycle
@@ -628,9 +757,37 @@ export class RecorderSession {
     // app that a grant came back and a notice that outlives its own truth is worse
     // than one the next recording clears.
     this.revoked = null;
+    this.diskStop = null;
     this.publish();
 
     const { store } = this.options;
+
+    // §7.2's preflight, enforced where the recording actually begins rather than
+    // only where it is advised about. `recorder.preflight` answers the same
+    // question for a surface that wants to warn *before* the button is pressed, but
+    // a refusal that only lives there is a refusal any other caller — a menu item,
+    // a global shortcut, `smoke-capture.mjs` — walks straight past. This runs
+    // before `store.create`, so a refused start leaves no bundle behind.
+    //
+    // The library walk behind §7.2's capacity estimate is *started* here and
+    // deliberately not awaited. This recording has written nothing yet, so its own
+    // bytes cannot answer for another two seconds and the user's library is what can
+    // — but `store.list()` is a recursive walk of every bundle on disk, and neither
+    // its latency nor a `readdir` that hangs belongs between pressing Record and
+    // `store.create`. Awaiting it would put back, one line above the deadline that
+    // closed it, the exact wedge that deadline exists to prevent: a Record button
+    // that never comes back, with no recording and nothing on screen saying why.
+    // What a slow or wedged library costs instead is the *provenance* of a number —
+    // `captureRate()` falls through to `REFERENCE_RATE` — and never the recording.
+    void this.measureLibrary();
+    const reading = await this.readDisk();
+    this.lastDisk = reading;
+    if (diskRefusesStart(reading)) {
+      this.phase = 'idle';
+      this.publish();
+      throw new Error(DISK_COPY.refusal(reading));
+    }
+
     const { id } = await store.create(DEFAULT_RECORDING_NAME);
     try {
       await store.openProject(id);
@@ -675,6 +832,8 @@ export class RecorderSession {
         // and the first frame take a moment, and calling that `unavailable` would
         // open every camera recording with the §7.4 banner already on screen.
         camera: options.webcamDeviceId === null ? 'off' : 'starting',
+        bytesWritten: 0,
+        stopReason: null,
         end: null,
       };
 
@@ -694,6 +853,10 @@ export class RecorderSession {
 
       this.phase = 'recording';
       this.startStatusTimer();
+      // §7.2's 2 s poll, armed only while a recording is running. It polls once
+      // straight away, so a recording started on a volume that is already inside the
+      // banner band says so on the first status rather than on the third.
+      this.diskMonitor.start();
       this.publish();
       return id;
     } catch (error) {
@@ -715,6 +878,9 @@ export class RecorderSession {
       return;
     }
     this.phase = 'finalizing';
+    // Nothing left to watch: the stop is what §7.2's monitor exists to cause, and a
+    // poll arriving during a finalize is a reading about a recording that is over.
+    this.diskMonitor.stop();
     this.publish();
 
     const window = this.options.windows.get('capture');
@@ -738,10 +904,25 @@ export class RecorderSession {
     this.active = null;
     this.sourceWanted = null;
     this.stopStatusTimer();
+    this.diskMonitor.stop();
     if (active === null) {
       this.phase = 'idle';
       this.publish();
       return;
+    }
+
+    // §7.2's *"tell the user exactly what happened and how long was saved"*, taken
+    // here because this is the last instant `active` exists and the elapsed time is
+    // still readable. The recording is about to finalize with everything in it — so
+    // the notice is written whether or not the finalize below succeeds, for the same
+    // reason §7.3's is: a recording that stopped by itself and says nothing reads as
+    // a recording that was lost.
+    if (active.stopReason === 'disk-full') {
+      this.diskStop = {
+        recordingId: active.id,
+        recordedSec: this.elapsedFor(active),
+        freeBytes: this.lastDisk?.space?.freeBytes ?? 0,
+      };
     }
 
     // Before anything else touches the bundle, and unconditionally: the sampler
@@ -1007,8 +1188,14 @@ export class RecorderSession {
    * Runs at launch, before any window can ask for a recording. Returns what it
    * found so the app can tell the user plainly — *"Recovered 4:52"* — rather than
    * silently presenting a repaired recording as though nothing happened.
+   *
+   * What it returns is also **kept**, in {@link RecorderSession.recovery}, because
+   * this runs before any window exists and there is therefore nobody to push it to.
+   * §7.1 step 5 is *"Show the user"*, and until phase 13 the only thing that showed
+   * anybody anything here was a `console.log`.
    */
   async recoverOnLaunch(): Promise<RecoveryReport[]> {
+    this.recovery = [];
     const crashed = await this.options.store.listCrashed();
     const reports: RecoveryReport[] = [];
     for (const summary of crashed) {
@@ -1035,7 +1222,18 @@ export class RecorderSession {
           : `[recorder] could not recover ${report.name}: ${report.error ?? 'unknown'}`,
       );
     }
+    this.recovery = reports;
     return reports;
+  }
+
+  /**
+   * What this launch's recovery pass found, for whoever asks (§7.1 step 5).
+   *
+   * A copy, because this outlives every window and a caller that mutated it would be
+   * editing what the *next* window is told about a repair that already happened.
+   */
+  recoveryReports(): RecoveryReport[] {
+    return [...this.recovery];
   }
 
   // ------------------------------------------------------- capture-page traffic
@@ -1617,7 +1815,11 @@ export class RecorderSession {
     // The grant is read *now*, not at start: §7.3's whole point is that it may have
     // gone away during the recording, and the answer is only meaningful at the moment
     // the source ended.
-    const screenEnd = endReasonFor(report, readMediaStatus('screen') === 'granted');
+    const screenEnd = endReasonFor(
+      report,
+      readMediaStatus('screen') === 'granted',
+      active.stopReason,
+    );
     for (const track of VIDEO_TRACK_KEYS) {
       const state = active.video.get(track);
       if (state?.part == null) continue;
@@ -1745,6 +1947,9 @@ export class RecorderSession {
   }
 
   private appendAudioChunk(active: Active, track: AudioTrackKey, chunk: ChunkMsg): void {
+    // The audio tracks are ~2 MB/min of §5.6's 76, but they are bytes on the same
+    // volume and the estimate is about the volume. See {@link Active.bytesWritten}.
+    active.bytesWritten += chunk.data.byteLength;
     void this.options.store
       .appendMediaChunk(active.id, track, {
         data: chunk.data,
@@ -1931,6 +2136,10 @@ export class RecorderSession {
    * which is precisely the memory a `SIGKILL` takes.
    */
   private appendChunk(active: Active, state: ActiveVideo, chunk: ChunkMsg): void {
+    // Counted here, at the seam, because §7.2's capacity estimate wants what this
+    // recording is costing per second and this is where that cost is handed over.
+    // See {@link Active.bytesWritten}.
+    active.bytesWritten += chunk.data.byteLength;
     state.firstPtsUs ??= chunk.timestampUs;
     state.lastEndUs = chunk.timestampUs + (chunk.durationUs ?? 0);
     state.lastArrivalMs = monotonicMs();
@@ -2071,6 +2280,10 @@ export class RecorderSession {
       // Not derived from `active`: the notice has to survive the recording it stopped,
       // because that is when the user reads it. See {@link RecorderSession.revoked}.
       revoked: this.revoked,
+      // §7.2. The reading the monitor last took and the recorder itself acted on —
+      // one number, so the banner cannot describe a different volume from the stop.
+      disk: this.lastDisk,
+      diskStop: this.diskStop,
     };
   }
 
@@ -2088,9 +2301,121 @@ export class RecorderSession {
    * origin. A camera that comes and goes does not move the elapsed time.
    */
   private elapsedSec(): number {
-    const state = this.active?.video.get(REFERENCE_TRACK);
+    return this.active === null ? 0 : this.elapsedFor(this.active);
+  }
+
+  /**
+   * The same number for a recording that is no longer {@link RecorderSession.active}.
+   *
+   * `finalize` clears `active` before it does anything else, and §7.2's stop notice
+   * has to say how much was saved — which is a fact about the recording that just
+   * ended, read from the recording that just ended.
+   */
+  private elapsedFor(active: Active): number {
+    const state = active.video.get(REFERENCE_TRACK);
     if (state?.firstPtsUs == null) return 0;
     return Math.max(0, (state.lastEndUs - state.firstPtsUs) / 1_000_000);
+  }
+
+  // ---------------------------------------------------------------- disk (§7.2)
+
+  /**
+   * One reading, taken outside the monitor. Used by {@link start}'s refusal.
+   *
+   * Never throws, for the reason the monitor never does: a volume this process
+   * could not measure must not be the thing that stops a user recording. It comes
+   * back `unknown`, and every predicate over that answers "no".
+   *
+   * **And never waits for ever**, for the same reason and through the same function:
+   * a `statfs` that does not return would otherwise wedge the Record button with no
+   * recording, no message and nothing on screen that says why.
+   */
+  private async readDisk(): Promise<DiskReading> {
+    try {
+      const space = await readSpaceBeforeDeadline(
+        () => this.diskRead.read(),
+        diskReadDeadlineMs(this.options.diskIntervalMs),
+      );
+      return classifyDisk(space, this.captureRate());
+    } catch (error) {
+      console.error('[recorder] free space could not be read:', error);
+      return classifyDisk(null, this.captureRate());
+    }
+  }
+
+  /**
+   * What a second of recording is costing right now, measured where it can be.
+   *
+   * The bytes are this recording's own — counted at the store seam as they are
+   * handed over — against its own media seconds, so the estimate follows the content
+   * rather than a figure from somebody else's screen. §5.6 measured a 35× spread
+   * between an idle desktop and full-screen animation, which is the whole reason
+   * this is measured at all rather than read from
+   * {@link REFERENCE_CAPTURE_RATE_BYTES_PER_SEC}.
+   *
+   * Below {@link MEASURED_RATE_FLOOR_SEC} there is nothing honest to divide, and the
+   * question falls to **the user's own library** — {@link libraryRate}, resolved once
+   * at {@link start}. §5.6's 35× spread is the argument for that too: a machine whose
+   * recordings have averaged 4 MB/min would otherwise be told about somebody else's
+   * screen for the first two seconds of every recording, and then watch the estimate
+   * jump by an order of magnitude. {@link REFERENCE_RATE} is reached only where
+   * neither has anything to say — a first run — and `CaptureRate.source` is what
+   * stops any of the three from being reported as the wrong one.
+   */
+  private captureRate(): CaptureRate {
+    const active = this.active;
+    const seconds = this.elapsedSec();
+    if (active === null || seconds < MEASURED_RATE_FLOOR_SEC || active.bytesWritten <= 0) {
+      return this.libraryRate ?? REFERENCE_RATE;
+    }
+    return { bytesPerSec: active.bytesWritten / seconds, source: 'measured', sampleCount: 1 };
+  }
+
+  /**
+   * The library walk, off the start path. Never awaited, never able to throw.
+   *
+   * A walk that could not answer — because it errored, or because it hung and hit
+   * {@link LIBRARY_RATE_DEADLINE_MS} — leaves whatever the last one measured, which
+   * is still a reading of this user's own library. Only a process that has never had
+   * one falls to {@link REFERENCE_RATE}.
+   */
+  private async measureLibrary(): Promise<void> {
+    const rate = await measureLibraryRate(this.options.store, LIBRARY_RATE_DEADLINE_MS);
+    if (rate !== null) this.libraryRate = rate;
+  }
+
+  /**
+   * §7.2's clean stop: *"Stopping at 1 GB with a good file beats hitting `ENOSPC`
+   * with a half-written fragment."*
+   *
+   * It is the **ordinary** `stop()`, and that is the whole design. The capture page
+   * flushes, every open part is finalized from the end report, the frame index is
+   * written and the bundle reaches `editable` with everything captured up to this
+   * instant in it — which is what makes the resulting file playable, and is the
+   * property §7.2's acceptance criterion is about. Anything more abrupt would be the
+   * half-written fragment this exists to avoid, arrived at deliberately.
+   *
+   * `stopReason` is set **before** the stop rather than worked out during the
+   * finalize, because the capture page reports a perfectly ordinary
+   * `reason: 'stopped'` — it was told to stop and does not know why. This is the one
+   * thing that tells `endReasonFor` the difference, and it is what finally produces
+   * `PartEndReason`'s `disk-full`.
+   *
+   * Queued on `chain` like every other lifecycle transition, so a monitor tick that
+   * lands while the user is already stopping cannot run two finalizes.
+   */
+  private stopForFullDisk(reading: DiskReading): void {
+    const active = this.active;
+    if (active === null || this.phase !== 'recording') return;
+    this.lastDisk = reading;
+    active.stopReason = 'disk-full';
+    console.log(
+      `[recorder] stopping: ${String(reading.space?.freeBytes ?? 0)} bytes free, below ` +
+        String(DISK_THRESHOLDS.stopBytes),
+    );
+    void this.enqueue(() => this.stop()).catch((error: unknown) => {
+      console.error('[recorder] the disk-full stop failed:', error);
+    });
   }
 
   private startStatusTimer(): void {
@@ -2673,21 +2998,30 @@ function writtenAudio(
  *   there, the source went away and the permission did not: that is `device-lost`.
  * - **`error` → `crash`.** `PartEndReason` has no "the writer failed" member, and
  *   `crash` is what it means: this part ended because the thing writing it stopped.
- *   `disk-full` would be a guess at a cause we have not measured, and §7.2's disk
- *   monitor — which would know — is not built yet.
+ *   It is deliberately *not* `disk-full` even now that §7.2's monitor exists: a write
+ *   that failed is a guess at a cause, and the one case where the disk really was the
+ *   cause is the case the monitor got to first.
  * - **A missing report → `crash`.** The capture page never answered; whatever
  *   happened to it, the recording did not end the way the user asked.
+ * - **`stopped`, with a `stoppedBecause` → that reason.** This is the branch that
+ *   finally produces `PartEndReason`'s `disk-full`, and it has to come before the
+ *   clean-stop answer rather than after it. §7.2's monitor stops the recording
+ *   through the ordinary `stop()` — that is what makes the file good — so what the
+ *   capture page reports is an ordinary `reason: 'stopped'`, indistinguishable from
+ *   the user pressing the button. Only main knows the difference, and
+ *   {@link Active.stopReason} is where it wrote it down at the moment it decided.
  *
- * `screenStillGranted` is passed rather than read here so this stays a pure function
- * over the two facts it decides between, and so the test can exercise both branches
- * without a TCC database.
+ * `screenStillGranted` and `stoppedBecause` are passed rather than read here so this
+ * stays a pure function over the facts it decides between, and so the test can
+ * exercise every branch without a TCC database or a full volume.
  */
 function endReasonFor(
   report: CaptureEndReport | null,
   screenStillGranted: boolean,
-): 'permission-revoked' | 'device-lost' | 'crash' | null {
+  stoppedBecause: PartEndReason | null,
+): PartEndReason | null {
   if (report === null) return 'crash';
-  if (report.reason === 'stopped') return null;
+  if (report.reason === 'stopped') return stoppedBecause;
   if (report.reason !== 'source-ended') return 'crash';
   return screenStillGranted ? 'device-lost' : 'permission-revoked';
 }

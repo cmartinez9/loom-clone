@@ -27,6 +27,7 @@ import {
   type ExportSettingsOverride,
   type OpenedProject,
   type RecordingSummary,
+  type RecoveryReport,
 } from '@loom/ipc';
 import { TRACK_KEYS, isEditOp, type TrackKey } from '@loom/format';
 import type { ProjectStore } from './project-store.ts';
@@ -38,6 +39,15 @@ export interface IpcContext {
   appVersion: string;
   /** Absent only in tests that exercise the phase-0 handlers alone. */
   exports?: ExportSession;
+  /**
+   * What this launch's crash-recovery pass found (§7.1 step 5).
+   *
+   * A **function**, not the array, and registered before the pass has run: the
+   * handler is installed at `app.whenReady()` and `recoverOnLaunch` finishes later
+   * in the same startup, so a snapshot taken here would be permanently empty. Absent
+   * only in tests that predate the pass.
+   */
+  recovery?: () => RecoveryReport[];
 }
 
 class BadRequestError extends Error {
@@ -141,7 +151,7 @@ function requireExportSettings(value: unknown): ExportSettingsOverride {
 
 /** Register every handler. Call once, after `app.whenReady()`. */
 export function registerIpc(context: IpcContext): void {
-  const { store, appVersion } = context;
+  const { store, appVersion, recovery } = context;
 
   ipcMain.handle(CHANNEL.appInfo, (): AppInfo => {
     return {
@@ -175,6 +185,11 @@ export function registerIpc(context: IpcContext): void {
   ipcMain.handle(CHANNEL.libraryDelete, async (_event: IpcMainInvokeEvent, rawId: unknown) => {
     await store.trash(requireId(rawId));
   });
+
+  // §7.1 step 5. A pull rather than a push, because the pass that produces this runs
+  // before any window exists — see `LibraryApi.recovery`. Empty on every launch that
+  // did not crash, and empty rather than absent when the pass itself is not wired.
+  ipcMain.handle(CHANNEL.libraryRecovery, (): RecoveryReport[] => recovery?.() ?? []);
 
   ipcMain.handle(
     CHANNEL.projectOpen,

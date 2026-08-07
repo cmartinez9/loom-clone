@@ -15,7 +15,14 @@ import './library.css';
 import { formatBytes, formatDuration, formatRelativeDate, icon, mountIcons } from '@loom/design';
 import { RETENTION_COPY } from '@loom/format';
 import type { ProjectState, RecordingSummary } from '@loom/format';
-import type { ExportProgress, PreflightReport, RecorderStatus } from '@loom/ipc';
+import { DISK_COPY, RECOVERY_COPY } from '@loom/ipc';
+import type {
+  DiskReading,
+  ExportProgress,
+  PreflightReport,
+  RecorderStatus,
+  RecoveryReport,
+} from '@loom/ipc';
 import { describePermission } from '@loom/permissions';
 import { exportNotice } from './export-notice.ts';
 
@@ -28,6 +35,8 @@ const revealRootButton = must('reveal-root');
 const newRecordingButton = must('new-recording');
 const permissionsButton = must('permissions');
 const permBanner = must('perm-banner');
+const recoveryBanner = must('recovery-banner');
+const diskCapacity = must('disk-capacity');
 
 /** An element the page is required to contain; a missing one is a broken build. */
 function must(id: string): HTMLElement {
@@ -96,9 +105,28 @@ const STATE_CHIPS: Record<ProjectState, StateChip> = {
   failed: { label: 'Damaged', className: 'chip chip-accent' },
 };
 
+/**
+ * The line under a state chip, where the state alone is not the whole story.
+ *
+ * **Two of these described a recovery pass that does not work that way, and the
+ * correction is the point of them being here.** §7.1's repair runs **at launch**, in
+ * `RecorderSession.recoverOnLaunch`, before any window is shown — not when a
+ * recording is opened. So a bundle still saying `recording` when this window renders
+ * is one being captured right now, and one saying `needs-recovery` is one this
+ * launch's pass began and could not finish (`recoverBundle` writes that state before
+ * it repairs anything). The old copy — *"in progress when the app last closed"* and
+ * *"repaired … when opened"* — sent a user to double-click a recording in order to
+ * trigger something that had already happened, or already failed, and quietly
+ * contradicted the pulsing record dot beside it.
+ *
+ * Nothing here claims how much survives a crash. That number is measured per
+ * recording and said in {@link renderRecovery} out of the repair's own report; a
+ * fixed sentence about it here would be a second, unmeasured answer.
+ */
 const STATE_NOTES: Partial<Record<ProjectState, string>> = {
-  recording: 'A recording was in progress when the app last closed.',
-  'needs-recovery': 'This will be repaired and truncated to the last complete frame when opened.',
+  recording: 'Being captured right now.',
+  'needs-recovery':
+    'Repair runs when the app starts. This one did not finish — the next launch will try again.',
   // The same words the export sheet warned with, after the fact rather than before —
   // one source, so the promise and the outcome cannot be phrased differently.
   exported: RETENTION_COPY.exported,
@@ -541,27 +569,133 @@ function messageOf(error: unknown): string {
  * rather than no recording, and the captain's decision is explicit that declining them
  * must leave a working recorder — a permanent nag about them would be arguing with
  * an answer the user already gave.
+ *
+ * **§7.2's disk refusal shares the banner and not the button.** It is the other thing
+ * that stops a recording starting, so it belongs where a user already looks to find
+ * out why — but the fix is deleting files rather than pressing Allow, so it does not
+ * bring "Open setup" with it. The sentence is `DISK_COPY.refusal`, main's own words
+ * for the refusal it will throw, so the warning here and the error the Record button
+ * would produce cannot disagree.
  */
 function renderPreflight(preflight: PreflightReport): void {
-  if (preflight.blocking.length === 0) {
-    permBanner.hidden = true;
-    permBanner.replaceChildren();
+  renderCapacity(preflight.disk);
+
+  // Two states, three branches. `blocking` is empty exactly when the one required
+  // grant is held, so a preflight that is not ready with nothing blocking is the
+  // disk and can only be the disk.
+  const diskRefused = !preflight.ready && preflight.blocking.length === 0;
+  if (diskRefused) {
+    const text = document.createElement('p');
+    text.textContent = DISK_COPY.refusal(preflight.disk);
+    permBanner.replaceChildren(iconSpan('alert', 17), text);
+    permBanner.hidden = false;
     return;
   }
 
-  const text = document.createElement('p');
-  text.textContent = preflight.blocking
-    .map((kind) => describePermission(kind, preflight.report.statuses[kind]))
-    .join(' ');
+  if (preflight.blocking.length > 0) {
+    const text = document.createElement('p');
+    text.textContent = preflight.blocking
+      .map((kind) => describePermission(kind, preflight.report.statuses[kind]))
+      .join(' ');
+    const open = button('Open setup', 'btn btn-sm');
+    open.prepend(iconSpan('lock', 14));
+    open.addEventListener('click', () => {
+      loom.setup.open();
+    });
+    permBanner.replaceChildren(iconSpan('alert', 17), text, open);
+    permBanner.hidden = false;
+    return;
+  }
 
-  const open = button('Open setup', 'btn btn-sm');
-  open.prepend(iconSpan('lock', 14));
-  open.addEventListener('click', () => {
-    loom.setup.open();
-  });
+  permBanner.hidden = true;
+  permBanner.replaceChildren();
+}
 
-  permBanner.replaceChildren(iconSpan('alert', 17), text, open);
-  permBanner.hidden = false;
+/**
+ * §7.2's *"Show estimated capacity: '≈ 42 min available'"*, which until now was
+ * written and never rendered.
+ *
+ * The words are `DISK_COPY.capacity` verbatim rather than a number re-derived here:
+ * main measures the volume, `@loom/ipc` decides what the measurement means, and a
+ * second arithmetic in a renderer is how the masthead and the HUD's banner come to
+ * say different things about one disk. Provenance rides along in that sentence —
+ * "at what your recordings have averaged" against "at a typical recording's size" —
+ * because §5.6 measured a 35× spread and the second of those is somebody else's
+ * screen.
+ *
+ * A reading that could not be taken shows nothing at all. `DISK_COPY.capacity` has a
+ * sentence for it, but a permanent "free space could not be measured" on the masthead
+ * is a fault report about an instrument, and §7.2's monitor is explicitly an accessory.
+ */
+function renderCapacity(disk: DiskReading): void {
+  if (disk.capacitySec === null) {
+    diskCapacity.hidden = true;
+    diskCapacity.textContent = '';
+    return;
+  }
+  diskCapacity.textContent = DISK_COPY.capacity(disk);
+  diskCapacity.hidden = false;
+}
+
+// --------------------------------------------------------------- recovery
+
+/**
+ * §7.1 step 5, finally on a screen: *"Show the user … Never silently discard, never
+ * silently pretend it was clean."*
+ *
+ * Recovery runs at launch and, until this, reported only to a console — so a user
+ * whose app was killed mid-recording came back to a library in which the repaired
+ * recording looked exactly like every other recording. That is the *"silently
+ * pretend it was clean"* half of §7.1's sentence, reached by omission.
+ *
+ * **Every number is the repair's own.** `RECOVERY_COPY` reads `recoveredSec`,
+ * `frameCount` and `truncatedBytes` off the {@link RecoveryReport}
+ * `ProjectStore.recoverBundle` produced by scanning the bytes that survived; nothing
+ * here states a guarantee. That matters because this project's guarantee is
+ * frame-level — the fragment writer holds one sample — and a fixed "up to a second
+ * was lost" would be describing a design that was superseded.
+ *
+ * It stays until the window is closed. There is no dismiss: the notice is about
+ * something that happened to the user's footage, it is one banner, and a user who
+ * reloads to check what it said should find it still there.
+ */
+function renderRecovery(reports: readonly RecoveryReport[]): void {
+  if (reports.length === 0) {
+    recoveryBanner.hidden = true;
+    recoveryBanner.replaceChildren();
+    return;
+  }
+
+  const body = document.createElement('div');
+  body.className = 'recovery-body';
+
+  const heading = document.createElement('p');
+  heading.className = 'recovery-heading';
+  heading.textContent = RECOVERY_COPY.heading(reports);
+  body.append(heading);
+
+  for (const report of reports) {
+    const line = document.createElement('p');
+    line.textContent = report.recovered
+      ? RECOVERY_COPY.recovered(report)
+      : RECOVERY_COPY.failed(report);
+    body.append(line);
+  }
+
+  recoveryBanner.replaceChildren(iconSpan('restart', 17), body);
+  recoveryBanner.hidden = false;
+}
+
+async function refreshRecovery(): Promise<void> {
+  try {
+    renderRecovery(await loom.library.recovery());
+  } catch (error) {
+    // Asked once, at load. A pass whose result could not be fetched is not a claim
+    // this window may invent one for — the alternative to saying nothing here is
+    // saying something wrong about somebody's footage.
+    console.error('[library] the recovery report could not be read:', error);
+    recoveryBanner.hidden = true;
+  }
 }
 
 async function refreshPermissions(): Promise<void> {
@@ -572,6 +706,9 @@ async function refreshPermissions(): Promise<void> {
     // claiming one would send the user to a screen that has nothing to fix.
     console.error('[library] preflight failed:', error);
     permBanner.hidden = true;
+    // Including the estimate: a stale "≈ 42 min available" beside a preflight that
+    // could not be run is a number nothing currently stands behind.
+    diskCapacity.hidden = true;
   }
 }
 
@@ -635,6 +772,10 @@ async function start(): Promise<void> {
 
   await refresh();
   await refreshPermissions();
+  // Last, and once: §7.1's pass finished before this window was created, so there is
+  // nothing to keep up with — and it goes after the list so the banner appears over
+  // a library that already shows the recording it is talking about.
+  await refreshRecovery();
 }
 
 void start();

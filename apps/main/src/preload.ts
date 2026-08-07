@@ -53,6 +53,7 @@ import {
   type RecorderStatus,
   type RecordingId,
   type RecordingSummary,
+  type RecoveryReport,
   type SetupState,
   type StrokeMsg,
   type TrackKey,
@@ -109,6 +110,8 @@ const api: LoomApi = {
     },
     delete: (id: RecordingId): Promise<void> =>
       ipcRenderer.invoke(CHANNEL.libraryDelete, id) as Promise<void>,
+    recovery: (): Promise<RecoveryReport[]> =>
+      ipcRenderer.invoke(CHANNEL.libraryRecovery) as Promise<RecoveryReport[]>,
   },
 
   /**

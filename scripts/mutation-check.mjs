@@ -188,6 +188,22 @@ const EDL_CLIPS = 'packages/edl/test/clips.test.ts';
 const PREVIEW_LOOP = 'apps/renderer/test/preview-loop.test.ts';
 
 /**
+ * Phase 13's two safety surfaces.
+ *
+ * `PHASE13_DISK` is §7.2's gate — a real recording on a driven volume, stopping
+ * cleanly with a file AVFoundation remuxes. `PHASE13_RECOVERY` is §7.1 step 5's:
+ * the repair's own figures held for a window that is not open yet. `IPC_DISK` is the
+ * arithmetic and the sentences under both, which is where a threshold or a phrasing
+ * is broken without a recording being needed.
+ *
+ * None of the three can withhold — they measure files and strings rather than the
+ * machine — so nothing here goes in {@link WITHHOLDABLE_GUARDS}.
+ */
+const PHASE13_DISK = 'apps/main/test/phase13-disk.test.ts';
+const PHASE13_RECOVERY = 'apps/main/test/recovery-notice.test.ts';
+const IPC_DISK = 'packages/ipc/test/disk.test.ts';
+
+/**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
  * gate rests on, plus the tests that must notice.
  */
@@ -1563,6 +1579,214 @@ export const MUTATIONS = [
     find: 'export const EDGE_PX = 8;',
     replace: 'export const EDGE_PX = 0;',
     mustFail: [EDITOR_TRIM],
+  },
+
+  // ---- phase 13: §7.2's disk monitor and §7.1's recovery notice ---------------
+  {
+    name: 'the-disk-monitor-never-calls-the-stop',
+    breaks:
+      "§7.2's clean stop. The monitor keeps banding and keeps banner-ing and never " +
+      'reaches `stop()`, so the recording runs on until the volume is genuinely full ' +
+      'and the next `appendMediaChunk` hits `ENOSPC` — the half-written fragment the ' +
+      'whole section exists to avoid. This is the mutation the phase-13 gate is for: ' +
+      'it fails on a recording that never stopped, not on a threshold arithmetic.',
+    file: 'packages/ipc/src/index.ts',
+    find: "  return reading.level === 'critical';",
+    replace: '  return false;',
+    mustFail: [PHASE13_DISK, IPC_DISK],
+  },
+  {
+    name: 'the-disk-stop-is-not-recorded-as-one',
+    breaks:
+      "`PartEndReason`'s `disk-full`, which nothing produced before phase 13. §7.2's " +
+      'stop goes through the ordinary `stop()` — that is what makes the file good — ' +
+      'so the capture page reports an ordinary `reason: "stopped"` and only main ' +
+      'knows the difference. Dropping the reason it wrote down at the moment it ' +
+      'decided leaves a recording that ended early recorded as a clean stop, and a ' +
+      'user who looks at `recording.json` to find out why it ended learns nothing.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: "  if (report.reason === 'stopped') return stoppedBecause;",
+    replace: "  if (report.reason === 'stopped') return null;",
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-monitor-fails-the-recording-it-is-watching',
+    breaks:
+      'the accessory rule §7.3 gives audio and §7.4 gives the camera, applied to the ' +
+      'instrument: a volume that cannot be read must cost its own reading and nothing ' +
+      'else. Rethrowing turns a `statfs` that failed into an unhandled rejection out ' +
+      "of a timer, and makes §7.2's monitor a *new* way to lose footage installed by " +
+      'the thing meant to prevent one.',
+    file: 'apps/main/src/recorder/disk-monitor.ts',
+    find: "        console.error('[recorder] free space could not be read:', error);",
+    replace: '        throw error;',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-preflight-floor-is-not-enforced-at-the-start',
+    breaks:
+      '§7.2\'s *"refuse to start below 3 GB free"* where it is actually enforced. ' +
+      '`recorder.preflight` still reports the refusal, so a surface that asks still ' +
+      'shows it — but the Record button, a menu item and `smoke-capture.mjs` all walk ' +
+      'straight past it and begin a recording on a volume with two gigabytes left. A ' +
+      'refusal that lives only in the advice is not a refusal.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '    if (diskRefusesStart(reading)) {',
+    replace: '    if (false as boolean) {',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'a-full-disk-is-decided-from-the-rate-estimate',
+    breaks:
+      "§7.2's stop being on free bytes alone. The rate is the one input that can be " +
+      'wrong in the direction that lets a write fail — a recording of a still screen ' +
+      'measures 4 MB/min and would report hours of headroom on 200 MB — so banding ' +
+      'the stop on headroom instead of on bytes is exactly how `ENOSPC` gets reached ' +
+      'with the monitor reporting everything is fine.',
+    file: 'packages/ipc/src/index.ts',
+    find: '    space.freeBytes < DISK_THRESHOLDS.stopBytes',
+    replace: '    capacitySec < 0',
+    mustFail: [IPC_DISK, PHASE13_DISK],
+  },
+  {
+    name: 'the-capacity-estimate-is-always-the-research-constant',
+    breaks:
+      "the estimate being *this user's*. §5.6 measured a 35× spread between an idle " +
+      'screen and full-screen animation, so 76 MB/min is a figure for content that is ' +
+      'not theirs — and `CaptureRate.source` is what stops the fallback being reported ' +
+      'as a measurement. With this, "≈ 42 min available" is stated with the same ' +
+      'confidence whether or not anything measured it.',
+    file: 'packages/ipc/src/index.ts',
+    find: "  return { bytesPerSec: bytes / seconds, source: 'measured', sampleCount };",
+    replace:
+      '  return {\n' +
+      '    bytesPerSec: REFERENCE_CAPTURE_RATE_BYTES_PER_SEC,\n' +
+      "    source: 'reference',\n" +
+      '    sampleCount,\n' +
+      '  };',
+    mustFail: [IPC_DISK],
+  },
+  {
+    name: 'the-recovery-report-is-dropped-after-the-pass',
+    breaks:
+      '§7.1 step 5 reaching anybody. The repair still runs and still logs to a console ' +
+      'the user does not have; what goes is the only thing that survives to the moment ' +
+      'a window exists to ask. The library then shows a repaired recording looking ' +
+      'exactly like every other recording, which is *"silently pretend it was clean"* ' +
+      'arrived at by omission.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '    this.recovery = reports;\n    return reports;',
+    replace: '    return reports;',
+    mustFail: [PHASE13_RECOVERY],
+  },
+  {
+    name: 'the-recovery-notice-claims-a-fixed-loss-window',
+    breaks:
+      "the recovery sentence being measured. This project's crash guarantee is " +
+      'frame-level — the fragment writer holds one sample — and a sentence claiming a ' +
+      'fixed window describes the design the report sketched rather than the one that ' +
+      'shipped. A stale string of exactly this kind has already had to be corrected ' +
+      'here once, which is why both the copy test and the recovery test refuse one.',
+    file: 'packages/ipc/src/index.ts',
+    find:
+      '    const kept =\n' +
+      '      `“${report.name}” was repaired: ${formatClock(report.recoveredSec)} and ` +\n' +
+      "      `${report.frameCount.toLocaleString('en-US')} frames were kept`;",
+    replace:
+      '    const kept =\n' +
+      '      `“${report.name}” was repaired: up to one second was lost, and ` +\n' +
+      "      `${report.frameCount.toLocaleString('en-US')} frames were kept`;",
+    mustFail: [IPC_DISK, PHASE13_RECOVERY],
+  },
+  {
+    name: 'the-recovery-heading-counts-recordings-it-could-not-repair',
+    breaks:
+      '§7.1 step 5\'s *"never silently pretend it was clean"* on the one surface built ' +
+      'to keep it. `recoverOnLaunch` reports every crashed bundle it touched, repaired ' +
+      'or not, so a headline counting the *reports* puts "A recording was recovered ' +
+      'after an unexpected quit" directly above "could not be repaired: …". That is ' +
+      'the app claiming an outcome it did not reach, phrased kindly.',
+    file: 'packages/ipc/src/index.ts',
+    find: '    const repaired = reports.filter((report) => report.recovered).length;',
+    replace: '    const repaired = reports.length;',
+    mustFail: [IPC_DISK],
+  },
+  {
+    name: 'a-stalled-disk-read-switches-the-monitor-off',
+    breaks:
+      "§7.2's monitor, silently, under exactly the condition it exists for. The read " +
+      'is a `statfs` against the volume being watched *because* that volume is in ' +
+      'trouble; without a deadline on it one read that never settles holds the ' +
+      'in-flight guard for good, so every later tick returns immediately — no ' +
+      'reading, no banner, no log line, and the clean stop unreachable while the disk ' +
+      'fills to `ENOSPC`. A safety net that switches itself off is worse than none, ' +
+      'because the user is told nothing and believes they are covered.',
+    file: 'apps/main/src/recorder/disk-monitor.ts',
+    find: '    const answer = await Promise.race([work(), deadline]);',
+    replace: '    const answer = await work();',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-first-seconds-of-a-recording-ignore-the-users-own-library',
+    breaks:
+      "§7.2's capacity estimate being a measurement for the first two seconds of every " +
+      'recording. Below `MEASURED_RATE_FLOOR_SEC` the recording has nothing of its own ' +
+      "to divide, and what should answer is the user's own finished recordings — §5.6 " +
+      'measured a 35× spread, so the research constant there is a sentence about ' +
+      "somebody else's screen, followed by the estimate jumping an order of magnitude " +
+      'once the recording measures itself.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '      return this.libraryRate ?? REFERENCE_RATE;',
+    replace: '      return REFERENCE_RATE;',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'abandoned-disk-reads-pile-up-on-the-threadpool',
+    breaks:
+      'the capture spine, through the instrument that is supposed to protect it. A read ' +
+      'that missed its deadline is *abandoned* and not cancelled — nothing in Node can ' +
+      'cancel an `fs` request — so without the single-flight guard a stalled volume ' +
+      "parks one more request on libuv's four-thread pool every 2 s. `ProjectStore`'s " +
+      'media writes are on that pool, so `appendMediaChunk` ends up queued behind the ' +
+      "monitor's dead reads: §7.2's accessory slowing the recording it is watching.",
+    file: 'apps/main/src/recorder/disk-monitor.ts',
+    find: '    if (this.pending !== null) return this.pending;',
+    replace: '    this.pending = null;',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-library-walk-is-awaited-before-the-recording-starts',
+    breaks:
+      "the Record button, on exactly the volume §7.2's monitor exists for. The capacity " +
+      "estimate's measurement is `store.list()` — `readdir` and `stat` over every bundle " +
+      '— and those hang on a wedged volume just as `statfs` does. Awaited on the start ' +
+      'path it re-creates, one line above the deadline that closed it, a `start()` that ' +
+      'never returns: no recording, no message, and a user who believes they pressed ' +
+      'record. A library that cannot be measured may cost the provenance of a number ' +
+      'and nothing else.',
+    file: 'apps/main/src/recorder/session.ts',
+    find: '    void this.measureLibrary();',
+    replace: '    await this.measureLibrary();',
+    mustFail: [PHASE13_DISK],
+  },
+  {
+    name: 'the-preflight-reading-waits-on-the-volume-for-ever',
+    breaks:
+      "both of this phase's safety surfaces at once, on the one disk path a window " +
+      '*awaits*. An unbounded `statfs` in `readDiskForPreflight` is not a missing ' +
+      'reading but a reply that never comes: `loom.recorder.preflight()` never ' +
+      'resolves, `refreshPermissions()` never returns — its `try`/`catch` covers ' +
+      'throws, not hangs — and the library awaits it ahead of `refreshRecovery()`, so ' +
+      "§7.1's recovery banner and §7.2's capacity line both fail to render with " +
+      'nothing in the log. The stalled-read defect, one process further out.',
+    file: 'apps/main/src/disk.ts',
+    find:
+      '  return readSpaceBeforeDeadline(\n' +
+      '    () => volumeReadFor(store).read(),\n' +
+      '    diskReadDeadlineMs(DISK_THRESHOLDS.pollIntervalMs),\n' +
+      '  );',
+    replace: '  return store.diskSpace();',
+    mustFail: [PHASE13_DISK],
   },
 ];
 
