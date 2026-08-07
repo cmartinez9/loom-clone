@@ -148,11 +148,19 @@ export function manualZoomTrackOf(doc: EditDocument): Track | null {
 export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
   const track = manualZoomTrackOf(doc);
   if (track === null) return [];
+  const windows = windowsOf(track);
   const amountKeys = track.channels['amount']?.keys ?? [];
   const centerKeys = track.channels['center']?.keys ?? [];
   const out: ZoomRegion[] = [];
-  track.activeRanges.forEach((range, index) => {
+  windows.forEach((range, index) => {
     const [windowStart, windowEnd] = range;
+    // Plain window membership, where every *writer* below asks {@link ownKeyIndexes},
+    // which additionally drops a key two touching windows would both claim. The
+    // asymmetry is deliberate and one-directional: a reader that showed a seam key in
+    // both regions is cosmetic, and a writer that moved or deleted one on behalf of a
+    // region that may not own it is not. Touching windows need a float coincidence
+    // (`placeZoomOps` refuses an overlap and adds `segmentSettleTailSec` to every end),
+    // so nothing observed has reached it.
     const inside = amountKeys.filter((key) => insideWindow(key.t, windowStart, windowEnd));
     if (inside.length < 2) return;
     const startSec = inside[0]?.t ?? windowStart;
@@ -165,7 +173,10 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
       const v = typeof key.v === 'number' ? key.v : (key.v[0] ?? MIN_ZOOM_AMOUNT);
       if (v > amount) amount = v;
     }
-    const center = regionCenter(centerKeys, { startSec, endSec, windowStart, windowEnd });
+    const center = regionCenter(centerKeys, ownKeyIndexes(centerKeys, windows, index), {
+      startSec,
+      endSec,
+    });
     out.push({ index, startSec, endSec, windowEndSec: windowEnd, amount, center });
   });
   return out;
@@ -209,43 +220,103 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
  * between them), so on a track this editor wrote the user's key stays strictly between
  * the two identity keys however far either end is dragged.
  */
-function regionCenter(keys: readonly Keyframe[], region: RegionExtent): Vec2 {
-  const value = keys[regionCentreKeyIndex(keys, region)]?.v;
+function regionCenter(
+  keys: readonly Keyframe[],
+  own: readonly number[],
+  extent: RegionExtent,
+): Vec2 {
+  const value = keys[regionCentreKeyIndex(keys, regionKeyRoles(keys, own, extent), extent)]?.v;
   if (!Array.isArray(value) || value.length < 2) return [0.5, 0.5];
   return [value[0] ?? 0.5, value[1] ?? 0.5];
 }
 
-/** The four numbers a reader and a writer both need to talk about one region. */
+/** Where one region begins and ends — the two numbers every reader here needs. */
 interface RegionExtent {
   startSec: Seconds;
   endSec: Seconds;
-  windowStart: number;
-  windowEnd: number;
+}
+
+/**
+ * What each of a region's own keys *is*, in one channel: the key that carries its
+ * start, the key that carries its end, and the interior the user placed.
+ *
+ * ## The one answer, because three derived proxies each cost a defect
+ *
+ * Identity in this file has been inferred three times and corrupted the user's work
+ * three times: the framing key read as the middle of a filtered list; `amount`'s
+ * boundaries read as first-and-last of an array; `center`'s boundaries read by
+ * time-matching against the **`amount`** channel's extent, so dragging an `amount`
+ * ramp end left a stale `center` key that the next edit counted as interior and dragged
+ * the whole extent back over. Every one was a position or another channel standing in
+ * for a fact.
+ *
+ * So this is the fact, asked once and read by everything: **a key carries the region's
+ * start when it is the region's own outermost key on that side _and_ it lies at or
+ * outside where the region begins.** Membership is the region's own `activeRanges`
+ * window ({@link ownKeyIndexes}); the extent is the region's own `startSec`/`endSec`.
+ * Position alone is never enough and that is the half the qualification adds: delete a
+ * region's ramp-in `center` key and its outermost remaining key is the *framing* key,
+ * which sits strictly inside — so it is interior, it keeps its time, and a start edit
+ * does not drag the user's framing to the region's edge.
+ *
+ * Both channels ask this, and so do {@link interiorKeyTimes},
+ * {@link extentAroundOwnKeys}, {@link regionCentreKeyIndex} and {@link patchRegion}.
+ * A property split across two copies of a condition has no single place to be right.
+ */
+interface RegionKeyRoles {
+  /** Index into the channel's keys of the key carrying the region's start, or `-1`. */
+  startAt: number;
+  /** Index into the channel's keys of the key carrying the region's end, or `-1`. */
+  endAt: number;
+  /** The region's own keys that carry neither end. Times and values are the user's. */
+  interior: number[];
+}
+
+function regionKeyRoles(
+  keys: readonly Keyframe[],
+  own: readonly number[],
+  extent: RegionExtent,
+): RegionKeyRoles {
+  const first = own[0];
+  const last = own[own.length - 1];
+  const firstKey = first === undefined ? undefined : keys[first];
+  const lastKey = last === undefined ? undefined : keys[last];
+  const startAt =
+    first !== undefined && firstKey !== undefined && firstKey.t <= extent.startSec + WINDOW_EPS
+      ? first
+      : -1;
+  const endAt =
+    last !== undefined && lastKey !== undefined && lastKey.t >= extent.endSec - WINDOW_EPS
+      ? last
+      : -1;
+  return { startAt, endAt, interior: own.filter((at) => at !== startAt && at !== endAt) };
 }
 
 /**
  * *Which* key {@link regionCenter} reads, as an index — so the writer can rewrite
  * exactly the key the reader will read back and nothing else.
  *
- * One predicate, both directions. `-1` when the region has no centre of its own left.
- * Two copies of "which key is the framing" is the shape {@link regionCenter}'s own
- * history warns about: a property split across two copies of a condition has no single
- * place to be right.
+ * The candidates are the region's **interior** keys, which is {@link regionKeyRoles}'s
+ * answer rather than a second opinion about it: a key that carries an end is not a
+ * framing key, and one that does not is a candidate however far either end was dragged.
+ * `-1` when the region has no centre of its own left.
  */
-function regionCentreKeyIndex(keys: readonly Keyframe[], region: RegionExtent): number {
-  const holdStart = region.startSec + ZOOM_RAMP_SEC;
+function regionCentreKeyIndex(
+  keys: readonly Keyframe[],
+  roles: RegionKeyRoles,
+  extent: RegionExtent,
+): number {
+  const holdStart = extent.startSec + ZOOM_RAMP_SEC;
   let best = -1;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < keys.length; i++) {
-    const key = keys[i];
+  for (const at of roles.interior) {
+    const key = keys[at];
     if (key === undefined) continue;
     const value = key.v;
     if (!Array.isArray(value) || value.length < 2) continue;
-    if (!insideWindow(key.t, region.windowStart, region.windowEnd)) continue;
-    if (isAt(key.t, region.startSec) || isAt(key.t, region.endSec)) continue;
     const distance = Math.abs(key.t - holdStart);
     if (distance < bestDistance) {
-      best = i;
+      best = at;
       bestDistance = distance;
     }
   }
@@ -360,7 +431,7 @@ export function updateZoomOps(
 
   const asked = clampRegion({ ...asInput(current), ...patch }, sourceDurationSec);
   if (asked === null) return null;
-  const wanted = extentAroundOwnKeys(track, index, current, asked, sourceDurationSec);
+  const wanted = extentAroundOwnKeys(track, index, current, asked);
   if (wanted === null) return null;
 
   const tail = segmentSettleTailSec(DEFAULT_SPRING);
@@ -699,11 +770,6 @@ function insideWindow(t: number, low: number, high: number): boolean {
   return t >= low - WINDOW_EPS && t <= high;
 }
 
-/** Is this key at that instant, to the tolerance the windows are read with? */
-function isAt(t: number, at: number): boolean {
-  return Math.abs(t - at) <= WINDOW_EPS;
-}
-
 function windowsOf(track: Track | null): [number, number][] {
   return (track?.activeRanges ?? []).map((range) => [range[0], range[1]] as [number, number]);
 }
@@ -737,30 +803,27 @@ function ownKeyIndexes(
   return out;
 }
 
+/** The two channels a manual zoom region lives on, so neither is ever handled alone. */
+const ZOOM_CHANNELS = ['amount', 'center'] as const;
+
 /**
- * The times of a region's own keys that are neither of its two boundaries.
+ * The times of a region's own interior keys, across **both** channels.
  *
- * What a start/end edit may not slide over. `amount`'s boundaries are its first and
- * last key in the window — §6.5's ramp ends — and `center`'s are the keys sitting on
- * the region's `startSec` and `endSec`; everything else is the user's hold, and its
- * times are theirs.
+ * What a start/end edit may not slide over. One classifier answers it for each channel
+ * ({@link regionKeyRoles}) rather than each channel having its own idea of what a
+ * boundary is — which is the divergence that let an `amount` ramp end be dragged and
+ * then dragged back by the next edit.
  */
 function interiorKeyTimes(track: Track, index: number, current: ZoomRegion): number[] {
   const windows = windowsOf(track);
   const out: number[] = [];
-  const amountKeys = track.channels['amount']?.keys ?? [];
-  const ownAmount = ownKeyIndexes(amountKeys, windows, index);
-  for (let i = 1; i < ownAmount.length - 1; i++) {
-    const at = ownAmount[i];
-    const key = at === undefined ? undefined : amountKeys[at];
-    if (key !== undefined) out.push(key.t);
-  }
-  const centerKeys = track.channels['center']?.keys ?? [];
-  for (const at of ownKeyIndexes(centerKeys, windows, index)) {
-    const key = centerKeys[at];
-    if (key === undefined) continue;
-    if (isAt(key.t, current.startSec) || isAt(key.t, current.endSec)) continue;
-    out.push(key.t);
+  for (const channel of ZOOM_CHANNELS) {
+    const keys = track.channels[channel]?.keys ?? [];
+    const roles = regionKeyRoles(keys, ownKeyIndexes(keys, windows, index), current);
+    for (const at of roles.interior) {
+      const key = keys[at];
+      if (key !== undefined) out.push(key.t);
+    }
   }
   return out;
 }
@@ -775,15 +838,22 @@ function interiorKeyTimes(track: Track, index: number, current: ZoomRegion): num
  * the window that owns it. The alternative — dragging the interior keys along — is the
  * defect this whole path exists to stop.
  *
- * `null` when there is nothing legal left, which needs a region whose keys are packed
- * closer than {@link KEY_GAP_SEC} to the end of the recording.
+ * **It does not re-apply the recording's own bounds, and that is the point.**
+ * {@link clampRegion} holds what the *user asked for* inside the recording; this holds
+ * the result off keys that are already on disk. A key can sit past `sourceDurationSec`
+ * — {@link keyBounds} bounds a key by its `activeRanges` window, and a window runs
+ * `segmentSettleTailSec` past the region's end — so refusing on that would make every
+ * region-level control (amount, centre, start, end alike) silently do nothing for the
+ * rest of that recording's life, with nothing on screen to say why. A region that
+ * reaches a key already there is the lesser answer by a distance.
+ *
+ * `null` only when there is no ordered extent left at all.
  */
 function extentAroundOwnKeys(
   track: Track,
   index: number,
   current: ZoomRegion,
   asked: ZoomRegionInput,
-  sourceDurationSec: Seconds,
 ): ZoomRegionInput | null {
   const interior = interiorKeyTimes(track, index, current);
   let startSec = asked.startSec;
@@ -792,8 +862,8 @@ function extentAroundOwnKeys(
     startSec = Math.min(startSec, t - KEY_GAP_SEC);
     endSec = Math.max(endSec, t + KEY_GAP_SEC);
   }
-  if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return null;
-  if (startSec < 0 || endSec > Math.max(0, sourceDurationSec) || startSec >= endSec) return null;
+  startSec = Math.max(0, startSec);
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec >= endSec) return null;
   return { startSec, endSec, amount: asked.amount, center: asked.center };
 }
 
@@ -811,43 +881,30 @@ function patchRegion(
   wanted: ZoomRegionInput,
 ): Track | null {
   const windows = windowsOf(track);
-  const own = windows[index];
-  if (own === undefined) return null;
+  if (windows[index] === undefined) return null;
 
   const amountKeys = track.channels['amount']?.keys ?? [];
   const centerKeys = track.channels['center']?.keys ?? [];
   const ownAmount = ownKeyIndexes(amountKeys, windows, index);
-  const firstAmount = ownAmount[0];
-  const lastAmount = ownAmount[ownAmount.length - 1];
-  if (firstAmount === undefined || lastAmount === undefined || ownAmount.length < 2) return null;
+  if (ownAmount.length < 2) return null;
+  const amountRoles = regionKeyRoles(amountKeys, ownAmount, current);
+  const centerRoles = regionKeyRoles(
+    centerKeys,
+    ownKeyIndexes(centerKeys, windows, index),
+    current,
+  );
 
-  const amount = amountKeys.map((key) => ({ ...key }));
-  const rampIn = amount[firstAmount];
-  const rampOut = amount[lastAmount];
-  if (rampIn === undefined || rampOut === undefined) return null;
-  amount[firstAmount] = { ...rampIn, t: wanted.startSec };
-  amount[lastAmount] = { ...rampOut, t: wanted.endSec };
+  const amount = withExtent(amountKeys, amountRoles, wanted);
   // The hold, and only the hold: the two ramp ends are what returns the picture to
   // identity, so their values are not what "the amount" names.
-  for (const at of ownAmount.slice(1, -1)) {
+  for (const at of amountRoles.interior) {
     const key = amount[at];
     if (key === undefined) continue;
     amount[at] = { ...key, v: wanted.amount };
   }
 
-  const center = centerKeys.map((key) => ({ ...key }));
-  for (const at of ownKeyIndexes(centerKeys, windows, index)) {
-    const key = center[at];
-    if (key === undefined) continue;
-    if (isAt(key.t, current.startSec)) center[at] = { ...key, t: wanted.startSec };
-    else if (isAt(key.t, current.endSec)) center[at] = { ...key, t: wanted.endSec };
-  }
-  const framing = regionCentreKeyIndex(centerKeys, {
-    startSec: current.startSec,
-    endSec: current.endSec,
-    windowStart: own[0],
-    windowEnd: own[1],
-  });
+  const center = withExtent(centerKeys, centerRoles, wanted);
+  const framing = regionCentreKeyIndex(centerKeys, centerRoles, current);
   const framingKey = framing < 0 ? undefined : center[framing];
   if (framingKey !== undefined) {
     center[framing] = { ...framingKey, v: [wanted.center[0], wanted.center[1]] };
@@ -858,6 +915,27 @@ function patchRegion(
     at === index ? ([wanted.startSec, wanted.endSec + tail] as [number, number]) : window,
   );
   return assembleZoomTrack(nextWindows, amount, center);
+}
+
+/**
+ * One channel's keys with the region's extent moved onto the keys that carry it.
+ *
+ * Only the two named keys are touched. A channel that has no key carrying an end —
+ * the user deleted it, or dragged it inward so another key is now the region's own
+ * outermost one on that side — simply has nothing moved there, which is the honest
+ * answer and is what stops a start edit from dragging somebody's framing to the edge.
+ */
+function withExtent(
+  keys: readonly Keyframe[],
+  roles: RegionKeyRoles,
+  wanted: ZoomRegionInput,
+): Keyframe[] {
+  const next = keys.map((key) => ({ ...key }));
+  const startKey = roles.startAt < 0 ? undefined : next[roles.startAt];
+  if (startKey !== undefined) next[roles.startAt] = { ...startKey, t: wanted.startSec };
+  const endKey = roles.endAt < 0 ? undefined : next[roles.endAt];
+  if (endKey !== undefined) next[roles.endAt] = { ...endKey, t: wanted.endSec };
+  return next;
 }
 
 /**

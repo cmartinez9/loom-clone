@@ -837,7 +837,7 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Eighteen entries in `npm run verify:mutation`
+committed. Nineteen entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the ones worth
 knowing are the three whose guard is deliberately a unit test and **not** this gate.
 `an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
@@ -1061,7 +1061,41 @@ the same way rather than widening anything.
   document this editor did not write. `regionCentreKeyIndex` is that question asked
   once and read two ways — the reader takes the value, the writer rewrites that key and
   no other — because a property split across two copies of a condition has no single
-  place to be right.
+  place to be right. It is instance 1 of the entry below; read that one first.
+- **A derived proxy standing in for identity has now cost this file three defects, and
+  the rule is that identity is stated rather than inferred.** All three are the same
+  shape — something that _usually_ lines up with the fact was asked instead of the fact,
+  and each one silently corrupted the user's own work rather than failing:
+
+  1. a region's **framing key** read as the middle of a filtered list, so the moment the
+     set gained a member the identity ramp-out key was returned and the framing was
+     overwritten with the frame centre;
+  2. the **`amount` boundaries** read as first-and-last of an array, which is right until
+     a boundary key is deleted and the outermost survivor is somebody's hold;
+  3. the **`center` boundaries** read by time-matching against the **`amount`** channel's
+     extent — one channel read through another. Drag the ramp-in `amount` diamond from
+     10 to 10.5 and the `center` key still at 10 stops matching, is counted as interior,
+     and the next edit — an Amount-slider nudge, naming nothing about the extent — pulls
+     the region's start to 9.999. The drag is undone _and_ the region starts earlier than
+     it ever did. The same misclassification made a `center` key dragged into the settle
+     tail past `sourceDurationSec` refuse **every** region-level control from then on,
+     with nothing on screen to say why.
+
+  `regionKeyRoles` is the one answer all of it now asks — the reader of the framing key,
+  the reader of the interior times, the extent bound and the writer, for **both**
+  channels. It states the fact in two halves that both have to hold: membership is the
+  region's own `activeRanges` window (`ownKeyIndexes`), and a key carries an end when it
+  is the region's own outermost key on that side **and** lies at or outside where the
+  region begins or ends. The qualification is the half that position alone cannot give:
+  delete a region's ramp-in `center` key and its outermost survivor sits strictly inside,
+  so it is interior, keeps its time, and a start edit does not drag the framing to the
+  edge. **`ZoomRegion.index` is a fourth candidate and is left as it is on purpose** — it
+  is a position in a time-sorted `activeRanges` and has already caused one defect (the
+  entry above on selecting `length - 1`), fixed at the call sites rather than at the
+  representation; giving a region a durable id of its own is a document-format change,
+  not a patch, so it is recorded here rather than done quietly. Firstmate's call, not the
+  captain's.
+
 - **A region-level edit patches the keys that are there; it never re-derives them.**
   The read-then-regenerate shape the two entries above each hit once is the class
   itself: a region is _read out of_ keys the user may drag, retime and revalue, so
@@ -1071,12 +1105,19 @@ the same way rather than widening anything.
   saying so, is how a feature stops being trusted. So each verb touches only what it
   names: amount rewrites the hold, centre rewrites the framing key, start and end move
   the boundary keys and the `activeRanges` entry, and remove takes one region's window
-  and its own keys and leaves the others alone. Two consequences worth expecting. A
+  and its own keys and leaves the others alone. Three consequences worth expecting. A
   region's extent is now held off its **own** interior keys (`extentAroundOwnKeys`) —
   `keyBounds` from the other side, because a boundary dragged past a hold key is a
   repeated `t` §2.6 refuses — so dragging a start later stops at the hold rather than
-  pushing it along. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
+  pushing it along. That function deliberately does **not** re-apply the recording's own
+  length: `clampRegion` holds what the _user asked for_ inside the recording, and a key
+  that is already past it (which `keyBounds` permits, since a window runs
+  `segmentSettleTailSec` past the region's end) must not turn every control into a
+  silent no-op. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
   a second region is _inserted_ beside the first's keys, not rebuilt with them.
+  Two registry entries hold the promise, one per half: one breaks a hand-set **value**
+  and one breaks a hand-dragged **time**, because a single entry that broke both would
+  leave whichever half its guard noticed second unproven.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —

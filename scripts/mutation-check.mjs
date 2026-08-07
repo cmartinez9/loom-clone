@@ -1989,25 +1989,46 @@ export const MUTATIONS = [
   {
     name: 'a-region-edit-discards-a-hand-edited-keyframe',
     breaks:
-      'the promise that a region-level edit changes only what it names. The keys on ' +
-      'the manual zoom track are the user’s — `isKeyEditable` says so, and both the ' +
-      'lane and the inspector let a person drag one and set its value — so a region ' +
-      'is *read out of* keys that may not be in the canonical layout at all. Amount ' +
-      'names the hold, which is the region’s interior `amount` keys; the two ramp ' +
-      'ends are what returns the picture to identity and their values are the user’s. ' +
-      'Writing the amount over all of them takes a hand-set ramp value with it, on ' +
-      'every region-level edit rather than only on an amount one, since each verb ' +
-      'sends the whole region.\n' +
-      '   The flow that reaches it is the ordinary one — lengthen a ramp by hand, ' +
-      'then nudge the Amount slider — and the loss is silent, which is the "your edit ' +
-      'was overwritten" shape §3.5 argues against one level out.\n' +
+      'the VALUE half of the promise that a region-level edit changes only what it ' +
+      'names. The keys on the manual zoom track are the user’s — `isKeyEditable` says ' +
+      'so, and both the lane and the inspector let a person drag one and set its ' +
+      'value — so a region is *read out of* keys that may not be in the canonical ' +
+      'layout at all. Amount names the hold, which is the region’s interior `amount` ' +
+      'keys; the two ramp ends are what returns the picture to identity and their ' +
+      'values are the user’s. Writing the amount over all of them takes a hand-set ' +
+      'ramp value with it, on every region-level edit rather than only on an amount ' +
+      'one, since each verb sends the whole region.\n' +
+      '   The TIME half is `a-region-edit-retimes-a-hand-dragged-keyframe`, and the ' +
+      'two are separate entries because they fail separately: one keeps every key ' +
+      'where the user put it and rewrites values it does not own, the other keeps ' +
+      'every value and moves a key. A single entry that broke both would leave ' +
+      'whichever half its guard noticed second unproven.\n' +
       '   Guarded by a unit test rather than by the phase-15 gate on purpose: this is ' +
       'arithmetic over a document, so nothing composited can take the reading away, ' +
       'and a gate-only guard would leave it unproven on every host that loses the ' +
       'WebGL context.',
     file: 'apps/renderer/src/editor/zoom.ts',
-    find: '  for (const at of ownAmount.slice(1, -1)) {',
+    find: '  for (const at of amountRoles.interior) {',
     replace: '  for (const at of ownAmount) {',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-region-edit-retimes-a-hand-dragged-keyframe',
+    breaks:
+      'the TIME half of the same promise, and it is the half the whole fix is named ' +
+      'for: *lengthen a ramp by hand, then nudge the Amount slider*. A region-level ' +
+      'edit moves the two keys that carry the region’s extent and **nothing else**, so ' +
+      'a key the user dragged keeps the time they gave it. Nudging every interior key ' +
+      'by a gap re-derives a layout the user had already decided — the document still ' +
+      'validates, `zoomRegionsOf` still reads the region back, and the only thing that ' +
+      'changed is that somebody’s hold moved, silently, on an edit that named the ' +
+      'amount.\n' +
+      '   It is a *valid* document on purpose: a mutation the writer refuses outright ' +
+      'is caught by any assertion at all, and would say nothing about whether the ' +
+      'guard can see a key that moved. The guard has to compare the time.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    amount[at] = { ...key, v: wanted.amount };',
+    replace: '    amount[at] = { ...key, v: wanted.amount, t: key.t - KEY_GAP_SEC };',
     mustFail: [EDITOR_ZOOM],
   },
   {
