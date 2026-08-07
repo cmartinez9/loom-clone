@@ -126,6 +126,10 @@ async function runProbe(): Promise<ControlsReport> {
         out,
         '--timeout',
         String(PROBE_TIMEOUT_MS),
+        // Chromium's own stderr, which is where a GPU process that restarted or ran out
+        // of host memory says so. Off by default on macOS, and the output is only ever
+        // *printed* when the run failed, so a passing gate is as quiet as it was.
+        '--enable-logging',
       ],
       {
         cwd: root,
@@ -143,14 +147,25 @@ async function runProbe(): Promise<ControlsReport> {
       });
     });
 
+    let report: ControlsReport;
     try {
-      return JSON.parse(await readFile(out, 'utf8')) as ControlsReport;
+      report = JSON.parse(await readFile(out, 'utf8')) as ControlsReport;
     } catch {
       throw new Error(
         `the phase-15 gate produced no report (electron exited ${String(exitCode)}).\n` +
           `--- electron output ---\n${output.slice(-8000)}`,
       );
     }
+    // A report that says the run failed is exactly when the *unreported* half is worth
+    // having, and until now it was discarded on this path: the electron output carries
+    // every `note()` in order, Chromium's own stderr, and the `child process gone` line
+    // above. The first CI failure of this gate was diagnosed without any of it, from an
+    // encoder stall and a bare "Script failed to execute" — so it is printed rather than
+    // thrown, which keeps the assertions' own messages the thing that fails the test.
+    if (!report.ok) {
+      console.log(`--- electron output ---\n${output.slice(-16000)}`);
+    }
+    return report;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

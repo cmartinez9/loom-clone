@@ -840,6 +840,30 @@ flag that writes a PNG beside each reading — the way to _look_ at this window,
 `scripts/screenshot.cjs` boots the real main process whose recordings root is
 `homedir()` with no override.
 
+**It is the only gate that drives the shipping `export` role, so it carries the same
+four Chromium switches the other three Electron gates do — and its first CI run is why
+they are there.** `test/gate/`, `test/golden/` and `test/export-golden/` have all along
+run with `disable-gpu-watchdog` and the three backgrounding switches; this harness
+shipped without them and the first run on a GitHub macOS host failed as _an export whose
+video encoder produced neither a chunk nor an error_ (§10.2's named symptom, from
+`ENCODE_STALL_TIMEOUT_MS`) followed by a bare _"Script failed to execute"_ several steps
+later. Those read as two defects and are one event: the export window's frames are
+`new VideoFrame(canvas)` off a GL canvas, so a software H.264 encoder produces nothing
+until the GPU hands those pixels back, and the editor's own context dies in the same
+instant — so the next `readPixels()` the probe asks for throws. The exposure is this
+gate's alone in two ways: the `export` role is `show: false` at 1x1 (§1.2), which is a
+renderer Chromium backgrounds by definition and then deschedules behind a preview loop
+compositing `edit.output.size` at rate; and nothing here is timed, so unlike phases 6 and
+8 neither switch can flatter a reading. **What the switches are not is a diagnosis of
+that particular run**: it was never reproduced — SwiftShader reproduces the _symptom_
+exactly and the switches do not fix that configuration, six sequential exports in one
+process are clean on this machine, and the runner's own evidence had been thrown away.
+That last part is closed: the harness notes `child-process-gone`/`render-process-gone`,
+and `runProbe` prints the electron output when the report says the run failed instead of
+only when the JSON will not parse. **No retry was added.** A relaunch keyed on anything
+weaker than phase 6's and phase 8's `contextLost` would be a retry around an acceptance
+gate, and this gate has no such reading to key one on.
+
 ## Sharp edges — the editor
 
 - **`StageUi`'s pointer→source mapping has to be refreshed every time the resolved

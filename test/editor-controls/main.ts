@@ -120,6 +120,38 @@ function parseArgs(argv: string[]): Args {
   };
 }
 
+// The same four switches `test/gate/main.ts`, `test/golden/main.ts` and
+// `test/export-golden/main.ts` carry, for the two reasons `AGENTS.md` already records
+// — and this run is the one with the *most* exposure to both, because it is the only
+// gate in the repo that drives the shipping `export` role rather than a harness page
+// of its own.
+//
+// **The GPU watchdog.** Chromium kills the GPU process when a call has not come back
+// inside its timeout, and every context in it goes with it. Here that is not one
+// window's problem: the export window's frames are `new VideoFrame(canvas)` off a GL
+// canvas, so a software H.264 encoder can only produce a chunk once the GPU has
+// handed those pixels back. A GPU process taken away therefore reads as an encoder
+// that produced **neither a chunk nor an error** — §10.2's named symptom, and exactly
+// what `ENCODE_STALL_TIMEOUT_MS` reported on the first CI run of this gate — while
+// the editor's context is lost in the same instant, so the next `readPixels()` the
+// probe asks for throws too. One event, both halves of the run.
+//
+// **Renderer backgrounding.** The `export` role is `show: false` at 1x1 (§1.2: a
+// hidden window per job), so Chromium considers it invisible and drops its process to
+// background priority — and on a CI runner there is no display, so the editor
+// qualifies as well. That is a job whose every frame needs a GPU readback, descheduled
+// behind a preview loop compositing `edit.output.size` at rate, on a paravirtual
+// device. `webPreferences.backgroundThrottling` does not cover it: that is Blink's
+// timer and rAF throttling, not the priority the OS scheduler reads.
+//
+// Nothing here is timed — §8's frame budget is `test/phase6-gate.test.ts`'s — so
+// neither switch can flatter a reading. What they buy is that a slow host reports the
+// pixels this gate exists to compare instead of taking the instrument away.
+app.commandLine.appendSwitch('disable-gpu-watchdog');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 const args = parseArgs(process.argv.slice(1));
 const notes: string[] = [];
 const readings: Reading[] = [];
@@ -898,6 +930,20 @@ async function runExport(
 // ---------------------------------------------------------------- the run
 
 registerLoomScheme();
+
+// A process this run depended on, gone — named where it happens rather than inferred
+// later from what stopped working. The GPU process is the one that matters: it serves
+// both the editor's context and the readback every `new VideoFrame(canvas)` needs, so
+// its death arrives at this gate as two unrelated-looking symptoms (an encoder that
+// produced neither a chunk nor an error, and a `readPixels` that throws) with nothing
+// in the report tying them together. Phase 8's harness watches the same event for the
+// same reason.
+app.on('child-process-gone', (_event, details) => {
+  note(`child process gone: ${details.type}/${details.serviceName ?? '-'} ${details.reason}`);
+});
+app.on('render-process-gone', (_event, _contents, details) => {
+  note(`render process gone: ${details.reason}`);
+});
 
 function loaded(window: BrowserWindow, what: string): Promise<void> {
   return new Promise<void>((resolveLoad, rejectLoad) => {
