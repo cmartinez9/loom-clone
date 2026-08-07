@@ -302,6 +302,15 @@ describe('tuning a zoom that is already there', () => {
  *
  * The consequence is asserted rather than the key list: the document still opens, and
  * `zoomRegionsOf` still reads the region back as what was asked for.
+ *
+ * ## And every test here asserts the thing that breaks, not the thing beside it
+ *
+ * A rule this block learned the hard way and the settle-tail describe below is the
+ * worked example of: its first version performed the exact drag that failed and then
+ * asserted only that the following edit *succeeded*, so it passed either way. Setting
+ * up a state a defect lives in and then measuring something adjacent to it reads as
+ * coverage and is not — so when a test hand-edits a key, it says afterwards that the
+ * key is still there.
  */
 describe('a region-level edit keeps the keys the user placed', () => {
   const FRAMED: [number, number] = [0.6, 0.4];
@@ -552,32 +561,119 @@ describe('a region-level edit keeps the keys the user placed', () => {
       region?.startSec,
       'the start was let past a key it would have collided with',
     ).toBeLessThan(kept[0] ?? 0);
+    // The fixture hand-set this value, so this test has to say it is still there —
+    // asserting only the bound would be the "adjacent to the property" shape the
+    // settle-tail block below is the worked example of.
+    FIXTURES[0]?.expectIntact(next, 'a start dragged past the hold');
   });
 
-  it('still edits a region whose own key was dragged past the end of the recording', () => {
-    // `keyBounds` bounds a key by its `activeRanges` window, and a window runs
-    // `segmentSettleTailSec` past the region's end — so the last `center` key of a
-    // region near the end of a recording can legally be dragged past
-    // `sourceDurationSec`. Counting that key as interior made every region-level
-    // control refuse for the rest of that recording's life, silently: no amount, no
-    // centre, no start, no end, and nothing on screen saying why.
-    const doc = place(empty(), { startSec: 55, endSec: 59.9, amount: 2, center: [0.5, 0.5] });
-    const centreKeys = zoomKeysOf(doc).filter((key) => key.channel === 'center');
-    const last = centreKeys[centreKeys.length - 1];
-    expect(last, 'the fixture has no ramp-out centre key').toBeDefined();
-    const beyond = (zoomRegionsOf(doc)[0]?.windowEndSec ?? 0) - KEY_GAP_SEC;
-    expect(beyond, 'the settle tail no longer reaches past the recording').toBeGreaterThan(
-      DURATION,
-    );
-    const dragged = apply(doc, last === undefined ? null : moveKeyOps(doc, last, beyond));
-    expect(
-      zoomKeysOf(dragged)
-        .filter((key) => key.channel === 'center')
-        .map((key) => key.t),
-    ).toContain(beyond);
+  /**
+   * The settle tail is somewhere a person can put a key, so it is somewhere an edit
+   * may not take one from.
+   *
+   * `activeRanges` runs `segmentSettleTailSec` past the region's end, the Zoom lane
+   * draws the band that far, and `keyBounds` bounds a key by the window — so the
+   * ramp-out `center` diamond can be dragged **into the tail**, and past
+   * `sourceDurationSec` when the region is near the end of the recording. That one
+   * gesture has cost two defects, and the second is why this block exists at all:
+   * counting the key as interior made every region-level control refuse for the rest of
+   * that recording's life, and then writing the extent over it unconditionally returned
+   * it to the region's end on the next Amount-slider nudge.
+   *
+   * **The rule this block is the worked example of**: a test that walks a user into a
+   * defect must assert the thing that breaks, not the thing beside it. The first
+   * version of this test performed exactly the drag below and then asserted only that
+   * the amount edit *succeeded* — so it passed whether or not the key it had just
+   * dragged survived, which is the shape it was written to catch.
+   */
+  describe('a key dragged into the settle tail', () => {
+    /** Far enough into region 1's own centre to be a framing nobody could mistake. */
+    const TAIL_FRAMED: [number, number] = [0.62, 0.38];
 
-    const next = apply(dragged, updateZoomOps(dragged, 0, { amount: 3 }, DURATION));
-    expect(zoomRegionsOf(next)[0]?.amount).toBeCloseTo(3, 6);
+    function centreTimes(document_: EditDocument): number[] {
+      return zoomKeysOf(document_)
+        .filter((key) => key.channel === 'center')
+        .map((key) => key.t);
+    }
+
+    /** Two regions, the later one's ramp-out centre key dragged into its own tail. */
+    function draggedIntoTail(): { doc: EditDocument; beyond: number } {
+      let doc = place(empty(), { startSec: 10, endSec: 18, amount: 2, center: [0.5, 0.5] });
+      doc = place(doc, { startSec: 55, endSec: 59.9, amount: 2, center: TAIL_FRAMED });
+      const centreKeys = zoomKeysOf(doc).filter((key) => key.channel === 'center');
+      const last = centreKeys[centreKeys.length - 1];
+      expect(last, 'the fixture has no ramp-out centre key').toBeDefined();
+      const beyond = (zoomRegionsOf(doc)[1]?.windowEndSec ?? 0) - KEY_GAP_SEC;
+      // Both preconditions, because the drag is only interesting where it lands past
+      // the region's own end *and* past the recording: the first is what the old
+      // unconditional write undid, the second is what the old interior bound refused.
+      expect(beyond, 'the drag no longer lands past the region’s end').toBeGreaterThan(59.9);
+      expect(beyond, 'the settle tail no longer reaches past the recording').toBeGreaterThan(
+        DURATION,
+      );
+      const dragged = apply(doc, last === undefined ? null : moveKeyOps(doc, last, beyond));
+      expect(centreTimes(dragged), 'the drag did not land').toContain(beyond);
+      return { doc: dragged, beyond };
+    }
+
+    const EDITS: { label: string; ops: (document_: EditDocument) => EditOp[] | null }[] = [
+      { label: 'AMOUNT', ops: (d) => updateZoomOps(d, 1, { amount: 3 }, DURATION) },
+      { label: 'CENTRE', ops: (d) => updateZoomOps(d, 1, { center: [0.4, 0.6] }, DURATION) },
+      { label: 'START', ops: (d) => updateZoomOps(d, 1, { startSec: 54 }, DURATION) },
+      { label: 'END', ops: (d) => updateZoomOps(d, 1, { endSec: 59.95 }, DURATION) },
+      { label: 'REMOVE the other region', ops: (d) => removeZoomOps(d, 0) },
+    ];
+
+    for (const edit of EDITS) {
+      it(`survives ${edit.label}`, () => {
+        const { doc, beyond } = draggedIntoTail();
+        const next = apply(doc, edit.ops(doc));
+        expect(centreTimes(next), `${edit.label} took the key back out of the tail`).toContain(
+          beyond,
+        );
+      });
+    }
+
+    it('still lets the region be edited at all, and reads back what was asked', () => {
+      // The other half, and the reason the extent bound stopped re-applying
+      // `sourceDurationSec`: a key legally past the end of the recording used to make
+      // every region-level control a silent no-op for the rest of that recording.
+      const { doc } = draggedIntoTail();
+      const next = apply(doc, updateZoomOps(doc, 1, { amount: 3 }, DURATION));
+      const region = zoomRegionsOf(next)[1];
+      expect(region?.amount).toBeCloseTo(3, 6);
+      expect(region?.startSec).toBeCloseTo(55, 6);
+      expect(region?.endSec).toBeCloseTo(59.9, 6);
+      expect(region?.center[0], 'the framing was overwritten').toBeCloseTo(TAIL_FRAMED[0], 6);
+      expect(region?.center[1], 'the framing was overwritten').toBeCloseTo(TAIL_FRAMED[1], 6);
+    });
+
+    it('is exactly invertible', () => {
+      const { doc } = draggedIntoTail();
+      const ops = updateZoomOps(doc, 1, { amount: 3 }, DURATION);
+      expect(roundTrip(doc, ops ?? [])).toEqual(withoutRevision(doc));
+    });
+
+    it('moves the key when leaving it would strand it outside the region', () => {
+      // The other half of the carrier rule, and what keeps it from being "never touch
+      // an outward-dragged key": pulled far enough in, the region no longer reaches the
+      // tail key, and a key owned by no region is the corruption `moveKeyOps` describes.
+      const { doc, beyond } = draggedIntoTail();
+      const next = apply(doc, updateZoomOps(doc, 1, { endSec: 57 }, DURATION));
+      const region = zoomRegionsOf(next)[1];
+      // Held off the region's own hold key rather than landing on 57 — `keyBounds` from
+      // the other side, and the precondition for this test rather than its point: what
+      // matters is that the end came in far enough for the window to lose the tail key.
+      expect(region?.endSec, 'the end did not come in at all').toBeLessThan(59.9);
+      expect(region?.windowEndSec ?? 0, 'the window still reaches the dragged key').toBeLessThan(
+        beyond,
+      );
+      expect(centreTimes(next), 'the key was left outside the region that owns it').not.toContain(
+        beyond,
+      );
+      const owned = centreTimes(next).filter((t) => t >= 55 - 1e-9);
+      expect(owned.every((t) => t <= (region?.windowEndSec ?? 0) + 1e-9)).toBe(true);
+    });
   });
 });
 

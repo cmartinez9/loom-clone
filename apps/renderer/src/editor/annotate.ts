@@ -266,6 +266,10 @@ export function retimeAnnotationOps(
   if (!(endSec - startSec >= MIN_SPAN_SEC)) return null;
   if (startSec === view.startSec && endSec === view.endSec) return null;
 
+  // Rebuilt rather than shifted, on {@link pairOf}'s invariant: a span channel here
+  // holds exactly one `hold` key, so "move the keys with the span" and "write one key
+  // at the new start" are the same act. They stop being the same act the moment a
+  // channel carries two — see {@link pairOf} for what that costs and who owns it.
   const channels: Record<string, { keys: { t: number; v: number[]; ease: { kind: 'hold' } }[] }> =
     {};
   for (const [name, channel] of Object.entries(view.span.channels ?? {})) {
@@ -480,6 +484,27 @@ function holdPair(
   return { keys: [{ t, v: [value[0], value[1]], ease: { kind: 'hold' } }] };
 }
 
+/**
+ * One channel's geometry pair, read off its **only** key.
+ *
+ * `keys[0]` is a position, and `zoom.ts` records what positions standing in for
+ * identity have cost this editor — so the invariant that makes it right here is stated
+ * rather than assumed. **Every writer of a span channel in this module emits exactly one
+ * `hold` key** ({@link holdPair} is the only constructor, and `placeAnnotationOps`,
+ * `moveAnnotationOps` and `retimeAnnotationOps` are the only callers), and §2.7's key
+ * ops address a *track* channel — no op in this editor can add a second key to a span
+ * channel. So there is no set for a position to be wrong about: `keys[0]` is not "the
+ * first of several", it is "the one".
+ *
+ * **What would make it wrong**, because "it happens to have one key today" is the same
+ * proxy one step earlier: §3.3 explicitly anticipates an animated annotation — *"an
+ * animated arrow is free rather than a special case"* — and the first thing that writes
+ * a second key makes this return the opening pose as though it were the geometry, and
+ * makes {@link retimeAnnotationOps} collapse the animation to that pose. Both are this
+ * file's, and both want the same answer: the key at the instant being asked about.
+ * Recorded rather than pre-built, because an evaluator here would be a second opinion
+ * about `resolve` and §4.5 is the standing argument against those.
+ */
 function pairOf(span: Span, channel: string): Vec2 | null {
   const value = span.channels?.[channel]?.keys[0]?.v;
   if (!Array.isArray(value) || value.length < 2) return null;

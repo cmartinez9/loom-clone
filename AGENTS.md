@@ -837,7 +837,7 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Nineteen entries in `npm run verify:mutation`
+committed. Twenty entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the ones worth
 knowing are the three whose guard is deliberately a unit test and **not** this gate.
 `an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
@@ -1062,8 +1062,8 @@ the same way rather than widening anything.
   once and read two ways — the reader takes the value, the writer rewrites that key and
   no other — because a property split across two copies of a condition has no single
   place to be right. It is instance 1 of the entry below; read that one first.
-- **A derived proxy standing in for identity has now cost this file three defects, and
-  the rule is that identity is stated rather than inferred.** All three are the same
+- **A derived proxy standing in for identity has now cost this file four defects, and
+  the rule is that identity is stated rather than inferred.** All four are the same
   shape — something that _usually_ lines up with the fact was asked instead of the fact,
   and each one silently corrupted the user's own work rather than failing:
 
@@ -1079,7 +1079,12 @@ the same way rather than widening anything.
      the region's start to 9.999. The drag is undone _and_ the region starts earlier than
      it ever did. The same misclassification made a `center` key dragged into the settle
      tail past `sourceDurationSec` refuse **every** region-level control from then on,
-     with nothing on screen to say why.
+     with nothing on screen to say why;
+  4. the extent written onto a carrier **unconditionally** — the fourth shape, and the
+     one the first three do not cover: not a wrong key identified, but the right key
+     overwritten. A window runs `segmentSettleTailSec` past the region's end and the lane
+     draws the band that far, so the ramp-out `center` diamond can be dragged _into the
+     tail_; writing `wanted.endSec` over it put it back on the next Amount nudge.
 
   `regionKeyRoles` is the one answer all of it now asks — the reader of the framing key,
   the reader of the interior times, the extent bound and the writer, for **both**
@@ -1089,12 +1094,38 @@ the same way rather than widening anything.
   region begins or ends. The qualification is the half that position alone cannot give:
   delete a region's ramp-in `center` key and its outermost survivor sits strictly inside,
   so it is interior, keeps its time, and a start edit does not drag the framing to the
-  edge. **`ZoomRegion.index` is a fourth candidate and is left as it is on purpose** — it
-  is a position in a time-sorted `activeRanges` and has already caused one defect (the
-  entry above on selecting `length - 1`), fixed at the call sites rather than at the
-  representation; giving a region a durable id of its own is a document-format change,
-  not a patch, so it is recorded here rather than done quietly. Firstmate's call, not the
-  captain's.
+  edge. `carriesStart`/`carriesEnd` are that qualification named, so `withExtent` can ask
+  it of the extent the region is **about to** have: a carrier keeps its time only while
+  it would still carry that end _and_ still lies inside the region's new window. Both
+  halves are load-bearing — drop the first and an outward key is demoted to interior
+  where the framing reader takes it for the user's centre; drop the second and it is
+  stranded in no region at all. That the start and end sides then behave differently is
+  the window's own asymmetry (`[startSec, endSec + tail]`) rather than a case for the
+  tail.
+
+- **The sweep that closed that list, so the next reader can see what was looked at.**
+  Four shapes were hunted across `zoom.ts` and `annotate.ts`: a position in a list,
+  first/last, one channel read through another, and an unconditional write over a value
+  the user can have moved by hand. **Fixed**: `regionCentreKeyIndex`, `regionKeyRoles`'s
+  two channels, `withExtent`. **Examined and left, each for a stated reason**:
+  `zoomRegionsOf`'s extent (the outermost own `amount` key _is_ where the channel begins
+  — a definition, not a proxy) and its window filter (deliberately wider than the
+  writer's `ownKeyIndexes` at a touching seam, noted in code, and the conservative
+  direction); `neighbourBounds`' `at ± 1` (adjacency _is_ position over §2.6's sorted,
+  unique `t`); `windowContaining` (windows never overlap); `moveKeyOps`/`setKeyValueOps`/
+  `removeKeyOps` addressing a key by `(trackId, channel, t)`, which is §2.7's own
+  addressing under the same uniqueness rule; `annotationAt`'s topmost-is-last (array
+  order **is** z-order, §3.3); and `patchRegion`'s hold rewrite — the one write here a
+  hand-set value does not survive, because the hold _is_ what "the amount" names and an
+  asymmetric hold cannot survive an edit that renames it. **Two recorded rather than
+  done**, both needing a decision rather than a patch: `ZoomRegion.index` is a position
+  in a time-sorted `activeRanges` and has already caused one defect (the `length - 1`
+  entry above), fixed at the call sites because a durable region id is a document-format
+  change; and `annotate.ts`'s `pairOf`/`retimeAnnotationOps` read `keys[0]`, which is
+  exact today — every writer there emits one `hold` key and no §2.7 key op addresses a
+  span channel — and stops being exact for §3.3's animated annotation, which would need
+  the key at the instant being asked about rather than the first. Both are stated at
+  their sites. Firstmate's calls, not the captain's.
 
 - **A region-level edit patches the keys that are there; it never re-derives them.**
   The read-then-regenerate shape the two entries above each hit once is the class
@@ -1115,9 +1146,10 @@ the same way rather than widening anything.
   `segmentSettleTailSec` past the region's end) must not turn every control into a
   silent no-op. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
   a second region is _inserted_ beside the first's keys, not rebuilt with them.
-  Two registry entries hold the promise, one per half: one breaks a hand-set **value**
-  and one breaks a hand-dragged **time**, because a single entry that broke both would
-  leave whichever half its guard noticed second unproven.
+  Three registry entries hold the promise, one per half of it: one breaks a hand-set
+  **value**, one a hand-dragged **time**, and one a carrier the user moved into the
+  **settle tail** — because a single entry breaking more than one would leave whichever
+  half its guard noticed second unproven.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —

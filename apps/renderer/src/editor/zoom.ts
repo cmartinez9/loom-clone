@@ -282,14 +282,27 @@ function regionKeyRoles(
   const firstKey = first === undefined ? undefined : keys[first];
   const lastKey = last === undefined ? undefined : keys[last];
   const startAt =
-    first !== undefined && firstKey !== undefined && firstKey.t <= extent.startSec + WINDOW_EPS
-      ? first
-      : -1;
+    first !== undefined && firstKey !== undefined && carriesStart(firstKey.t, extent) ? first : -1;
   const endAt =
-    last !== undefined && lastKey !== undefined && lastKey.t >= extent.endSec - WINDOW_EPS
-      ? last
-      : -1;
+    last !== undefined && lastKey !== undefined && carriesEnd(lastKey.t, extent) ? last : -1;
   return { startAt, endAt, interior: own.filter((at) => at !== startAt && at !== endAt) };
+}
+
+/**
+ * The half of {@link regionKeyRoles} that qualifies a position, named so the writer can
+ * ask it of the extent a region is *about to have*.
+ *
+ * {@link withExtent} is the second caller and the reason these are functions rather
+ * than two inline comparisons: "does this key still carry the extent afterwards" is the
+ * same question as "does it carry it now", asked of a different `RegionExtent`, and a
+ * second copy of the comparison is a second place for the two to disagree.
+ */
+function carriesStart(t: Seconds, extent: RegionExtent): boolean {
+  return t <= extent.startSec + WINDOW_EPS;
+}
+
+function carriesEnd(t: Seconds, extent: RegionExtent): boolean {
+  return t >= extent.endSec - WINDOW_EPS;
 }
 
 /**
@@ -894,48 +907,98 @@ function patchRegion(
     current,
   );
 
-  const amount = withExtent(amountKeys, amountRoles, wanted);
+  const tail = segmentSettleTailSec(DEFAULT_SPRING);
+  const nextWindow: [number, number] = [wanted.startSec, wanted.endSec + tail];
+
+  const amount = withExtent(amountKeys, amountRoles, wanted, nextWindow);
   // The hold, and only the hold: the two ramp ends are what returns the picture to
-  // identity, so their values are not what "the amount" names.
+  // identity, so their values are not what "the amount" names. An asymmetric hold —
+  // two interior keys a person gave different values — is flattened to the one the
+  // slider names, and that is the edit rather than a side effect of it: the hold *is*
+  // what "the amount" means, so there is no way to change it that leaves the hold's
+  // values alone. It is the one write here a hand-set value does not survive.
   for (const at of amountRoles.interior) {
     const key = amount[at];
     if (key === undefined) continue;
     amount[at] = { ...key, v: wanted.amount };
   }
 
-  const center = withExtent(centerKeys, centerRoles, wanted);
+  const center = withExtent(centerKeys, centerRoles, wanted, nextWindow);
   const framing = regionCentreKeyIndex(centerKeys, centerRoles, current);
   const framingKey = framing < 0 ? undefined : center[framing];
   if (framingKey !== undefined) {
     center[framing] = { ...framingKey, v: [wanted.center[0], wanted.center[1]] };
   }
 
-  const tail = segmentSettleTailSec(DEFAULT_SPRING);
-  const nextWindows = windows.map((window, at) =>
-    at === index ? ([wanted.startSec, wanted.endSec + tail] as [number, number]) : window,
-  );
+  const nextWindows = windows.map((window, at) => (at === index ? nextWindow : window));
   return assembleZoomTrack(nextWindows, amount, center);
 }
 
 /**
- * One channel's keys with the region's extent moved onto the keys that carry it.
+ * One channel's keys with the region's extent moved onto the keys that carry it — and
+ * **not** onto one the user has put somewhere the region still reaches.
  *
  * Only the two named keys are touched. A channel that has no key carrying an end —
  * the user deleted it, or dragged it inward so another key is now the region's own
  * outermost one on that side — simply has nothing moved there, which is the honest
  * answer and is what stops a start edit from dragging somebody's framing to the edge.
+ *
+ * ## Why the write is conditional
+ *
+ * An unconditional write is the last shape of "a region edit moved a key it did not
+ * name", and it is reachable: `activeRanges` runs `segmentSettleTailSec` past the
+ * region's end, the Zoom lane draws the band that far, and {@link keyBounds} bounds a
+ * key by the window — so the ramp-out `center` diamond can be dragged **into the settle
+ * tail**, which is a place a person can legitimately want it. Writing `wanted.endSec`
+ * over it returned it to the region's end on the next Amount-slider nudge, silently.
+ *
+ * So the carrier keeps its time exactly when both halves hold, which is
+ * {@link regionKeyRoles}'s own qualification asked of the extent the region is about to
+ * have rather than a rule invented for the tail:
+ *
+ *  1. it would **still** carry that end afterwards ({@link carriesStart} /
+ *     {@link carriesEnd} against `wanted`) — otherwise leaving it silently demotes it to
+ *     an interior key, where {@link regionCentreKeyIndex} can then read it as the user's
+ *     framing and answer identity;
+ *  2. it still lies inside the region's new window — otherwise it belongs to no region
+ *     at all, which is the corruption {@link moveKeyOps} describes.
+ *
+ * The two halves are what make the start and end sides differ without either being a
+ * special case: a window is `[startSec, endSec + tail]`, so there is slack past the end
+ * a key may sit in and none before the start.
  */
 function withExtent(
   keys: readonly Keyframe[],
   roles: RegionKeyRoles,
   wanted: ZoomRegionInput,
+  window: readonly [number, number],
 ): Keyframe[] {
   const next = keys.map((key) => ({ ...key }));
   const startKey = roles.startAt < 0 ? undefined : next[roles.startAt];
-  if (startKey !== undefined) next[roles.startAt] = { ...startKey, t: wanted.startSec };
+  if (startKey !== undefined) {
+    next[roles.startAt] = {
+      ...startKey,
+      t: carriedTime(startKey.t, carriesStart(startKey.t, wanted), wanted.startSec, window),
+    };
+  }
   const endKey = roles.endAt < 0 ? undefined : next[roles.endAt];
-  if (endKey !== undefined) next[roles.endAt] = { ...endKey, t: wanted.endSec };
+  if (endKey !== undefined) {
+    next[roles.endAt] = {
+      ...endKey,
+      t: carriedTime(endKey.t, carriesEnd(endKey.t, wanted), wanted.endSec, window),
+    };
+  }
   return next;
+}
+
+/** Where a carrier lands: where the user left it, or the extent it carries. */
+function carriedTime(
+  t: Seconds,
+  stillCarries: boolean,
+  extentSec: Seconds,
+  window: readonly [number, number],
+): Seconds {
+  return stillCarries && insideWindow(t, window[0], window[1]) ? t : extentSec;
 }
 
 /**

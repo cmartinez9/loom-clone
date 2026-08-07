@@ -2032,6 +2032,29 @@ export const MUTATIONS = [
     mustFail: [EDITOR_ZOOM],
   },
   {
+    name: 'a-region-edit-takes-a-key-back-out-of-the-settle-tail',
+    breaks:
+      'the third and last half of the same promise: the two keys that *carry* a ' +
+      'region’s extent are the user’s too, wherever the region still reaches. A ' +
+      'window runs `segmentSettleTailSec` past the region’s end, the Zoom lane draws ' +
+      'the band that far, and `keyBounds` bounds a key by the window — so the ramp-out ' +
+      '`center` diamond can be dragged **into the tail**, which is a place a person can ' +
+      'legitimately want it. Writing the extent over it unconditionally returns it to ' +
+      'the region’s end on the next Amount-slider nudge, silently, from an edit that ' +
+      'named only the amount.\n' +
+      '   `carriedTime` is what stops it, and it is deliberately two conditions rather ' +
+      'than "never touch an outward-dragged key": the carrier keeps its time only while ' +
+      'it would still carry that end *and* still lies inside the region’s new window. ' +
+      'Drop either and the fix trades this defect for another — leaving a key the ' +
+      'region no longer reaches strands it in no region at all, and leaving one that ' +
+      'stops carrying the end demotes it to interior where `regionCentreKeyIndex` reads ' +
+      'it as the user’s framing.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  return stillCarries && insideWindow(t, window[0], window[1]) ? t : extentSec;',
+    replace: '  return extentSec;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
     name: 'a-gesture-that-changes-nothing-strands-its-preview',
     breaks:
       'the shared end of a two-phase gesture. Every op builder answers `null` for ' +
