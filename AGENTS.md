@@ -2353,6 +2353,30 @@ outside `WITHHOLDABLE_GUARDS` and outside the "never run a second macOS job besi
   "caught". **Never add a second macOS job that runs concurrently with `verify`**:
   these three gates cannot tell a busy host apart from the defect they exist to catch,
   and a job we start on purpose is a busy host we chose.
+- **`fileParallelism: false` keeps two test _files_ off each other and does not keep a
+  file off what the file before it started — and that gap had the phase-6 gate as its
+  only victim.** The two are different claims, and between them sit a spawned process
+  (`/usr/bin/avconvert`, an Electron launch, a SIGKILL round) and the writeback of
+  whatever that file put on disk, both of which outlive the `it()` that began them.
+  Only one file in this suite can see it: phase 6 judges its **single worst frame with
+  no allowance**, so one pre-empted frame fails it, and its own host control samples
+  154 spins against 450 frames — too coarse to have been holding the thread at that
+  instant and withhold the verdict. Everything else compares against something measured
+  in its own window (`rate-control.ts`) or has minutes of budget (`av-sync.test.ts`).
+  Measured on run 31195372445: `apps/main/test/recorder-session.test.ts` — 5.4 s of real
+  fragment writing with two `avconvert` playability transcodes in it — finished **100 ms**
+  before the gate launched its Electron, because vitest sorts by file size and 47,707
+  bytes lands directly above 38,630. The gate reported one 33.10 ms play frame against a
+  27.93 ms envelope with a p99 of 4.20 ms, and the host stalled its own pure-arithmetic
+  spin to 25.40 ms in the slow-compositor phase against 8.40 ms on each of the four runs
+  before it. That is the same pairing `ci.yml` already answered **across** jobs with
+  `needs: verify` — the gate measured beside `mutation`'s `avconvert` transcodes — and it
+  was still live **inside** the run, decided by a byte count. `vitest.config.ts`'s
+  `StopwatchGateFirst` hands that one gate the box before this suite has started
+  anything. **Only that one**: hoisting all three stopwatch gates would make them each
+  other's noise, which is what `fileParallelism: false` exists to prevent. Nothing about
+  the gate moved — no assertion, no threshold, no retry; §8's number is still judged on
+  the worst single frame.
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also
