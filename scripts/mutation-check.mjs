@@ -146,6 +146,71 @@ const BUDGET_POLICY = 'test/budget-control.test.ts';
 const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
 
 /**
+ * Phase 15's gate: the controls, and that what they did reaches an exported file.
+ *
+ * **Withholdable, per claim** — and that is the one thing to know before listing it in
+ * a `mustFail`. Three CI runs of one commit (31134549671, 31136423113, 31137779565)
+ * lost the WebGL context compositing export frame 72, `ExportRenderLoop` refused rather
+ * than encoding frames nothing drew, and twelve assertions then failed on *missing
+ * readings* rather than wrong ones. This gate now says so: `verdict.ts`'s
+ * `exportInstrumentLost` withholds the claims from the first export onward, reports
+ * **skipped** under a NOT JUDGED banner, and leaves every claim measured *before* the
+ * export judged exactly as hard as before.
+ *
+ * The consequence for this registry: a mutation whose only guard is this gate and whose
+ * property lives past the first export is **unproven** on a host that loses the
+ * context, exactly as {@link WITHHOLDABLE_GUARDS} describes for phases 6 and 8 — so this
+ * gate is listed there too. Three entries were in that position — every one of them a
+ * control whose reading is taken after the first export — and **all three now carry a
+ * second guard that cannot withhold**: {@link EDITOR_GESTURES}, over the pure decisions
+ * in `apps/renderer/src/editor/gestures.ts`. That is the fix this warning prescribes,
+ * and it is never a retry and never a widening of the predicate. Having taken it, they
+ * are **no longer printed** under the exposure warning: {@link warnSolelyWithholdable}
+ * selects a mutation only when *every* file in its `mustFail` can withhold, and
+ * `EDITOR_GESTURES` cannot. That is the warning going quiet because the exposure was
+ * closed, which is the only reason it ever should.
+ *
+ * Keep listing this gate **beside** the pure guard rather than instead of it: it proves
+ * the wiring — a real thumb on a real slider, a real pointer on a real lane — that no
+ * unit test can. And when adding a phase-15 entry, prefer a property decidable without
+ * an export; if one genuinely is not, say so at the entry rather than listing a guard
+ * that may never run.
+ *
+ * `the-zoom-panel-does-not-follow-the-playhead` was the fourth and is **the worked
+ * example of that fix**, because CI run 31148316397 is what the position costs: the
+ * claim that guarded it withheld, the one claim this gate judges on every run still
+ * passed, and `runTests` — which can only read a *file* — reported `SURVIVED`, a hole in
+ * a gate that had not been given the chance to look. The property needed no manual
+ * region at all, so the gate now judges it before the first export, over the generated
+ * track alone, at a third instant *between* the two auto-zoom segments (`BETWEEN_SEC` in
+ * `test/editor-controls/main.ts` says why the other two cannot carry it between them).
+ * The richer claim — the button, and `yours` — still needs a manual region and is still
+ * withheld.
+ *
+ * One nuance the set cannot express, recorded rather than engineered around:
+ * {@link WITHHOLDABLE_GUARDS} is keyed by **file**, and this gate withholds per
+ * *claim*, so a mutation guarded solely by a claim this gate judges on every run would
+ * be reported as solely-withholdable when it is in fact proven. That over-reports, which
+ * is the conservative direction for a warning whose whole job is to make an unproven
+ * mutation impossible to overlook. No entry is in that position today, because every
+ * mutation listing this gate also lists a guard that cannot withhold — but a future
+ * phase-15-only entry would be, and the over-report is the answer rather than a defect.
+ */
+const P15_GATE = 'test/phase15-gate.test.ts';
+/** The fence around that withhold: every bad-run shape that must still be judged. */
+const P15_VERDICT = 'test/phase15-verdict.test.ts';
+/**
+ * The four editor-control decisions a GPU can take away, as a guard that cannot.
+ *
+ * Every one of them was guarded only by {@link P15_GATE} until CI run 31148316397
+ * showed what that costs: a per-claim withhold is not a whole-file one, so `runTests`
+ * scored a mutation nothing had judged as SURVIVED and reported an unmeasured hole.
+ * `apps/renderer/src/editor/gestures.ts` is the seam and this is its test; the gate
+ * keeps its own entry on each, because it proves the wiring these cannot.
+ */
+const EDITOR_GESTURES = 'apps/renderer/test/editor-gestures.test.ts';
+
+/**
  * Guards that can come back with **no verdict** rather than a pass or a fail.
  *
  * A gate that measures the machine can find its instrument gone: `test/phase8-gate.test.ts`
@@ -175,11 +240,27 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * The fix for anything listed is a **second guard that cannot withhold**, not a change
  * to the gate and not a retry.
  */
-const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
+const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6, P15_GATE]);
 
 /** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
 const EDITOR_GATE = 'test/editor-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
+/** The pure halves of phase 15: manual zoom, annotations, and the generator controls. */
+const EDITOR_ZOOM = 'apps/renderer/test/editor-zoom.test.ts';
+const EDITOR_ANNOTATE = 'apps/renderer/test/editor-annotate.test.ts';
+const EDITOR_GENERATORS = 'apps/renderer/test/editor-generators.test.ts';
+/**
+ * `StageUi`'s control flow, over a stubbed DOM — deliberately not the gate.
+ *
+ * The gesture invariant it guards ("a drag that began provisionally ends in exactly
+ * one of commit or cancel") is reached by a release on the letterbox, which is a
+ * *pre*-export shape the phase-15 gate has no reading of; putting the only guard there
+ * would leave the property unproven on every host that loses the context. This one
+ * cannot withhold, so it stays out of {@link WITHHOLDABLE_GUARDS}.
+ */
+const EDITOR_STAGE = 'apps/renderer/test/editor-stage.test.ts';
+/** §3.5's stack, over real generated tracks. */
+const GENERATOR_STACKING = 'packages/edl/test/generator-stacking.test.ts';
 /** Who may open an editor, and what closing one does to the bundle lock. */
 const EDITOR_WINDOW = 'apps/main/test/editor-window.test.ts';
 /** Seam S4's one adapter, shared by preview and export. */
@@ -1787,6 +1868,395 @@ export const MUTATIONS = [
       '  );',
     replace: '  return store.diskSpace();',
     mustFail: [PHASE13_DISK],
+  },
+  // ---- phase 15: the editor's controls -------------------------------------
+  {
+    name: 'a-manual-zoom-applies-everywhere',
+    breaks:
+      "§3.5's window, which is the whole of how the captain's manual option relates " +
+      'to the generators. With `activeRanges` covering the recording, the zoom the ' +
+      'user placed on one moment is applied to every moment — the generator never ' +
+      'shows through again, and every cheaper check still passes because the zoom ' +
+      'they asked for is still there where they asked for it.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    activeRanges: windows.map((window) => [window[0], window[1]]),',
+    replace: '    activeRanges: [[0, 1e9]],',
+    mustFail: [P15_GATE, EDITOR_ZOOM],
+  },
+  {
+    name: 'a-manual-zoom-goes-under-the-generator',
+    breaks:
+      'track order being stacking order. `resolve` folds in array order and the last ' +
+      'track with an opinion wins, so a manual zoom written at index 0 resolves ' +
+      '**underneath** the generated one and does nothing — a document that says ' +
+      'exactly what the user asked for and a picture that ignores it, which ' +
+      '`AGENTS.md` calls the hardest kind of bug to see.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: "  if (existing === null) return [{ op: 'track.add', track, at: doc.tracks.length }];",
+    replace: "  if (existing === null) return [{ op: 'track.add', track, at: 0 }];",
+    mustFail: [P15_GATE, EDITOR_ZOOM],
+  },
+  {
+    name: 'both-generators-share-one-stacking-rank',
+    breaks:
+      "§3.5's order for the two generated tracks: cursor-follow at the bottom and " +
+      'auto-zoom above it. With one rank they land in whichever order the buttons ' +
+      "were pressed, and cursor-follow on top outranks §6.5 step 3's edge-snapped " +
+      "cluster framing inside every click segment while auto-zoom's `amount` still " +
+      'applies — the shot zooms in on a click and frames somewhere else.\n' +
+      '   `packages/edl/test/generator-stacking.test.ts` pins the arrangement and ' +
+      'does **not** catch this: it exercises what the model can express, and what ' +
+      'was wrong was the index the editor asked for.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find: "  'auto-zoom-on-click': 1,",
+    replace: "  'auto-zoom-on-click': 0,",
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'a-regenerate-re-sorts-the-generated-tracks',
+    breaks:
+      "`regenerateOps`'s `options.at ?? existing`, which exists so a replacement " +
+      'stays at the index it had. Naming one on that path sends every regenerated ' +
+      'track back to its rank, so *Regenerate* on the upper generator silently ' +
+      'drops it under the lower one — a document that validates, a picture that ' +
+      'changed, and nothing on screen that says an ordering moved.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find: '  return replaces ? { type } : { type, at: insertionIndexFor(doc, type) };',
+    replace: '  return { type, at: insertionIndexFor(doc, type) };',
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'the-generator-panel-blames-a-grant-while-it-is-still-reading',
+    breaks:
+      'the third answer a generator row can give. `null` logs mean *not read yet* and ' +
+      'collapsing that into *unavailable* makes the Automatic panel open by saying ' +
+      '"No clicks were captured — the Accessibility grant is what a click log needs" ' +
+      'over a recording that has a real click log. The most invasive of the four ' +
+      'permissions, reported as having failed, on every editor that opens — and the ' +
+      'promise behind that grant has already been broken once, so it reads as the fix ' +
+      'not having worked rather than as a panel being a few hundred milliseconds ' +
+      'behind.\n' +
+      "   Phase 5's absent-versus-empty discipline one layer out: *not yet known* and " +
+      '*known to be absent* have to stay different answers all the way to the sentence ' +
+      'a person reads.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find:
+      "      logs === null ? 'reading' : needs !== null && needs.length > 0 " +
+      "? 'runnable' : 'unavailable';",
+    replace: "      needs !== null && needs.length > 0 ? 'runnable' : 'unavailable';",
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'a-gesture-ended-off-the-picture-strands-its-preview',
+    breaks:
+      'the stage half of the invariant `a-gesture-that-changes-nothing-strands-its-' +
+      'preview` guards at the other end: a drag that began provisionally must end in ' +
+      'exactly one of commit or cancel, on **every** exit path. `#apply` refuses to ' +
+      'dispatch when the pointer has no source coordinate — a release on the ' +
+      'letterbox, which every bundle has, since nothing sets `edit.output.size` from ' +
+      'the recording — and without this the pointer-up handler drops the drag anyway. ' +
+      'The provisional document the last move left is then in no `edit.json`, showing ' +
+      'in the preview and in the inspector, until some later commit or undo happens ' +
+      'by.\n' +
+      '   Guarded by a unit test rather than by the gate on purpose: this shape is ' +
+      'reachable before the first export and the gate has no reading of it, so the ' +
+      'gate alone would leave it unproven on any host that loses the context.',
+    file: 'apps/renderer/src/editor/stage.ts',
+    find: "      if (!this.#apply(event, 'end')) this.#callbacks.onCancelGesture();",
+    replace: "      this.#apply(event, 'end');",
+    mustFail: [EDITOR_STAGE],
+  },
+  {
+    name: 'a-region-centre-is-read-by-position',
+    breaks:
+      'the structural identity of a region’s centre. `buildManualZoomTrack` writes ' +
+      'three `center` keys — identity at `startSec`, the user’s framing at the hold, ' +
+      'identity at `endSec` — and picking one by position rather than by the hold ' +
+      'returns the identity ramp-out key the moment the set’s shape changes. The ' +
+      'region then reads back `[0.5, 0.5]` and the next region-level edit takes that ' +
+      'misreading for the truth and writes the frame centre over the user’s framing, ' +
+      'silently — the reader and the writer ask this one function, so a wrong answer ' +
+      'here is a wrong answer in both directions at once.\n' +
+      '   Two ordinary drags reach it and only one is a window question, which is why ' +
+      '`keyBounds` cannot be the guard: the last `amount` key dragged later pushes ' +
+      '`endSec` past the ramp-out centre key, and the last `center` key dragged ' +
+      'earlier does the same while never leaving its own window.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    const distance = Math.abs(key.t - holdStart);',
+    replace: '    const distance = -key.t;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-region-edit-discards-a-hand-edited-keyframe',
+    breaks:
+      'the VALUE half of the promise that a region-level edit changes only what it ' +
+      'names. The keys on the manual zoom track are the user’s — `isKeyEditable` says ' +
+      'so, and both the lane and the inspector let a person drag one and set its ' +
+      'value — so a region is *read out of* keys that may not be in the canonical ' +
+      'layout at all. Amount names the hold, which is the region’s interior `amount` ' +
+      'keys; the two ramp ends are what returns the picture to identity and their ' +
+      'values are the user’s. Writing the amount over all of them takes a hand-set ' +
+      'ramp value with it, on every region-level edit rather than only on an amount ' +
+      'one, since each verb sends the whole region.\n' +
+      '   The TIME half is `a-region-edit-retimes-a-hand-dragged-keyframe`, and the ' +
+      'two are separate entries because they fail separately: one keeps every key ' +
+      'where the user put it and rewrites values it does not own, the other keeps ' +
+      'every value and moves a key. A single entry that broke both would leave ' +
+      'whichever half its guard noticed second unproven.\n' +
+      '   Guarded by a unit test rather than by the phase-15 gate on purpose: this is ' +
+      'arithmetic over a document, so nothing composited can take the reading away, ' +
+      'and a gate-only guard would leave it unproven on every host that loses the ' +
+      'WebGL context.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  for (const at of amountRoles.interior) {',
+    replace: '  for (const at of ownAmount) {',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-region-edit-retimes-a-hand-dragged-keyframe',
+    breaks:
+      'the TIME half of the same promise, and it is the half the whole fix is named ' +
+      'for: *lengthen a ramp by hand, then nudge the Amount slider*. A region-level ' +
+      'edit moves the two keys that carry the region’s extent and **nothing else**, so ' +
+      'a key the user dragged keeps the time they gave it. Nudging every interior key ' +
+      'by a gap re-derives a layout the user had already decided — the document still ' +
+      'validates, `zoomRegionsOf` still reads the region back, and the only thing that ' +
+      'changed is that somebody’s hold moved, silently, on an edit that named the ' +
+      'amount.\n' +
+      '   It is a *valid* document on purpose: a mutation the writer refuses outright ' +
+      'is caught by any assertion at all, and would say nothing about whether the ' +
+      'guard can see a key that moved. The guard has to compare the time.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '    amount[at] = { ...key, v: wanted.amount };',
+    replace: '    amount[at] = { ...key, v: wanted.amount, t: key.t - KEY_GAP_SEC };',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-region-edit-takes-a-key-back-out-of-the-settle-tail',
+    breaks:
+      'the third and last half of the same promise: the two keys that *carry* a ' +
+      'region’s extent are the user’s too, wherever the region still reaches. A ' +
+      'window runs `segmentSettleTailSec` past the region’s end, the Zoom lane draws ' +
+      'the band that far, and `keyBounds` bounds a key by the window — so the ramp-out ' +
+      '`center` diamond can be dragged **into the tail**, which is a place a person can ' +
+      'legitimately want it. Writing the extent over it unconditionally returns it to ' +
+      'the region’s end on the next Amount-slider nudge, silently, from an edit that ' +
+      'named only the amount.\n' +
+      '   `carriedTime` is what stops it, and it is deliberately two conditions rather ' +
+      'than "never touch an outward-dragged key": the carrier keeps its time only while ' +
+      'it would still carry that end *and* still lies inside the region’s new window. ' +
+      'Drop either and the fix trades this defect for another — leaving a key the ' +
+      'region no longer reaches strands it in no region at all, and leaving one that ' +
+      'stops carrying the end demotes it to interior where `regionCentreKeyIndex` reads ' +
+      'it as the user’s framing.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  return stillCarries && insideWindow(t, window[0], window[1]) ? t : extentSec;',
+    replace: '  return extentSec;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-sub-tail-end-edit-is-a-silent-no-op',
+    breaks:
+      'the other side of that same conditional write, and it is the one a matrix of ' +
+      'one magnitude cannot see. `inSettleSlack` asks whether a carrier lies past the ' +
+      'extent the region **currently** has — the settle-tail slack, the only stretch ' +
+      'of a window that is not between the extents, so the only place a person could ' +
+      'have put a key past an end. Asking instead whether it would be at or past the ' +
+      '**new** end is trivially true of any shrink, so the ordinary ramp-out key — the ' +
+      'one sitting exactly where `buildManualZoomTrack` put it — stays put whenever the ' +
+      'region is shortened by less than `segmentSettleTailSec(DEFAULT_SPRING)`.\n' +
+      '   What the user sees: type a value into the inspector’s `Ends` field, the keys ' +
+      'do not move, `zoomRegionsOf` re-reads the old end off the amount channel, and ' +
+      'the field reverts — while the window alone shrank, so the edit still spent a ' +
+      'revision and an undo step. Shrinks larger than the tail work, so the control ' +
+      'looks functional and fails on the ordinary nudge.\n' +
+      '   The guard is the matrix’s `END shrinks by less than the settle tail` case, ' +
+      'added for this: every other END edit there moves by seconds, well past the tail, ' +
+      'and passes under this mutation.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '      t: carriedTime(endKey.t, inSettleSlack(endKey.t, current), wanted.endSec, window),',
+    replace: '      t: carriedTime(endKey.t, carriesEnd(endKey.t, wanted), wanted.endSec, window),',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-gesture-that-changes-nothing-strands-its-preview',
+    breaks:
+      'the shared end of a two-phase gesture. Every op builder answers `null` for ' +
+      '"this changes nothing" and every drag can reach that — a slider taken away and ' +
+      'back, a keyframe returned to where it was — so returning early there leaves ' +
+      'the previous move’s provisional document on `EditorProject` with nothing to ' +
+      'clear it. The preview then shows a magnification that is not in `edit.json` ' +
+      'and the inspector, which reads `project.document`, shows it too until the next ' +
+      'commit or undo happens by.\n' +
+      '   Only a gesture that *ends where it started* reaches the branch, which is why ' +
+      'the phase-15 gate drives one: a slider taken away and brought back, with the ' +
+      'editor then asked what it is showing against what it committed.',
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  if (ops === null) {\n    io.cancel();\n    return;\n  }',
+    replace: '  if (ops === null) {\n    return;\n  }',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
+  },
+  {
+    name: 'a-keyframe-drag-leaves-its-own-window',
+    breaks:
+      "the bound that keeps a dragged key inside its region's own `activeRanges` " +
+      'entry. The neighbour bound alone leaves `lowSec` at 0 for the first key of ' +
+      'the first region, so a drag takes it out of the window; `zoomRegionsOf` then ' +
+      'filters it out, the region reads back three keys and starting at its hold, ' +
+      'and the next region-level edit rebuilds the track from that misreading and ' +
+      'writes it in. The user has no way to see any of it happen.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  const bounds = keyBounds(track, channel.keys, ref.t);',
+    replace: '  const bounds = neighbourBounds(channel.keys, ref.t);',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'the-amount-slider-commits-on-every-step',
+    breaks:
+      'the two phases of a slider gesture. `input` is provisional and `change` ' +
+      'commits, so one drag of the thumb is one op, one revision and one undo step; ' +
+      'committing on every step means undoing a drag takes as many undos as the ' +
+      'pointer moved, which makes undo useless for the control on the one capability ' +
+      'the captain named himself ("Manual option too.", decision-editor-scope.md). ' +
+      'It also recompiles on each one — it is `EditorProject.preview` that ' +
+      "debounces on §3.6's 100 ms and `commit` that clears that debounce.",
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: "    return { gesture: true, value: parsed, phase: 'move' };",
+    replace: "    return { gesture: true, value: parsed, phase: 'end' };",
+    mustFail: [EDITOR_GESTURES, P15_GATE],
+  },
+  {
+    name: 'the-inspector-rebuilds-under-its-own-thumb',
+    breaks:
+      'the guard that lets a control outlive a single event. Without it a rebuild ' +
+      'runs `replaceChildren` over the `<input type="range">` the pointer is holding ' +
+      'and the drag ends on first contact — the control does not work, while every ' +
+      'cheaper check still reports the right number because the last value it was ' +
+      'given did land. Only a gesture of more than one event can see it, which is ' +
+      'why the gate drags the slider rather than dispatching one `input`.',
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  return gesture !== null;',
+    replace: '  return false;',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
+  },
+  {
+    name: 'the-zoom-panel-does-not-follow-the-playhead',
+    breaks:
+      "the standing Zoom panel's per-frame half. Rebuilt on a document or selection " +
+      'change alone, it describes whatever instant the last edit happened at: after ' +
+      'an ordinary scrub its readout is a magnification the picture no longer has, ' +
+      'and — the half that matters — *Take manual control* is withheld, because its ' +
+      'presence is computed from the same stale instant. That is the one capability ' +
+      'the captain named himself, missing on exactly the path a person uses to reach ' +
+      'it (scrub to the moment, then take control), so the feature reads as absent.\n' +
+      '   Nothing caught it for a whole phase: the document is right, `resolve` is ' +
+      'right and the picture is right, so every test passed and a person looking at ' +
+      'the `--shots` screenshots found it. The gate now reads the panel off the DOM ' +
+      'at both sides of a region boundary and compares it against the probe.\n' +
+      '   The reading that catches it on **every** host is the one taken before the ' +
+      'first export, between the two generated segments: this claim needs no manual ' +
+      'region, so it is judged where a lost export instrument cannot take it away.',
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  return sourceSec !== paintedSourceSec;',
+    replace: '  return sourceSec === paintedSourceSec;',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
+  },
+  {
+    name: 'a-keyframe-drag-lands-on-its-neighbour',
+    breaks:
+      'the bound that keeps a dragged key clear of the ones beside it. `setKey` ' +
+      'upserts by `t`, so a move that lands exactly on a neighbour **replaces** it — ' +
+      'the drag reports success and the document comes back one keyframe short, ' +
+      'which for a four-key zoom is a shot that never returns to identity.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  const t = clamp(toSec, bounds.lowSec, bounds.highSec);',
+    replace: '  const t = toSec;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-generated-keyframe-is-editable',
+    breaks:
+      '§3.5\'s storage split: *"Regeneration rewrites only the generated track. User ' +
+      'edits survive by construction, because they were never in that track."* ' +
+      "Letting a key on a live generated track be edited puts the user's work in the " +
+      'one place the next *Regenerate* is licensed to throw away, and it is thrown ' +
+      'away silently.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: "  return track.origin === 'manual';",
+    replace: '  return true;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'an-annotation-is-placed-in-output-space',
+    breaks:
+      'the coordinate decision `annotations.ts` argues at length, and it is a privacy ' +
+      'one. Storing where the pointer was on the *output* rather than on the content ' +
+      'means a zoom slides the redaction off the thing it was covering and publishes ' +
+      'it, with the blur still visibly present a few centimetres away. Invisible at ' +
+      'magnification 1, which is every recording until somebody zooms.\n' +
+      '   The guard is the unit test and **not** the phase-15 gate, which was tried ' +
+      'and measured surviving: the gate draws its mask at one zoom and reads it back ' +
+      'at the same one, so an identity map still lands the redaction inside the box ' +
+      "it measures. What catches this is a round trip against the *compositor's own* " +
+      '`sourceToOutput` — two independent derivations of one map, which is the only ' +
+      'shape that can disagree.',
+    file: 'apps/renderer/src/editor/annotate.ts',
+    find: '  return [rx + ((px - left) / drawW) * span, ry + ((py - top) / drawH) * span];',
+    replace: '  return [at[0], at[1]];',
+    mustFail: [EDITOR_ANNOTATE],
+  },
+  {
+    name: 'a-zero-area-redaction-is-written',
+    breaks:
+      'the refusal that keeps a click from becoming a span. `readAnnotationGeometry` ' +
+      'throws on a zero-area `blur` or `mask` and `Compositor.render` then refuses ' +
+      'the whole frame — so writing one does not produce a small redaction, it ' +
+      'produces a recording whose preview will not composite at all.',
+    file: 'apps/renderer/src/editor/annotate.ts',
+    find: '    if (size[0] < MIN_EXTENT || size[1] < MIN_EXTENT) return null;',
+    replace: '    if (size[0] < 0 || size[1] < 0) return null;',
+    mustFail: [EDITOR_ANNOTATE],
+  },
+  {
+    name: 'a-bake-leaves-the-generator-block-behind',
+    breaks:
+      "§3.5's bake, on the line `AGENTS.md`'s \"an undo has to survive " +
+      '`JSON.stringify`" rule was written for. Without `patch.remove` the block stays ' +
+      'and the track is `origin: manual` **and** still generated — so the editor goes ' +
+      'on offering it a regenerate, which is precisely what a bake detaches it from, ' +
+      "and the next one overwrites the keyframes the bake made the user's.",
+    file: 'packages/edl/src/generators/lifecycle.ts',
+    find: "      patch: { origin: 'manual', generatedFrom: spec, remove: ['generator'] },",
+    replace: "      patch: { origin: 'manual', generatedFrom: spec },",
+    mustFail: [P15_GATE, EDITOR_GENERATORS, GENERATOR_STACKING],
+  },
+  {
+    name: 'the-phase15-verdict-withholds-on-any-failed-export',
+    breaks:
+      'the signature that separates the instrument being taken away from the product ' +
+      'being wrong. Without it **every** failed export withholds — a §7.5 verification ' +
+      'failure, a decode stall, an encoder error, a muxer refusal — so the one gate that ' +
+      'proves a manual zoom reaches a finished file reports *skipped* for the defects it ' +
+      'exists to catch. This is the disease a withheld verdict is one edit away from, ' +
+      'which is why the fence enumerates each shape rather than testing the happy case.',
+    file: 'test/editor-controls/verdict.ts',
+    find: '  if (!failed.every(lostTheContext)) return false;',
+    replace: '  if (failed.length === 0) return false;',
+    mustFail: [P15_VERDICT],
+  },
+  {
+    name: 'the-phase15-verdict-withholds-with-readings-in-hand',
+    breaks:
+      'the load-bearing half of the predicate — that a run carrying **any** export ' +
+      'reading is judged rather than withheld. It is what makes the branch safe to run ' +
+      "before the assertions instead of after them, and it is `mayDeleteSources`'s " +
+      'discipline applied to a verdict: refuse on what the record says, field by field. ' +
+      'Dropped, a run that lost the context on its second export after measuring a delta ' +
+      'on its first throws that delta away and declines to judge it.',
+    file: 'test/editor-controls/verdict.ts',
+    find: '  return exportReadingsTaken(report).length === 0;',
+    replace: '  return true;',
+    mustFail: [P15_VERDICT],
   },
 ];
 

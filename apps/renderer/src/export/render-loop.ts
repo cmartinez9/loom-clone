@@ -160,10 +160,10 @@ export interface ExportRenderLoopOptions {
    * no `text` span needs none, and a caller that has one passes the object rather than
    * a raster the loop would upload a second copy of.
    *
-   * **The export window does not build one yet**, and that is unchanged by this: no
-   * surface authors an annotation today (they are `loom-p15`'s), so the first thing
-   * that does is what has to hand `ExportSession`'s window the preview's atlas. What
-   * this closes is the seam, and `test/phase11-golden.test.ts` is what now holds both
+   * **The export window builds one** as of phase 15, which is what first made a `text`
+   * span authorable: `apps/renderer/src/export/session.ts` uploads from
+   * `apps/renderer/src/glyphs.ts`, the one place either path rasterises glyphs. What
+   * this option closes is the seam, and `test/phase11-golden.test.ts` is what holds both
    * paths to drawing glyphs from one raster.
    */
   textAtlas?: TextAtlas | null;

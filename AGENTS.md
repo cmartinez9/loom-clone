@@ -28,6 +28,20 @@ the correction governs. Read it before implementing anything against §6.2, §6.
 
 Section references in source comments (`§2.7`, `§7.1`) point at the architecture report.
 
+**A captain decision and a firstmate decision are not the same kind of thing, and this
+file should always say which it is quoting.** The `decision-*.md` files and the numbered
+decisions in `loom-clone-decisions.md` are the captain's: settled, expensive to revisit,
+and to be diverged from only in writing (`decision-comfort-ladder.md` is what that looks
+like). Everything else that was _decided_ rather than derived — including the calls
+firstmate takes in a review round while the captain is asleep — is a judgement someone
+should argue with the moment they hold better evidence, and one of them being overturned
+is the process working rather than a defect. Phase 15's own history is the example:
+firstmate's first answer to a keyframe drag corrupting its region was a bound on where
+the key may go, and a reviewer's evidence retired it in favour of fixing the reader
+(§ Sharp edges — the editor). So attribute precisely: do not promote a firstmate call to
+a captain decision by writing "the captain" over it, and do not quietly demote one of
+his.
+
 ## Commands
 
 ```bash
@@ -127,8 +141,16 @@ apps/renderer/     renderer windows. First-run setup, library — including the 
                    (`export/`), the preview loop, `media/` — the loom:// readers
                    both of them share, including `TrackReader`, which is what turns a
                    multi-part track into the one-part seam preview and export already
-                   speak — and `editor/`, the editor window: the preview host, the
-                   timeline and trimming.
+                   speak — `glyphs.ts`, the one place either path rasterises a glyph —
+                   and `editor/`, the editor window: the preview host, the timeline and
+                   trimming (phase 14), plus the controls (phase 15) — `zoom.ts` for
+                   manual zoom regions and keyframe ops, `annotate.ts` for annotation
+                   ops and the pointer's map into normalized source space,
+                   `generators.ts` for reading `events/` and §3.5's regenerate/bake,
+                   `tools.ts`, `stage.ts` (the handles over the picture),
+                   `inspector.ts` and `gestures.ts` (what a two-phase gesture and a
+                   moving playhead should cause). The first three and `gestures.ts` are
+                   pure and are where the arithmetic that is wrong invisibly lives.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -636,8 +658,9 @@ Report §8 has a phase for the timeline _model_ (7), the _generators_ (10) and
 _annotations_ (11), and no phase that builds the window they live in; the captain
 settled that in `data/loom-scope/decision-editor-scope.md` ("full editor", with
 **track stacking and blending UI out of the MVP** and **manual zoom alongside the
-automatic generators**). `apps/renderer/src/editor/` is the shell half: the window,
-the preview host, playback transport, the timeline and trimming. The library's
+automatic generators**). `apps/renderer/src/editor/` is both halves of it: phase 14's
+shell — the window, the preview host, playback transport, the timeline and trimming —
+and phase 15's **controls**, below. The library's
 **Open** button sends `loom.editor.open(id)`; `apps/main/src/editor.ts` shows the
 `editor` role keyed by the recording — which is what §1.2's `multiple: true` already
 meant by one editor per recording — and puts the id in the page's URL, so a window is
@@ -662,16 +685,22 @@ the only protection.
 here: vanilla TypeScript against the Pressroom design system, like the other four
 windows.** The argument is in `editor/main.ts`'s header and is not only consistency —
 the two things this window does sixty times a second are a WebGL draw and one style
-write, and §4.3's first rule is that nothing allocates in the loop. `loom-p15`
-inherits the choice; re-taking it is a decision to write down, not one to drift into.
+write, and §4.3's first rule is that nothing allocates in the loop. **Phase 15 kept
+it**, on the condition its header names: the rail, the overlay and the three inspector
+panels rebuild on a _document_ or _selection_ change, which is a person's rate, and no
+control reads another control's value. Re-taking the choice is a decision to write
+down, not one to drift into. The one panel that also follows the **playhead** is the
+standing _Zoom_ one, and it does so the way the transport does — guarded text writes
+per frame, a rebuild only when the shape of what it says changes — which is that
+condition kept rather than an exception to it (§ Sharp edges — the editor).
 
 **The timeline is drawn in _source_ time**, and that is the load-bearing layout
 decision (`timeline-geometry.ts` argues it). Its full width is the recording as
 captured; the trimmed-away head and tail stay on screen, dimmed, with the handles
 still on them. §3.2 anchors effect tracks in source time _"so that trimming does not
 re-time your zooms"_, so a timeline-time ruler would draw those tracks sliding under
-a trim they are explicitly independent of — and a keyframe placed by hand, which is
-`loom-p15`'s job, would not stay over the frame it was placed on. The playhead is
+a trim they are explicitly independent of — and a keyframe placed by hand, which phase
+15 made possible, would not stay over the frame it was placed on. The playhead is
 the one thing that crosses: it is drawn at `resolve(...).sourceTime`, and a scrub
 converts back with `timelineTimeAt`. **A trim is `clips.set` with one clip and no new
 primitive**, at `speed: 1` always — `trim.ts` says why a speed control is not a local
@@ -699,8 +728,466 @@ notice it — this gate for the two that move the picture, `editor-trim.test.ts`
 the frame budget: §8's 16.67 ms is `test/phase6-gate.test.ts`'s, and a second opinion
 about one number is a weaker one.
 
+## The editor's controls, in one paragraph
+
+Phase 15, and **no new primitive anywhere**. A _manual zoom_ is one `manualZoomTrack`
+carrying one `activeRanges` window per region the user placed, with §6.5's own
+four-keys-per-segment shape on `amount` and spring keys on `center` over
+`DEFAULT_SPRING` — the same shape the generator emits, because a hand-placed zoom and
+a generated one moving at visibly different speeds is a defect nobody can name. An
+_annotation_ is a `Span` on one `annotationTrack`; _keyframe editing_ is `key.set` and
+`key.remove`; _regenerate_ and _bake_ are `@loom/edl`'s `regenerateOps` and `bakeOps`,
+which have existed unused since phase 10. What phase 15 adds is the reading, the
+surface and the three seams a pure package cannot cross: reading `events/*.ndjson`
+over `loom://`, hashing them for §3.5's fingerprint, and asking `recording.json`
+whether the click tap was ever live.
+
+**`buildManualZoomTrack` is what _creates_ a region and never what _updates_ one, and
+that distinction is the whole of § Sharp edges' region-edit entry.** A region is read out
+of keys the user is allowed to drag and retime, so writing it back as the canonical
+four-keys-plus-three layout discards everything the `ZoomRegionInput` summary cannot
+carry. `placeZoomOps` inserts a fresh region's keys beside whatever is already on the
+track; `updateZoomOps` and `removeZoomOps` **patch the keys that are there**. The ops are
+still one `track.remove` + `track.add` pair — a dozen key ops would each have to pass
+validation on the way through `applyOps` — but the replacement is this track's own keys
+with the edit applied. `a-region-edit-discards-a-hand-edited-keyframe` is one of the four
+mutations that hold it — § Sharp edges' region-edit entry names all four — and their
+guard is `apps/renderer/test/editor-zoom.test.ts` rather than the gate, because the
+property is arithmetic over a document and nothing composited can be taken away from it.
+
+**The captain's own row of the capability table is _"Manual option too."_**, and it is
+`overrideZoomOps`: a manual region seeded with what `resolve` reports at that instant —
+so the picture does not jump when control changes hands — spanning the **generated
+segment's own `activeRanges` entry**, placed at the **end** of the track array. That
+last word is the whole mechanism. `resolve` folds in array order and `replace` wins, so
+last is topmost, and §3.5 then does everything: the user's zoom wins inside its window,
+the generator drives outside it, and the crossfade at each edge is `blendMs`. **The
+generated track is not touched**, which is §3.5's _"user edits survive by construction,
+because they were never in that track"_ read from the other side — so a _Regenerate_
+afterwards rewrites the generator's track and leaves the override alone. _Bake_ is the
+other option and a different intention: it detaches a generated track from regeneration
+(`origin: 'manual'`, the spec kept as `generatedFrom`, the block removed **by name**)
+and makes its keyframes the user's to edit. Both are offered and the panel says which
+is which; **a key on a live generated track is selectable and not draggable**, because
+an edit there sits in the one place the next regenerate is licensed to discard.
+
+**Where a _generated_ track lands is `GENERATOR_RANK` in `generators.ts`, and it is
+§3.5's order rather than a constant anyone may pick**: cursor-follow at the bottom,
+auto-zoom above it, both below every manual track. The rank is load-bearing because
+cursor-follow emits a `center`-only channel with a single always-on `activeRange`, so a
+cursor-follow track sitting _above_ auto-zoom outranks §6.5 step 3's edge-snapped
+cluster framing inside every click segment while auto-zoom's `amount` still applies —
+the shot zooms in on a click and frames somewhere else. `runGenerator` therefore names
+an index **only when there is no track to replace**: on the replacement path
+`regenerateOps` reads `options.at ?? existing`, and naming one there lets a
+_Regenerate_ silently re-order the two generated tracks against each other. **What is
+worth inheriting is how the original defect survived**: both generators were inserted
+at `at: 0`, and `packages/edl/test/generator-stacking.test.ts` — which pins exactly the
+arrangement that was broken — went on passing, because it exercises what the _model_
+can express and the wrong index was the _editor's_. The property belongs to whichever
+code decides it, so the coverage is now in
+`apps/renderer/test/editor-generators.test.ts`, over `runGenerator` itself in **both
+invocation orders**.
+
+**A slider is provisional on `input` and committed on `change`, and the panel does not
+rebuild while one is mid-gesture.** Both halves of `inspector.ts`'s `range`, and each
+closes a different defect the Amount slider had. It is the control on the one
+capability the captain named himself — _"Manual option too."_ — so a slider that does
+not work is that capability not working; the two-phase shape below is firstmate's
+answer to it and not a captain decision. Committing on `input` ran `replaceChildren`
+over the very `<input type="range">` the pointer was holding, so the drag ended on
+**first contact**: the focus/caret
+restore in `Inspector.render` can put focus back and cannot put a pointer capture
+back. And it made every step of the thumb an op, a revision and an undo entry, so
+undoing a drag would take as many undos as the pointer moved. The two-phase shape is
+`TimelineUi`'s trim handles and `StageUi`'s drags, deliberately, because a second
+interaction model for the same kind of gesture is a second thing to keep right;
+`InspectorCallbacks` carries the same `phase: 'move' | 'end'` they do. Note which call
+debounces: **`EditorProject.preview` is what waits §3.6's 100 ms, and `commit` clears
+that debounce** — the sentence about a drag costing one compile rather than sixty was
+only ever true of `preview`.
+
+**Annotation geometry is normalized _source_ space, so the pointer has to be converted
+and the conversion is the load-bearing part.** `annotate.ts`'s `outputToSource` is the
+compositor's `sourceSampleRect` + `contentRect` pair inverted, and phase 11's argument
+for source anchoring is a privacy one: geometry in output space lets a zoom slide a
+blur off the thing it hides. A point on the **letterbox** has no source coordinate and
+answers `null` rather than clamping — an annotation dropped there has no content to be
+welded to. `sourceToOutput01` is the way back, for handles only, and it is written out
+rather than imported for the reason phase 11's golden fixture computes its own
+expectation box: a handle placed by the code under test sits exactly on a wrongly-drawn
+annotation and looks right. `apps/renderer/test/editor-annotate.test.ts` round-trips it
+against `@loom/compositor`'s **own** forward map, which is the only shape that can
+disagree.
+
+**The gate is `test/phase15-gate.test.ts`** (harness `test/editor-controls/`), a real
+Electron run over a real `.loomrec` with real §2.5 logs in `events/`: the library's own
+Open button, the real generator button, the real slider, real `sendInputEvent` drags on
+the picture and on the lane, and **two real exports through `ExportSession`** — one
+before the user takes manual control and one after. The assertion worth the whole gate
+is those two finished MP4s, demuxed with `parseMovie` and decoded back out of their own
+sample tables: **inside** the manual window they differ (measured 53.6 of 255 mean
+absolute), **outside** it they are identical (0.000). The outside reading is the
+control, and it is what a whole class of plausible defects fails — a manual track
+written with `ALWAYS`, a disturbed clip list, a wrong frame selected for a time — every
+one of which changes the picture everywhere. **The slider is _dragged_ rather than
+nudged** — several `input`s and one `change` — and that is the only shape that can see
+what one synthetic `input` cannot: the element the gesture is holding is still the
+document's when it ends, and the whole gesture cost `edit.json` **one** revision. A
+single `input` passes over a slider that is destroyed by its own first event, because
+the last value it was given still lands. It also drives one gesture that **ends where
+it started**, which is the only shape that reaches the "this changes nothing" branch
+every two-phase callback has, and asks the editor what it is showing against what it
+committed. Twenty-one entries in `npm run verify:mutation`
+break the production source on disk and each names what must notice it; the ones worth
+knowing are the three whose guard is deliberately a unit test and **not** this gate.
+`an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
+gate draws and reads at one zoom, so an identity map still lands the mask inside the
+box); `a-gesture-ended-off-the-picture-strands-its-preview` and
+`the-generator-panel-blames-a-grant-while-it-is-still-reading` are shapes this gate has
+no reading of at all, and both are reachable before the first export — so a gate-only
+guard would leave them unproven on exactly the host that loses the context.
+It does **not** measure the frame budget or §4.5's per-pixel preview/export identity;
+phases 6 and 8 own those, and a second opinion about either is a weaker one.
+
+**This gate has three outcomes, and the third is not a pass — and it is withheld per
+CLAIM rather than per run.** Phases 6 and 8 each withhold a whole verdict when their
+instrument goes; this gate's instrument is the _export pipeline_, which comes back
+**refused**: `ExportRenderLoop` consults `Compositor.contextLost` before and after every
+composite and throws `ExportContextLostError` rather than encoding frames nothing drew
+(§10.2). That refusal is the product working. What was missing was this gate's ability
+to say so — three CI runs of one commit (31134549671, 31136423113, 31137779565) lost the
+context at export frame 72 and twelve assertions then failed on _missing readings_
+rather than wrong ones. `test/editor-controls/verdict.ts` is the answer, in phases 6 and
+8's own vocabulary: `exportInstrumentLost`, a **NOT JUDGED** banner carrying the measured
+evidence, and `skip()` rather than a pass.
+
+Per claim, because the export is step 4 of 8: the generator ran, the picture changed and
+the document reached the disk **before** the context died, so those claims are judged on
+every run and fail exactly as hard as before. Only the claims from the first export
+onward are withheld. The predicate is keyed on two measured facts and nothing else — the
+failure carries `ExportContextLostError`'s **own sentence** (`CONTEXT_LOST_SIGNATURE`, a
+substring of its most specific clause, so a reworded message sends the gate back to
+judging every failed export rather than withholding), and **no reading of what reached a
+file** survives. A §7.5 verification failure, a decode stall, an encoder error, a muxer
+refusal: every one is judged and fails, on either export.
+`test/phase15-verdict.test.ts` is the fence and enumerates ten bad-run shapes that must
+still be judged, including a lost context that measured a delta anyway, a second export
+that failed for a real reason after the first finished, and a different error that merely
+mentions a context.
+
+**The second condition is about pictures rather than pipelines, and it took a second CI
+shape to get that right.** The three runs above lost the context at export **A**, so
+nothing about either export survived and counting a _finished_ export as a reading was
+harmless. Run 31161802868 is the shape that showed it was not: export A finished and
+verified, the GPU process then died with `Failed to allocate texture` inside
+`Skia_Wrapped_YUVPlane` 0.16 s after export B's page loaded — the same host-memory
+exhaustion § Sharp edges records against the phase-8 harness — and export B refused at
+output frame 7. One export reading survived, the gate judged, and _"expected +0 to be 2"_
+is a verdict on §4.5's export agreement that nothing on that run measured: the disease
+this mechanism exists for, arriving one export later than it was written for. So
+`exportReadingsTaken` enumerates **decoded frames and the two deltas** — what every
+withheld claim is made of, since each compares _two_ files — and a finished export, which
+says only that the encoder and muxer worked once on this host, is reported in the banner
+by label and byte count rather than counted as a reading. Nothing in the strict direction
+moved: the signature condition is untouched, so a failure of any other kind is still
+judged wherever it lands.
+
+**Be honest about the reach, because a skipped test must not read as coverage.** On the
+paravirtual CI runner this has happened on **every** attempt measured, so **the export
+claims of this gate are effectively never judged on CI and are only meaningful on a real
+Mac** — where they pass, and where the numbers above were measured. The banner says it
+and so does this paragraph. The gate gets **one** launch and that is unchanged; more
+attempts against a host that cannot serve the allocation is the move this project keeps
+refusing. Three `verify:mutation` entries were guarded solely by claims this gate
+withholds; **all three now carry a second guard that cannot withhold**, which is the
+remedy `WITHHOLDABLE_GUARDS` prescribes — and having taken it they are **no longer
+printed** under the exposure warning, because `warnSolelyWithholdable` selects a mutation
+only when _every_ file in its `mustFail` can withhold. That is the warning going quiet
+because the exposure closed, which is the only reason it ever should.
+
+**`the-zoom-panel-does-not-follow-the-playhead` was a fourth, and what it cost is worth
+inheriting: `runTests` can only read a _file_, and this gate withholds per _claim_.** So
+on run 31148316397 the claim that guarded it withheld, the one claim this gate judges on
+every run still passed, and the mutation proof reported `SURVIVED` — a hole in a gate
+that had not been given the chance to look, which is the over-claiming direction in the
+one tool whose job is to prove the gates detect things. The fix is the prescribed one and
+not a widening of `no verdict`: the panel claim needs **no manual region**, so its
+numbers half is now judged before the first export, over the generated track alone, at a
+third instant **between** the two auto-zoom segments. `INSIDE_SEC` and `OUTSIDE_SEC` both
+sit inside a segment's hold and resolve to 2.500 and 2.499 — the same `2.50×` — so a
+frozen panel agrees with itself across that pair, and only a reading where the generator
+has nothing to say can see it; `BETWEEN_SEC` carries the derivation. The richer claim —
+`yours`, and whether _Take manual control_ is offered — still needs a manual region, is
+still taken after export A, and is still withheld. That half is carried by the same pure
+guard the other three took, so this entry is not printed under the exposure warning
+either. Were it listed on the gate alone it would be — the warning is file-keyed and this
+gate withholds per _claim_, so it would over-report a claim the gate does judge, which is
+the conservative direction and is what `P15_GATE`'s docblock records.
+
+**The other three were closed the same way the fourth's richer half still needs**, and
+the module is worth knowing about on its own: `apps/renderer/src/editor/gestures.ts`
+holds the four decisions those entries break — what a two-phase gesture does with `null`
+ops, what a slider's `input`/`change`/`blur` mean, whether a repaint rebuilds or writes,
+and whether the playhead moved — lifted out of DOM handlers and a `requestAnimationFrame`
+closure into pure functions. `apps/renderer/test/editor-gestures.test.ts` judges them on
+any host with no GPU, no window and no Electron. **None of the four ever needed a frame
+composited**, which is the whole argument for the seam: a panel that does not follow the
+playhead, a slider that commits on every step, an inspector that rebuilds under its own
+thumb and a gesture that strands its preview are all decidable from numbers. The gate
+keeps its entry beside the unit test on each, because it proves the **wiring** — a real
+thumb on a real slider — that no pure test can.
+
+One thing that took a second pass and should be inherited: `Inspector.render` and
+`paintZoom` carried **independent copies** of the mid-gesture condition. Breaking one
+left the other covering for it, so `the-inspector-rebuilds-under-its-own-thumb` survived
+the gate while pointing at a line that genuinely mattered. `panelIsHeld` is now the one
+predicate both ask. A property split across two copies of a condition is a property with
+no single place to break, which is the same thing `regionCenter` and the seam-S4 adapter
+each cost a round to learn.
+
+Two consequences worth expecting. Phase 14's gate now asserts
+`['Screen', 'Zoom', 'Notes']` — the annotation lane is an _effect_ lane like Zoom, owned
+by the document rather than declared by `recording.json`, so it is on every recording;
+the list is still exact. And `test/editor-controls/main.ts` takes a **`--shots <dir>`**
+flag that writes a PNG beside each reading — the way to _look_ at this window, since
+`scripts/screenshot.cjs` boots the real main process whose recordings root is
+`homedir()` with no override.
+
+**It is the only gate that drives the shipping `export` role, so it carries the same
+four Chromium switches the other three Electron gates do — and its first CI run is why
+they are there.** `test/gate/`, `test/golden/` and `test/export-golden/` have all along
+run with `disable-gpu-watchdog` and the three backgrounding switches; this harness
+shipped without them and the first run on a GitHub macOS host failed as _an export whose
+video encoder produced neither a chunk nor an error_ (§10.2's named symptom, from
+`ENCODE_STALL_TIMEOUT_MS`) followed by a bare _"Script failed to execute"_ several steps
+later. Those read as two defects and are one event: the export window's frames are
+`new VideoFrame(canvas)` off a GL canvas, so a software H.264 encoder produces nothing
+until the GPU hands those pixels back, and the editor's own context dies in the same
+instant — so the next `readPixels()` the probe asks for throws. The exposure is this
+gate's alone in two ways: the `export` role is `show: false` at 1x1 (§1.2), which is a
+renderer Chromium backgrounds by definition and then deschedules behind a preview loop
+compositing `edit.output.size` at rate; and nothing here is timed, so unlike phases 6 and
+8 neither switch can flatter a reading. **What the switches were not is a diagnosis of
+that particular run**, and the evidence that would have been one had been thrown away.
+That part is closed: the harness notes `child-process-gone`/`render-process-gone`, and
+`runProbe` prints the electron output when the report says the run failed instead of only
+when the JSON will not parse. **No retry was added.** A relaunch keyed on anything weaker
+than phase 6's and phase 8's `contextLost` would be a retry around an acceptance gate, and
+this gate has no such reading to key one on.
+
+**And the next two CI runs showed what the switches do not cover: the editor's preview
+loop was competing with the export for the host's GPU, and the fix is to take it off.**
+Both runs died identically and in the same place — `Failed to allocate texture` inside
+`Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error` and
+`abnormal-exit (exit 8704)`, **0.3 s after `export.html` loaded** — the GPU host-memory
+exhaustion § Sharp edges records against the phase-8 golden harness, reaching this gate as
+§10.2's named symptom because a software encoder produces nothing until the GPU hands the
+canvas back. Phase 8's answer was to reduce the GPU clients live at the peak, and here that
+peak was two
+renderers holding a WebGL2 context each with one of them doing work nobody reads:
+`PreviewLoop` renders every `requestAnimationFrame` **whether or not it is playing**, into
+a render target of `edit.output.size` — 1920×1080 on every bundle (§ Sharp edges — the
+editor) — against an export whose own composite is a 320×180 source into 640×360, and no
+reading is taken between `start` and the job's last progress update. `runExport` therefore
+**hides the editor for the length of each export** and shows it again in a `finally`,
+because a failed export must leave the gate able to say so. Hiding is what stops it and
+that is measured rather than assumed: a hidden window gets **no** `requestAnimationFrame`
+at all (121 frames/s visible, 1 then 0 across 2.5 s hidden, 146 again once shown), and the
+four switches above do not change it — they govern process priority and occlusion, not
+page visibility. The export window is untouched by the same measurement, because
+`ExportRenderLoop` is a `while` loop on timers rather than on frames, which is what lets it
+work at `show: false` and 1×1 at all. **This is not a fixture reduction and no reading
+moved**: the two exports still measure 53.596 inside the manual window and 0.000 outside
+it. A second gate wanting one export while another window previews should sequence them
+the same way rather than widening anything.
+
 ## Sharp edges — the editor
 
+- **`StageUi`'s pointer→source mapping has to be refreshed every time the resolved
+  zoom moves, not every time something is selected.** `outputToSource` is the map every
+  pointer on the picture crosses, and it lives on the same `StageState` as the handles
+  over a selected annotation — but nothing is selected for most of this window's life,
+  so a refresh guarded on a selection left the map holding whatever zoom was resolved
+  at the last document, selection or _tool_ change. Scrubbing into a 2.2× segment and
+  then dragging a blur wrote the redaction at the coordinates it would have had at 1×,
+  which is precisely what anchoring annotation geometry in source space exists to
+  prevent. The rubber band round-trips through the same stale map, so it looks right
+  until release. The phase-15 gate does not cover it: it arms the tool _after_ seeking,
+  which is the order in which the map happens to be fresh.
+- **`ZoomRegion.index` is a position in a time-sorted `activeRanges`, so the newest
+  region is not the last one.** `placeZoomOps` sorts the windows by start time;
+  selecting `zoomRegionsOf(...).length - 1` after placing a zoom at 2 s on a document
+  that already had one at 10 s selects the 10 s one, and every field in the panel then
+  tunes a zoom nobody is looking at. `main.ts`'s `selectZoomAt` picks the region that
+  _covers_ the instant that was just placed. (`length - 1` is not the largest index
+  either — `zoomRegionsOf` skips a window whose keys it cannot read.)
+- **A gesture that ends where it started must cancel its preview, not return.** Every
+  op builder answers `null` for "this changes nothing", and every drag can reach that —
+  a slider taken away and back, a keyframe returned to where it was. Returning early
+  leaves the _previous_ move's provisional document on `EditorProject` with nothing to
+  clear it, so the preview shows a value that is not in `edit.json` and the inspector,
+  which reads `project.document`, shows it too until the next commit or undo happens
+  by. `main.ts`'s `edit(ops, phase, label)` is the one boundary all six two-phase
+  callbacks end at, so a seventh cannot be written without it. Only a gesture that ends
+  on the value it started from reaches the branch, which is why the phase-15 gate
+  drives one rather than trusting that six call sites each remembered.
+- **The invariant that generalises it: a gesture that began provisionally ends in
+  exactly one of commit or cancel, on _every_ exit path.** The entry above is that rule
+  where a gesture produced no ops; `StageUi` is where a gesture never reaches a callback
+  at all, and it slipped through the boundary that fixed the first. `#apply` refuses to
+  dispatch when `outputToSource` answers `null` — the letterbox, which every bundle has,
+  since nothing sets `edit.output.size` from the recording — while the pointer-up
+  handler dropped the drag regardless, so releasing a mask past the edge of the picture
+  left the last move's provisional document showing with nothing to clear it. **The
+  shape is what matters and not the branch**: `#apply` now answers _whether it
+  dispatched_ and the one pointer-up handler cancels when it did not, so a later drag
+  kind, a `pointercancel` and a selection whose geometry cannot be read are all covered
+  without each remembering. Guarded by `apps/renderer/test/editor-stage.test.ts` — a
+  unit test over a stubbed DOM, `vi.stubGlobal` as `export-encode.test.ts` already does
+  — deliberately **not** by the phase-15 gate: this shape is reachable before the first
+  export, the gate has no reading of it, and a gate-only guard would leave it unproven
+  on every host that loses the context (§ WITHHOLDABLE_GUARDS).
+- **A selection is checked against `project.committed`, never `project.document`.** The
+  latter is the _provisional_ document while a drag is live, and a keyframe drag
+  previews its key at the new `t` on every pointermove — so a guard reading it finds no
+  key at the selected `t` and drops the selection on the first move, taking the panel
+  and the lane's marker with it for the rest of the drag. The three things that guard
+  is for — an edit that landed, an undo, a conflict reload — are all committed state.
+- **A manual keyframe is bounded by its region's window as well as by its
+  neighbours.** The neighbour bound leaves `lowSec` at 0 for the first key of the first
+  region, so a drag could take it out of the `activeRanges` entry it belongs to;
+  `zoomRegionsOf` then filters it out, the region reads back three keys and starting at
+  its hold, and the next region-level edit writes that misreading in — data corruption
+  with nothing on screen that says so. `keyBounds`
+  intersects the two, inclusively at both ends because `zoomRegionsOf`'s own filter is
+  inclusive: the first key of a region sits _on_ its window start, and a bound that
+  disagreed with the reader by one float would drop a key from its own region.
+  **That bound is right and it is not what closes the class** — see the entry below.
+- **A region's centre is identified structurally, and a position in a list is not
+  identity.** `zoomRegionsOf` used to take the middle element of the `center` keys
+  filtered by the **`amount`** channel's extent, which assumed a shape nobody
+  guarantees: the moment that set gained a second member, the middle of two was the
+  identity ramp-out key and the region read back `[0.5, 0.5]` — then the next
+  region-level edit took that misreading for the truth and wrote the frame centre in
+  over the user's framing, silently. Two ordinary drags reach it, and this is
+  the half worth inheriting: **one of them is not a window question at all.** The last
+  `amount` key dragged later pushes `endSec` past the ramp-out centre key so the filter
+  admits it; the last `center` key dragged _earlier_ does the same while never leaving
+  its own window, so no bound on where a key may go can close it. `regionCenter` asks
+  the writer's question instead — exclude the keys `buildManualZoomTrack` puts at the
+  region's ends, take the candidate nearest `startSec + ZOOM_RAMP_SEC`, and answer
+  `[0.5, 0.5]` when a region has no centre of its own left rather than refusing a
+  document this editor did not write. `regionCentreKeyIndex` is that question asked
+  once and read two ways — the reader takes the value, the writer rewrites that key and
+  no other — because a property split across two copies of a condition has no single
+  place to be right. It is instance 1 of the entry below; read that one first.
+- **A derived proxy standing in for identity has now cost this file four defects, and
+  the rule is that identity is stated rather than inferred.** All four are the same
+  shape — something that _usually_ lines up with the fact was asked instead of the fact,
+  and each one silently corrupted the user's own work rather than failing:
+
+  1. a region's **framing key** read as the middle of a filtered list, so the moment the
+     set gained a member the identity ramp-out key was returned and the framing was
+     overwritten with the frame centre;
+  2. the **`amount` boundaries** read as first-and-last of an array, which is right until
+     a boundary key is deleted and the outermost survivor is somebody's hold;
+  3. the **`center` boundaries** read by time-matching against the **`amount`** channel's
+     extent — one channel read through another. Drag the ramp-in `amount` diamond from
+     10 to 10.5 and the `center` key still at 10 stops matching, is counted as interior,
+     and the next edit — an Amount-slider nudge, naming nothing about the extent — pulls
+     the region's start to 9.999. The drag is undone _and_ the region starts earlier than
+     it ever did. The same misclassification made a `center` key dragged into the settle
+     tail past `sourceDurationSec` refuse **every** region-level control from then on,
+     with nothing on screen to say why;
+  4. the extent written onto a carrier **unconditionally** — the fourth shape, and the
+     one the first three do not cover: not a wrong key identified, but the right key
+     overwritten. A window runs `segmentSettleTailSec` past the region's end and the lane
+     draws the band that far, so the ramp-out `center` diamond can be dragged _into the
+     tail_; writing `wanted.endSec` over it put it back on the next Amount nudge.
+
+  `regionKeyRoles` is the one answer all of it now asks — the reader of the framing key,
+  the reader of the interior times, the extent bound and the writer, for **both**
+  channels. It states the fact in two halves that both have to hold: membership is the
+  region's own `activeRanges` window (`ownKeyIndexes`), and a key carries an end when it
+  is the region's own outermost key on that side **and** lies at or outside where the
+  region begins or ends. The qualification is the half that position alone cannot give:
+  delete a region's ramp-in `center` key and its outermost survivor sits strictly inside,
+  so it is interior, keeps its time, and a start edit does not drag the framing to the
+  edge. `carriesStart`/`carriesEnd` are that qualification named, and `regionKeyRoles`
+  asks them of the extent the region **currently** has. `withExtent` keeps a carrier's
+  time only while its own two conditions both hold: the key sits in the region's
+  **settle-tail slack** (`inSettleSlack` — the one stretch of the window that is not
+  between the current extents, so the only place a person could have dragged a key past
+  an end) _and_ it still lies inside the region's new window. Asking the first of the
+  extent the region is **about to** have instead — _would it still carry that end_ — is
+  trivially true of any shrink, which turned every `Ends` edit smaller than the tail into
+  a silent no-op; `a-sub-tail-end-edit-is-a-silent-no-op` is that mutation. Both halves
+  are load-bearing — drop the first and no carrier follows an edit at all, so the
+  ordinary ramp-out key keeps a time the region no longer ends at, is read back as
+  interior, and the framing reader takes it for the user's centre; drop the second and a
+  key the region no longer reaches is stranded in no region at all. That the start and
+  end sides then behave differently is the window's own asymmetry
+  (`[startSec, endSec + tail]`) rather than a case for the tail.
+
+- **The sweep that closed that list, so the next reader can see what was looked at.**
+  Four shapes were hunted across `zoom.ts` and `annotate.ts`: a position in a list,
+  first/last, one channel read through another, and an unconditional write over a value
+  the user can have moved by hand. **Fixed**: `regionCentreKeyIndex`, `regionKeyRoles`'s
+  two channels, `withExtent`. **Examined and left, each for a stated reason**:
+  `zoomRegionsOf`'s extent (the outermost own `amount` key _is_ where the channel begins
+  — a definition, not a proxy) and its window filter (deliberately wider than the
+  writer's `ownKeyIndexes` at a touching seam, noted in code, and the conservative
+  direction); `neighbourBounds`' `at ± 1` (adjacency _is_ position over §2.6's sorted,
+  unique `t`); `windowContaining` (windows never overlap); `moveKeyOps`/`setKeyValueOps`/
+  `removeKeyOps` addressing a key by `(trackId, channel, t)`, which is §2.7's own
+  addressing under the same uniqueness rule; `annotationAt`'s topmost-is-last (array
+  order **is** z-order, §3.3); and `patchRegion`'s hold rewrite — the one write here a
+  hand-set value does not survive, because the hold _is_ what "the amount" names and an
+  asymmetric hold cannot survive an edit that renames it. **Two recorded rather than
+  done**, both needing a decision rather than a patch: `ZoomRegion.index` is a position
+  in a time-sorted `activeRanges` and has already caused one defect (the `length - 1`
+  entry above), fixed at the call sites because a durable region id is a document-format
+  change; and `annotate.ts`'s `pairOf`/`retimeAnnotationOps` read `keys[0]`, which is
+  exact today — every writer there emits one `hold` key and no §2.7 key op addresses a
+  span channel — and stops being exact for §3.3's animated annotation, which would need
+  the key at the instant being asked about rather than the first. Both are stated at
+  their sites. Firstmate's calls, not the captain's.
+
+- **A region-level edit patches the keys that are there; it never re-derives them.**
+  The read-then-regenerate shape the two entries above each hit once is the class
+  itself: a region is _read out of_ keys the user may drag, retime and revalue, so
+  writing it back from a four-number summary silently discards whatever the summary
+  cannot carry. The natural flow reaches it — lengthen a ramp by hand, then nudge the
+  Amount slider — and losing the finer edit to the coarser one, with nothing on screen
+  saying so, is how a feature stops being trusted. So each verb touches only what it
+  names: amount rewrites the hold, centre rewrites the framing key, start and end move
+  the boundary keys and the `activeRanges` entry, and remove takes one region's window
+  and its own keys and leaves the others alone. Three consequences worth expecting. A
+  region's extent is now held off its **own** interior keys (`extentAroundOwnKeys`) —
+  `keyBounds` from the other side, because a boundary dragged past a hold key is a
+  repeated `t` §2.6 refuses — so dragging a start later stops at the hold rather than
+  pushing it along. That function deliberately does **not** re-apply the recording's own
+  length: `clampRegion` holds what the _user asked for_ inside the recording, and a key
+  that is already past it (which `keyBounds` permits, since a window runs
+  `segmentSettleTailSec` past the region's end) must not turn every control into a
+  silent no-op. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
+  a second region is _inserted_ beside the first's keys, not rebuilt with them.
+  Four registry entries hold the promise, one per half of it: one breaks a hand-set
+  **value**, one a hand-dragged **time**, one a carrier the user moved into the **settle
+  tail**, and one the ordinary carrier that must still follow the edit — because a
+  single entry breaking more than one would leave whichever half its guard noticed
+  second unproven.
+  **The inheritable lesson is about the test, not the condition: a region-level edit
+  _smaller than the settle tail_ is the size the matrix could not see.** Every verb in
+  `editor-zoom.test.ts`'s interior × boundary × five-verb grid moved by one magnitude and
+  mostly one direction — END only ever by seconds — so the round that made the carrier
+  write conditional turned every `Ends` shrink under `segmentSettleTailSec` into a silent
+  no-op that still spent a revision, and the grid passed. A matrix wide in verbs and one
+  deep in magnitude is thinner than it looks; the sub-tail case is now in it and derives
+  the tail from `DEFAULT_SPRING` so a spring change cannot make it vacuous. The other
+  four verbs are still single-magnitude and that is recorded at the site rather than
+  fixed here.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —
@@ -753,6 +1240,79 @@ about one number is a weaker one.
   scales the element; the composite is what the exporter will encode, at the
   resolution it will encode it, and it does not change because somebody dragged a
   corner. It also keeps the frame budget off the window geometry.
+- **Selection handles are DOM siblings of the canvas and may never be a draw call.**
+  `#ovl` is `position: absolute` over the preview at its exact size, and `stage.ts`
+  owns every node in it. §4.5 puts what preview and export composite on the
+  must-be-identical list, and a handle is precisely the thing that must be in one and
+  never in the other; a sibling is the only arrangement where that is true by
+  construction rather than by remembering.
+- **A recording with no event logs is not trouble.** It is the ordinary state of every
+  recording made before the sampler was wired in and of every one on a machine that
+  declined Accessibility, so `readEventLogs` reports `trouble: null` for it and only
+  names a log the document **promised** and could not be read. This is phase 5's
+  absent-versus-empty discipline one layer out, and it was found by phase 14's gate
+  going red on a `trouble` line over an editor where nothing was wrong.
+- **_Reading_ and _unavailable_ are different answers, and saying the second while the
+  first is true is not a cosmetic flicker.** `readEventLogs` is deliberately not awaited
+  before the editor opens, so for a few hundred milliseconds — longer on a twenty-minute
+  recording, which is megabytes of NDJSON plus a SHA-256 over it — nobody knows what the
+  logs hold. The generator panel therefore has **three** states
+  (`GeneratorAvailability`), and `main.ts` hands `generatorStates` its `logs` as `null`
+  rather than substituting an empty `EventLogs`, because that substitution is the whole
+  defect: the panel opened saying _"No clicks were captured — the Accessibility grant is
+  what a click log needs"_ over recordings that have a real click log. **The captain
+  granted Accessibility — the most invasive of the four — on the promise of that log,
+  and that promise had already been broken once**, so the sentence does not read as a
+  panel being behind; it reads as the permission having failed, on the first thing on
+  screen, every time an editor opens. Staleness is withheld for the same window and for
+  the same reason: it is a digest comparison and the digests are exactly what is
+  outstanding, so asked early it answers _"the log this was generated from is no longer
+  there"_ — the same lie one channel over, and the one the inspector shows in preference
+  to `reason`. **A log that could not be _opened_ is a third thing again**, neither
+  absent nor empty: `EventLogs.unreadable` names which, so each row blames the right
+  cause, and `unreadEventLogs()` is what a read that threw outright falls back to.
+  `the-generator-panel-blames-a-grant-while-it-is-still-reading` is the mutation.
+- **Two panels must not share a heading, and only a screenshot says so.** The
+  selection panel titles itself after what is selected and the standing one is _Zoom_;
+  the first version rendered _Zoom_ twice, one above the other. Nothing in `npm test`
+  can see that — this is the third defect in this window found by looking at it, after
+  the circular stage fit and the missing `[hidden]` rule. `--shots` exists so the
+  fourth is cheap to find, and the entry below **is** the fourth.
+- **The standing Zoom panel is split like the transport, and that is the
+  no-per-frame-rebuild rule rather than an exception to it.** That panel describes _the
+  playhead_, and a playhead moves at a frame's rate — but it was rebuilt only on a
+  document or a selection change, so it went on describing whatever instant the last
+  edit happened at. The readout going stale after an ordinary scrub is the visible
+  half; the half that matters is that **_Take manual control_ was withheld**, because
+  `#renderZoom` computes the button's presence from that same stale instant. That is
+  the one capability the captain named himself (`decision-editor-scope.md`, _"Manual
+  option too."_), missing on exactly the path a person uses to reach it — scrub to the
+  moment you want to change, then take control — so it read as the feature being
+  absent rather than as a panel being behind. **The fix is `paintPlayhead`'s own split
+  applied one panel over**, not a second mechanism beside it: the _numbers_ are text
+  writes guarded on the values changing (`Inspector.paintZoom`), and a _rebuild_
+  happens only when the **shape** of the answer changes — which region covers the
+  playhead, and whether the button can be offered at all. The rule `main.ts`'s header
+  states was never about avoiding text writes; it is about not tearing down DOM
+  structure on a timer, and this does not. **Nothing on that path allocates — moving or
+  still**, which is the harder half and is the one a guard on "at rest" quietly misses:
+  at rest the whole block is skipped by a comparison on the playhead's own source
+  instant, and while the playhead moves it runs on _every_ frame, so both predicates it
+  asks are indexed loops over indexed loops — `zoomRegionIndexAt` (the one predicate the
+  rebuild and the per-frame half share) and `generatedZoomAt`, whose
+  `generatedSegmentIndexAt` answers an **index** precisely so a per-frame reader need
+  not allocate a `{ startSec, endSec }` it only tests for null. `for…of` over an array
+  takes an iterator and a destructured `[start, end]` allocates a pair per segment per
+  frame; §4.3's first rule is that nothing on a frame path does either. The selection
+  and generator panels are untouched by any of it. **It survived a green suite and a completed
+  review, and a person looking at the `--shots` screenshots found it** — the document
+  was right, `resolve` was right and the picture was right, so the defect lived
+  entirely in the gap between what the model computed and what could be read on the
+  screen, which is the class of thing no assertion about a document can reach. The
+  gate now reads that panel **off the DOM** at both sides of a region boundary and
+  compares it against the probe, in both directions, because a panel that never
+  offered the button would otherwise pass half of it;
+  `the-zoom-panel-does-not-follow-the-playhead` is the mutation.
 
 ## Annotations, in one paragraph
 
@@ -1364,9 +1924,22 @@ same pass is not a check that harness runs.
   that can withhold is unproven rather than caught whenever that host's instrument fails,
   and no single run looks wrong when that repeats — so it is printed on **every** run
   straight off the registry, deterministic and identical on every host, rather than
-  counted over time. One mutation is on that list today
-  (`export-writer-registered-after-it-opens`, guarded only by the phase-8 gate) and the
-  fix for it is a second guard that cannot withhold, never a retry.
+  counted over time. The set gained `test/phase15-gate.test.ts` when that gate's export
+  claims became withholdable, and the four entries that were then solely behind it have
+  each taken the fix — a second guard that cannot withhold, never a retry — so **one**
+  mutation is printed today: `export-writer-registered-after-it-opens`, behind the phase-8
+  gate. Read the count off a run rather than from here; what is durable is the rule, which
+  is that an entry appears exactly while _every_ file in its `mustFail` can withhold.
+  **The warning is keyed by _file_ and the phase-15 gate withholds per _claim_, so an
+  entry listed on that gate alone would be an over-report whenever the claim guarding it
+  is one the gate does judge.** That direction is the safe one for a warning about
+  unproven coverage. The unsafe direction is the same mismatch
+  read by `runTests`, which caught this branch out: a mutation guarded by a claim that
+  withheld, in a file whose other claims were judged, is reported `SURVIVED` rather than
+  `no verdict` — a hole announced in a gate that never looked. `no verdict` is still
+  **every** test in the file withholding and must not be widened; the answer is to move
+  the claim somewhere the instrument cannot take it away, which is what
+  `the-zoom-panel-does-not-follow-the-playhead` now demonstrates (§ The editor's controls).
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
@@ -1922,23 +2495,56 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   Building either pass makes the gate go red, in the same change that makes the
   coverage list wrong. Do not "fix" that by deleting the assertion; extend the gate to
   perturb the row instead.
-- **An export draws annotation shapes and redactions with no export-side wiring;
-  annotation _text_ needs one object handed across, and half of that is now in place.**
-  `Compositor.render` takes annotations off the `ResolvedState` both loops already
-  compute, so blur, mask and the four shapes reach an export for free. Glyphs are the
-  exception: they need a `TextAtlas` on `CompositorFrames`, and a `text` span with no
-  atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`) rather than
-  refused — `PreviewLoop` reports that count through `onError` and the export loop does
-  not read it. **`ExportRenderLoop` now takes a `textAtlas` option** — the seam
-  `PreviewLoopOptions.textAtlas`'s docstring always assumed and nothing could satisfy —
-  and phase 11's golden gate hands both paths the same object, so §4.5's per-pixel zero
-  now covers glyphs. **What is still missing is the export _window_ building one**:
-  `apps/renderer/src/export/main.ts` rasterises nothing, so a real export job still
-  passes no atlas. Nothing authors an annotation today — the editor shell has no
-  annotation tools, and they are `loom-p15`'s — so whatever ships the first one has to
-  give `ExportSession`'s window the preview's atlas and pass it through that option.
-  `the-export-path-draws-text-from-no-atlas` in `npm run verify:mutation` guards the
-  half that exists.
+- **An export draws annotation shapes, redactions _and_ text, and both halves of the
+  glyph seam are now in place.** `Compositor.render` takes annotations off the
+  `ResolvedState` both loops already compute, so blur, mask and the four shapes reach an
+  export with no export-side wiring at all. Glyphs needed two things and they arrived
+  separately. **`ExportRenderLoop`'s `textAtlas` option** is the seam
+  `PreviewLoopOptions.textAtlas`'s docstring always assumed and nothing could satisfy; it
+  came with the fold of phase 11's golden gate onto phase 8's export seam, which hands
+  both paths the same object — so **§4.5's per-pixel zero covers glyphs**, and
+  `the-export-path-draws-text-from-no-atlas` in `npm run verify:mutation` guards it.
+  **The export _window_ building one** is the other half and is phase 15's, which is what
+  first made a `text` span authorable: `apps/renderer/src/glyphs.ts` is now the one place
+  either path rasterises glyphs, `ExportSession`'s window uploads from it, and
+  `export.html` declares `style-src 'self'; font-src 'self'` and links
+  `@loom/design/css/type.css` for the faces alone.
+  **The trap that made the second half non-obvious**: a `@font-face` nothing on the page
+  renders is never fetched, so `document.fonts.ready` resolves instantly on the hidden
+  export window — which has no DOM at all — and `measureText` would silently raster the
+  _fallback_ face, setting an export's labels in a different typeface from the preview.
+  `document.fonts.load()` is what forces it, and that is why `glyphs.ts` exists rather
+  than two calls to `rasterizeGlyphs` with the same options. A `text` span with no atlas
+  is still skipped and counted (`AnnotationPass.textSpansWithoutAtlas`) rather than
+  refused, which is phase 11's graded rule and is what makes a machine with no
+  `OffscreenCanvas` 2d context lose its labels and keep its export. The atlas is built
+  only when the document actually carries a `text` span, and `exportTextAtlas`'s docblock
+  says why that predicate is deliberately lax.
+  **What is still not measured is the window _building_ the atlas, and that is a hole in
+  the half this phase closed rather than a documentation nicety.** The golden gate proves
+  preview and export agree about a glyph _given the same atlas_; **no automated test
+  reaches `exportTextAtlas` in `apps/renderer/src/export/session.ts` or
+  `apps/renderer/src/glyphs.ts` at all.** The phase-15 gate's document carries a `mask`
+  and no `text` span, so that predicate short-circuits and the atlas is never built — so
+  nothing goes red if the `@loom/design/css/type.css` link, the `font-src 'self'` entry or
+  the `document.fonts.load()` forcing is dropped, and the trap above is exactly the defect
+  that would hide. **What _is_ established is a measurement, and it is what makes this
+  worth recording rather than an apology.** Taken on the shipping `export.html`, with its
+  real CSP and its real `loom://` origin: `document.fonts.ready` **alone** leaves
+  `document.fonts.check('600 72px "Mona Sans"')` `false` and measures the fallback face at
+  **449.93 px**; after the `document.fonts.load()` `glyphs.ts` performs it is `true` and
+  **525.03 px**. **A 17% difference** — that is the whole reason `glyphs.ts` exists, and
+  without it an export's labels are set in the wrong typeface, silently, on a page that
+  renders no text of its own. **The provenance is a hand measurement, not a test**: it was
+  taken by the phase-15 pipeline's own test step on **2026-08-06** against the real export
+  page, the way § The live drawing overlay's five readings came from an unpackaged dev run
+  rather than from the shipped check. **Where it is discharged**: a dedicated Electron
+  check over the export window's glyph path, **filed as its own task with an owner** —
+  filed, not left to a later phase, because a gap with an owner is not the same as a hope.
+  A `text` span was deliberately **not** added to the phase-15 gate to close it: that gate
+  withholds its export claims on a lost context and is in `WITHHOLDABLE_GUARDS`, so a span
+  sitting behind those claims would read as coverage in the file and establish nothing on
+  the host that keeps taking the instrument away. Firstmate's call, not the captain's.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 
@@ -2265,3 +2871,5 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file or command instead.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
+Every date here is **local**, never UTC — CI log timestamps are UTC and are the usual
+source of a date written a day ahead of the work it records.

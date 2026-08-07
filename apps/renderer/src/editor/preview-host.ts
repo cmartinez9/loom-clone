@@ -30,6 +30,7 @@
  */
 
 import { Compositor } from '@loom/compositor';
+import { uploadTextAtlas, type GlyphRaster } from '@loom/compositor/raster';
 import type { CompiledTimeline } from '@loom/edl';
 import { PreviewLoop } from '../preview/index.ts';
 import type { TrackReader } from '../media/track-reader.ts';
@@ -40,6 +41,24 @@ export interface PreviewHostOptions {
   timeline: CompiledTimeline;
   /** `edit.output.size` — what the exporter will encode (§2.6). */
   outputSize: readonly [number, number];
+  /**
+   * The rasterised glyphs a `text` annotation is drawn from, or `null`.
+   *
+   * Handed in rather than made here because `rasterizeGlyphs` must run **after**
+   * `document.fonts.ready` — `@loom/compositor/raster`'s header says so, and a raster
+   * taken before the self-hosted faces have loaded is the fallback face, in every
+   * label of every preview and every export. The *upload* happens here because the GL
+   * context is here, and `@loom/compositor`'s rule is one raster and one atlas per
+   * process shared by both paths (§4.5: a glyph raster is the one part of an
+   * annotation the renderer decides rather than we do).
+   *
+   * `null` is survivable and deliberately not fatal: a `text` span with no atlas is
+   * skipped and counted (`AnnotationPass.textSpansWithoutAtlas`), which `PreviewLoop`
+   * reports through `onError` once per run. Text failing to render is cosmetic and
+   * visible; a redaction failing is invisible, which is why only the second refuses a
+   * frame.
+   */
+  glyphs?: GlyphRaster | null;
   /**
    * Reported once per run of a condition, already phrased for a person.
    *
@@ -85,11 +104,13 @@ export class PreviewHost {
 
     this.#compositor = new Compositor(gl, [canvas.width, canvas.height]);
     this.#screen = options.screen;
+    const glyphs = options.glyphs ?? null;
     this.loop = new PreviewLoop({
       compositor: this.#compositor,
       screen: options.screen,
       durationSec: options.timeline.durationSec,
       timeline: options.timeline,
+      textAtlas: glyphs === null ? null : uploadTextAtlas(gl, glyphs),
       onError: (error) => {
         options.onTrouble(error.message);
       },

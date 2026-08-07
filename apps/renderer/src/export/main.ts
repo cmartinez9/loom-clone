@@ -12,6 +12,13 @@
  * window per job.
  */
 
+// Pressroom's `@font-face` rules and nothing else — not `@loom/design/css`, which
+// would also bring tokens and component primitives to a page with no DOM. A `text`
+// annotation's glyphs are rasterised in this window (`../glyphs.ts`), and a face this
+// page has not declared is a face `measureText` silently falls back from — so the
+// labels in an export would be set in a different typeface from the preview the
+// person approved. §4.5 does not permit that difference.
+import '@loom/design/css/type.css';
 import type { ExportCommand } from '@loom/ipc';
 import { runExportJob, type RunningExport } from './session.ts';
 import { verifyByDecoding } from './verify-decode.ts';

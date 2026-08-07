@@ -22,33 +22,98 @@
  *    parts and are already framework-free by §1.3. What is left here is a few
  *    hundred lines of DOM.
  *
- * `loom-p15` inherits this choice. If it ever stops paying — the inspector growing
- * a dozen interdependent controls is the plausible way — that is a decision to
- * re-take with the same reasoning written down, not a thing to drift into.
+ * **Phase 15 inherited the choice and kept it.** The controls it added — the tool
+ * rail, the direct-manipulation layer over the picture, and three inspector panels —
+ * are rebuilt on a *document* change and a *selection* change, which is a person's
+ * rate rather than a frame's, and none of them reads another control's value. The
+ * two sixty-times-a-second things are still a WebGL draw and one style write. If it
+ * ever stops paying, that is a decision to re-take with the reasoning written down,
+ * not a thing to drift into.
  *
  * ## What this window does not do
  *
  * No audio: §5.4 mechanism 4 requires playback time to come from the audio output's
  * played-sample count and `PreviewLoop` accumulates `requestAnimationFrame` deltas,
  * so sound would drift against the scrub bar by design. `align.ts` records where
- * that work belongs. No keyframe editing, no manual zoom control, no annotation
- * tools, no generator regenerate/bake — those are `loom-p15`'s, and the seams they
- * need are the zoom lane in `timeline.ts`, the inspector's empty second half, and
- * the tool rail.
+ * that work belongs.
+ *
+ * No **track stacking or blending UI**, and that is the captain's own carve-out:
+ * `data/loom-scope/decision-editor-scope.md`, on the *Stack and blend tracks* row —
+ * *"I don't think this is needed for MVP."* §3.5's engine is untouched and is what
+ * makes the manual zoom beat the generated one; what is absent is a surface for
+ * reordering tracks by hand. Every track this window writes therefore goes where
+ * §3.5 says it goes without anyone being asked, and each site argues its own: a
+ * manual zoom to the top of the array (`rewriteTrackOps`), a generated one below
+ * every manual track and above every generator §3.5 ranks under it
+ * (`generators.ts`'s `GENERATOR_RANK`).
  */
 
 import '@loom/design/css';
 import './editor.css';
 import { formatBytes, formatTimecode, formatTimecodeCentis, icon } from '@loom/design';
 import { compileClips, resolve, timelineTimeAt, type CompiledClips } from '@loom/edl';
-import { recordingUrl, SUBJECT_PARAM, type OpenedProject } from '@loom/ipc';
-import type { Seconds, VideoTrackDoc } from '@loom/format';
+import { recordingUrl, SUBJECT_PARAM, type EditOp, type OpenedProject } from '@loom/ipc';
+import { applyOps } from '@loom/format';
+import type { Seconds, Track, Vec2, VideoTrackDoc } from '@loom/format';
 import { EditorProject } from './project.ts';
 import { PreviewHost } from './preview-host.ts';
+import { loadGlyphRaster } from '../glyphs.ts';
 import { openVideoTrack } from '../media/track-reader.ts';
 import { TimelineUi } from './timeline.ts';
 import { clampZoom, zoomAbout, type TimelineView } from './timeline-geometry.ts';
 import { readTrim, trimOp, type Trim } from './trim.ts';
+import { applyGesture, playheadMoved } from './gestures.ts';
+import {
+  annotationsOf,
+  annotationAt,
+  moveAnnotationOps,
+  placeAnnotationOps,
+  removeAnnotationOps,
+  retimeAnnotationOps,
+  styleAnnotationOps,
+  DEFAULT_SPAN_SEC,
+  type AnnotationView,
+} from './annotate.ts';
+import {
+  generatorStates,
+  readEventLogs,
+  runGenerator,
+  bakeOps,
+  fetchText,
+  sha256,
+  unreadEventLogs,
+  GENERATOR_TRACK_ID,
+  type EventLogs,
+  type RunnableGenerator,
+} from './generators.ts';
+import { Inspector } from './inspector.ts';
+import { StageUi } from './stage.ts';
+import {
+  buildRail,
+  sameSelection,
+  setPressedTool,
+  toolSpec,
+  type Selection,
+  type ToolId,
+} from './tools.ts';
+import {
+  generatedSegmentAt,
+  generatedSegmentIndexAt,
+  moveKeyOps,
+  overrideZoomOps,
+  placeZoomOps,
+  removeKeyOps,
+  removeZoomOps,
+  setKeyValueOps,
+  updateZoomOps,
+  zoomKeysOf,
+  zoomRegionAt,
+  zoomRegionsOf,
+  DEFAULT_HOLD_SEC,
+  DEFAULT_ZOOM_AMOUNT,
+  ZOOM_RAMP_SEC,
+  type ZoomRegion,
+} from './zoom.ts';
 
 const loom = window.loom;
 
@@ -71,10 +136,14 @@ const el = {
   refusalTitle: must('refusal-title'),
   refusalDetail: must('refusal-detail'),
   body: must('body'),
-  toolSelect: must('tool-select'),
+  rail: must('rail'),
   mat: must('mat'),
   film: must('film'),
   preview: must('preview') as HTMLCanvasElement,
+  ovl: must('ovl'),
+  inspSel: must('insp-sel'),
+  zoomPanel: must('zoom-panel'),
+  genPanel: must('gen-panel'),
   restart: must('restart') as HTMLButtonElement,
   playpause: must('playpause') as HTMLButtonElement,
   tcode: must('tcode'),
@@ -110,7 +179,6 @@ function paintIcons(): void {
   set(el.redo, 'redo', 16);
   set(el.restart, 'restart', 15);
   set(el.playpause, 'play', 15);
-  set(el.toolSelect, 'cursor', 17);
   set(el.zoomIn, 'plus', 14);
   set(el.zoomOut, 'minus', 14);
   el.refusalIcon.innerHTML = icon('alert', 22);
@@ -217,6 +285,17 @@ async function start(): Promise<void> {
   document.title = name;
   el.name.textContent = name;
 
+  /**
+   * The captured frame's size in pixels, from the part the encoder actually produced.
+   *
+   * Needed by `outputToSource`: the source is contain-fitted into the output, so the
+   * letterbox — the region a pointer has no source coordinate in — is a function of
+   * both aspect ratios. Read from `recording.json` rather than from `edit.output.size`
+   * for the reason the inspector shows the two separately: nothing sets `output.size`
+   * from the recording today, so on this machine they routinely differ.
+   */
+  const sourceSize: readonly [number, number] = parts[0]?.size ?? [1920, 1080];
+
   // ---- the project, and the two derived things that follow the document -----
   const project = new EditorProject({
     id,
@@ -267,6 +346,11 @@ async function start(): Promise<void> {
       timeline: project.compiled,
       outputSize: project.document.output.size,
       onTrouble: trouble,
+      // Awaited **before** the loop is built, because `PreviewLoop` takes its atlas
+      // at construction and a `text` span rendered without one is skipped and
+      // counted. `../glyphs.ts` is the one place a raster is made, so the export
+      // window's is the same one made the same way (§4.5).
+      glyphs: await loadGlyphRaster(),
     });
   } catch (error) {
     refuse(
@@ -330,9 +414,392 @@ async function start(): Promise<void> {
         view = { ...next, zoom: clampZoom(next, next.zoom) };
         renderTimeline();
       },
+      onSelect: (next) => {
+        select(next);
+      },
+      onMoveKey: (key, toSec, phase) => {
+        // A key drag is one undo step, like a trim drag: provisional while the
+        // pointer is down and committed once. `moveKeyOps` clamps into the gap
+        // between the key's neighbours, so a drag past one stops rather than
+        // replacing it — `setKey` upserts by `t`, and a landing on a neighbour would
+        // delete it and report success.
+        edit(moveKeyOps(project.committed, key, toSec), phase, 'Move keyframe');
+      },
+      onMoveSpan: (spanId, times, phase) => {
+        edit(
+          retimeAnnotationOps(project.committed, spanId, times, project.sourceDurationSec),
+          phase,
+          'Move note',
+        );
+      },
     },
   );
   timeline.setTracks(recording);
+
+  // ---- the controls -----------------------------------------------------------
+
+  let tool: ToolId = 'select';
+  let selection: Selection = null;
+  /**
+   * The event logs, once they have been fetched.
+   *
+   * `null` until then, which is a real state and not a placeholder: the generator
+   * panel says *reading…* rather than *unavailable*, because those are different
+   * answers and the second one would be a lie for the first few hundred milliseconds
+   * of every editor. It is therefore handed to `generatorStates` **as `null`** — a
+   * stand-in `EventLogs` here would erase the distinction one line before the panel
+   * that exists to draw it.
+   */
+  let logs: EventLogs | null = null;
+
+  const stage = new StageUi(el.ovl, {
+    onDraw: (kind, drag, phase) => {
+      // Only on `end`. A rubber band is feedback the overlay draws itself; committing
+      // a span per pointer move would put a hundred of them in the history and a
+      // hundred revisions on disk. The two privacy kinds make it a correctness point
+      // as well — a zero-area `blur` is a span the compositor refuses to composite,
+      // and a drag passes through zero area on its first pixel.
+      if (phase !== 'end') return;
+      const at = sourceTimeFor(host.loop.time);
+      const geometry =
+        kind === 'arrow'
+          ? { from: drag.from, to: drag.to }
+          : {
+              center: [(drag.from[0] + drag.to[0]) / 2, (drag.from[1] + drag.to[1]) / 2] as Vec2,
+              size: [
+                Math.abs(drag.to[0] - drag.from[0]),
+                Math.abs(drag.to[1] - drag.from[1]),
+              ] as Vec2,
+            };
+      const ops = placeAnnotationOps(project.committed, {
+        kind,
+        startSec: at,
+        endSec: Math.min(at + DEFAULT_SPAN_SEC, project.sourceDurationSec),
+        ...geometry,
+        ...(kind === 'text' ? { style: { text: 'Text' } } : {}),
+      });
+      if (ops === null) return;
+      const span = ops.find((op) => op.op === 'span.set');
+      const added = ops.find((op) => op.op === 'track.add');
+      const spanId =
+        span?.op === 'span.set'
+          ? span.span.id
+          : added?.op === 'track.add'
+            ? (added.track.spans?.[0]?.id ?? null)
+            : null;
+      project.commit(ops, `Add ${kind}`);
+      // Back to Select, and the new annotation selected. A tool that stayed armed
+      // would make the next click on the picture draw a second one, which is what a
+      // person reaching for the handles they just made least expects.
+      setTool('select');
+      if (spanId !== null) select({ kind: 'annotation', spanId });
+    },
+    onEditAnnotation: (spanId, geometry, phase) => {
+      edit(moveAnnotationOps(project.committed, spanId, geometry), phase, 'Move note');
+    },
+    onCancelGesture: () => {
+      // The seventh caller of the one boundary, through its `null` branch: a gesture
+      // that ended where the picture is not is a gesture that produced no ops, and
+      // what must not survive it is the provisional document its last move left.
+      edit(null, 'end', 'Cancel gesture');
+    },
+    onPick: (at) => {
+      if (at === null) {
+        select(null);
+        return;
+      }
+      const hit = annotationAt(project.document, sourceTimeFor(host.loop.time), at);
+      select(hit === null ? null : { kind: 'annotation', spanId: hit.span.id });
+    },
+    onZoomTo: (at, phase) => {
+      const region = regionAtPlayhead();
+      if (region === null) {
+        // Nothing of the user's covers this instant, so the zoom tool *places* one,
+        // centred where they pointed. One press, one zoom — and only on `end`, so a
+        // press that turns into a drag pans the region it just made rather than
+        // leaving a trail of them.
+        if (phase !== 'end') return;
+        const at0 = sourceTimeFor(host.loop.time);
+        const ops = placeZoomOps(
+          project.committed,
+          {
+            startSec: at0 - ZOOM_RAMP_SEC,
+            endSec: at0 + DEFAULT_HOLD_SEC + ZOOM_RAMP_SEC,
+            amount: DEFAULT_ZOOM_AMOUNT,
+            center: at,
+          },
+          project.sourceDurationSec,
+        );
+        if (ops === null) {
+          trouble('There is no room for a zoom here — it would overlap the one beside it.');
+          return;
+        }
+        project.commit(ops, 'Add zoom');
+        selectZoomAt(at0);
+        return;
+      }
+      edit(
+        updateZoomOps(project.committed, region.index, { center: at }, project.sourceDurationSec),
+        phase,
+        'Move zoom',
+      );
+    },
+  });
+
+  const inspector = new Inspector(
+    { selection: el.inspSel, zoom: el.zoomPanel, generators: el.genPanel },
+    {
+      onPlaceZoom: () => {
+        const at = sourceTimeFor(host.loop.time);
+        const ops = placeZoomOps(
+          project.committed,
+          {
+            startSec: at - ZOOM_RAMP_SEC,
+            endSec: at + DEFAULT_HOLD_SEC + ZOOM_RAMP_SEC,
+            amount: DEFAULT_ZOOM_AMOUNT,
+            center: [0.5, 0.5],
+          },
+          project.sourceDurationSec,
+        );
+        if (ops === null) {
+          trouble('There is no room for a zoom here — it would overlap the one beside it.');
+          return;
+        }
+        project.commit(ops, 'Add zoom');
+        selectZoomAt(at);
+      },
+      onOverrideZoom: () => {
+        // The captain's row of the capability table, in one call. The seed is what
+        // `resolve` reports at this instant — read off the *compiled* timeline, so it
+        // is whatever the generator is actually doing rather than a second opinion
+        // about it — and the span is the generated segment's own `activeRanges`
+        // entry, so "override this zoom" covers the zoom.
+        const at = sourceTimeFor(host.loop.time);
+        const state = resolve(project.compiled, host.loop.time);
+        const generated = generatedZoomAt(at);
+        const ops = overrideZoomOps(
+          project.committed,
+          {
+            atSec: at,
+            seed: {
+              amount: state.zoom.amount,
+              center: [state.zoom.center[0], state.zoom.center[1]],
+            },
+            span: generated === null ? null : generatedSegmentAt(generated, at),
+          },
+          project.sourceDurationSec,
+        );
+        if (ops === null) {
+          trouble('There is no room for a zoom of your own here.');
+          return;
+        }
+        project.commit(ops, 'Take manual control');
+        selectZoomAt(at);
+      },
+      onUpdateZoom: (index, patch, phase) => {
+        // The same two-phase path a trim handle and a stage drag take: provisional
+        // while the thumb is down, one commit on release. `inspector.ts`'s `range`
+        // argues why a slider that committed per `input` is a control that does not
+        // work rather than one that costs too many undo steps.
+        edit(
+          updateZoomOps(project.committed, index, patch, project.sourceDurationSec),
+          phase,
+          'Adjust zoom',
+        );
+      },
+      onRemoveZoom: (index) => {
+        const ops = removeZoomOps(project.committed, index);
+        if (ops === null) return;
+        project.commit(ops, 'Remove zoom');
+        select(null);
+      },
+      onSelect: select,
+      onSeek: (sourceSec) => {
+        host.loop.seek(timelineTimeFor(sourceSec));
+        paintPlayhead();
+      },
+      onMoveKey: (key, toSec) => {
+        const ops = moveKeyOps(project.committed, key, toSec);
+        if (ops !== null) project.commit(ops, 'Move keyframe');
+      },
+      onSetKeyValue: (key, value) => {
+        const ops = setKeyValueOps(project.committed, key, value);
+        if (ops !== null) project.commit(ops, 'Change keyframe');
+      },
+      onRemoveKey: (key) => {
+        const ops = removeKeyOps(project.committed, key);
+        if (ops === null) {
+          trouble(
+            'A channel needs two keyframes to describe a change. Remove the whole zoom ' +
+              'instead, from the panel above.',
+          );
+          return;
+        }
+        project.commit(ops, 'Delete keyframe');
+        select(null);
+      },
+      onStyleAnnotation: (spanId, patch, phase) => {
+        edit(styleAnnotationOps(project.committed, spanId, patch), phase, 'Restyle note');
+      },
+      onRetimeAnnotation: (spanId, times) => {
+        const ops = retimeAnnotationOps(
+          project.committed,
+          spanId,
+          times,
+          project.sourceDurationSec,
+        );
+        if (ops !== null) project.commit(ops, 'Retime note');
+      },
+      onRemoveAnnotation: (spanId) => {
+        const ops = removeAnnotationOps(project.committed, spanId);
+        if (ops === null) return;
+        project.commit(ops, 'Delete note');
+        select(null);
+      },
+      onGenerate: (type) => {
+        generate(type);
+      },
+      onBake: (type) => {
+        bake(type);
+      },
+    },
+  );
+
+  buildRail(el.rail, setTool);
+
+  function setTool(next: ToolId): void {
+    tool = next;
+    setPressedTool(el.rail, next);
+    el.tlHint.textContent = toolSpec(next).hint;
+    renderStage();
+  }
+
+  function select(next: Selection): void {
+    if (sameSelection(selection, next)) return;
+    selection = next;
+    renderControls();
+    renderTimeline();
+    renderStage();
+  }
+
+  /**
+   * Show a batch without committing it — the frame under a live drag.
+   *
+   * The ops are applied to a **copy** of the committed document, which is what
+   * `EditorProject.preview` is for: it is not in the history, it is never sent, and
+   * `commit` or `cancelPreview` replaces it. `applyOps` is `@loom/format`'s own, so
+   * what is previewed is exactly what the batch will do rather than an approximation
+   * of it drawn by a control.
+   */
+  function provisional(ops: readonly EditOp[]): void {
+    try {
+      project.preview(applyOps(structuredClone(project.committed), [...ops]));
+    } catch {
+      // A batch that will not apply is a batch that will not be committed either;
+      // the drag's next event recomputes it from the committed document, so there is
+      // nothing to report and nothing to undo.
+    }
+  }
+
+  /**
+   * One step of a two-phase gesture — the shared boundary every drag ends at.
+   *
+   * Each op builder answers `null` for "this would change nothing", and every gesture
+   * can reach that: a slider dragged away and back, a keyframe returned to where it
+   * was, an annotation dropped where it was picked up. Returning early there is the
+   * bug, because the *previous* move already left a provisional document on
+   * `EditorProject` and nothing else clears it — the preview then shows a value that
+   * is not in `edit.json` and `renderControls`, which reads `project.document`, shows
+   * it too, until the next commit or undo happens by. `onTrimCommit` has always
+   * cancelled the preview in that case; this is the same answer for the other five,
+   * in one place so a sixth cannot be written without it.
+   *
+   * `cancelPreview` is a no-op when nothing is provisional, so a `move` that changes
+   * nothing costs nothing and repeated ones cost nothing after the first.
+   */
+  function edit(ops: readonly EditOp[] | null, phase: 'move' | 'end', label: string): void {
+    // The decision is `gestures.ts`'s `applyGesture`; the three verbs are this
+    // window's. It was inline until a lost GPU context showed that the only thing
+    // guarding it was a gate that composites — see that module's header.
+    applyGesture(ops, phase, label, {
+      preview: provisional,
+      commit: (batch, name) => {
+        project.commit(batch, name);
+      },
+      cancel: () => {
+        project.cancelPreview();
+      },
+    });
+  }
+
+  /**
+   * The generated zoom track whose window covers `atSec`, or `null`.
+   *
+   * Indexed loops all the way down, for {@link zoomRegionIndexAt}'s reason: the
+   * standing Zoom panel asks this on the playhead's own frame — every frame during
+   * playback, not only at rest — and `for…of` over the track array takes an iterator
+   * per call. `generatedSegmentIndexAt` is the other half, and it answers an index so
+   * that a per-frame reader need not allocate a window it only tests for null.
+   */
+  function generatedZoomAt(atSec: Seconds): Track | null {
+    const tracks = project.committed.tracks;
+    // eslint-disable-next-line @typescript-eslint/prefer-for-of
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      if (track === undefined) continue;
+      if (track.target !== 'zoom' || track.origin !== 'generated' || !track.enabled) continue;
+      if (generatedSegmentIndexAt(track, atSec) >= 0) return track;
+    }
+    return null;
+  }
+
+  function regionAtPlayhead(): ZoomRegion | null {
+    return zoomRegionAt(project.committed, sourceTimeFor(host.loop.time));
+  }
+
+  /**
+   * Select the region that covers an instant — the one a *place* or an *override*
+   * just made.
+   *
+   * By what it covers, never by `zoomRegionsOf(...).length - 1`. `ZoomRegion.index` is
+   * a position in `activeRanges` and `placeZoomOps` keeps those sorted by start time,
+   * so the newest region is the last element only when it also happens to be the
+   * latest one in the recording: placing a zoom at 2 s after one at 10 s makes the new
+   * region index 0 and would have selected the 10 s one, leaving every field in the
+   * panel tuning a zoom nobody was looking at. `length - 1` is not the largest index
+   * either, since `zoomRegionsOf` skips a window whose keys it cannot read.
+   */
+  function selectZoomAt(atSec: Seconds): void {
+    const region = zoomRegionAt(project.committed, atSec);
+    select(region === null ? null : { kind: 'zoom', index: region.index });
+  }
+
+  function generate(type: RunnableGenerator): void {
+    if (logs === null) {
+      trouble('The event logs have not finished loading yet.');
+      return;
+    }
+    const result = runGenerator(type, project.committed, logs, {
+      durationSec: project.sourceDurationSec,
+      recording,
+    });
+    if ('error' in result) {
+      trouble(result.error);
+      return;
+    }
+    project.commit(result.ops, 'Generate');
+    if (result.warning !== null) trouble(result.warning);
+  }
+
+  function bake(type: RunnableGenerator): void {
+    const track = project.committed.tracks.find(
+      (candidate) => candidate.id === GENERATOR_TRACK_ID[type],
+    );
+    if (track === undefined) return;
+    const ops = bakeOps(track);
+    if (ops.length === 0) return;
+    project.commit(ops, 'Bake');
+  }
 
   // ---- keeping everything in step --------------------------------------------
 
@@ -370,8 +837,42 @@ async function start(): Promise<void> {
           : 'Saved';
     el.saveState.className =
       project.saveState === 'failed' ? 'chip chip-accent' : 'chip chip-muted';
+    // A selection can be invalidated by the edit that just landed, by an undo, or by
+    // another window winning a conflict — and an inspector describing a keyframe that
+    // is no longer in the document is worse than an empty one. Dropped here, once,
+    // rather than guarded at every read.
+    if (!selectionExists()) selection = null;
     renderTimeline();
+    renderControls();
+    renderStage();
     renderFacts();
+  }
+
+  /**
+   * Is what is selected still in the document — the **committed** one?
+   *
+   * Committed and not `project.document`, which is the provisional document while a
+   * drag is live. A keyframe drag selects its key on pointerdown and then previews the
+   * key at its *new* `t` on every pointermove, so asking the provisional document
+   * would find no key at the selected `t` and drop the selection on the first move —
+   * the panel and the lane's marker vanishing for the rest of the drag. The three
+   * things this guard is for — an edit that landed, an undo, a conflict reload — are
+   * all committed state.
+   */
+  function selectionExists(): boolean {
+    const doc = project.committed;
+    const current = selection;
+    if (current === null) return true;
+    if (current.kind === 'zoom') {
+      return zoomRegionsOf(doc).some((region) => region.index === current.index);
+    }
+    if (current.kind === 'annotation') {
+      return annotationsOf(doc).some((view_) => view_.span.id === current.spanId);
+    }
+    const ref = current.ref;
+    return zoomKeysOf(doc).some(
+      (key) => key.trackId === ref.trackId && key.channel === ref.channel && key.t === ref.t,
+    );
   }
 
   function renderTimeline(): void {
@@ -381,14 +882,107 @@ async function start(): Promise<void> {
       trim,
       playheadSourceSec: sourceTimeFor(host.loop.time),
       document: project.document,
+      selection,
     });
     el.tlZoom.textContent = `${String(Math.round(view.zoom * 100))}%`;
+  }
+
+  /**
+   * The manual zoom regions the panels were last built from.
+   *
+   * Refreshed by {@link renderControls}, which is called on every document change, so
+   * {@link zoomRegionIndexAt} can answer on the playhead's own frame without walking
+   * the document. It is a cache of a derivation, not of a decision: `edit.json` is
+   * still the authority and nothing reads this that a rebuild has not just written.
+   */
+  let zoomRegions: ZoomRegion[] = [];
+
+  /**
+   * Which manual region covers a source instant, by `ZoomRegion.index`, or `-1`.
+   *
+   * The one predicate, asked by the rebuild and by the per-frame half alike. Written
+   * as an indexed loop rather than a `find` because the second caller runs on the
+   * playhead's frame and must not allocate.
+   */
+  function zoomRegionIndexAt(sourceSec: Seconds): number {
+    // The indexed loop is the point: `for…of` takes an array iterator, and this runs
+    // on the playhead's own frame. See the note above.
+    // eslint-disable-next-line @typescript-eslint/prefer-for-of
+    for (let i = 0; i < zoomRegions.length; i++) {
+      const region = zoomRegions[i];
+      if (region === undefined) continue;
+      if (sourceSec >= region.startSec && sourceSec <= region.windowEndSec) return region.index;
+    }
+    return -1;
+  }
+
+  /** The three inspector panels, rebuilt from the document and the selection. */
+  function renderControls(): void {
+    const doc = project.document;
+    const sourceSec = sourceTimeFor(host.loop.time);
+    const state = resolve(project.compiled, host.loop.time);
+    zoomRegions = zoomRegionsOf(doc);
+    inspector.render({
+      selection,
+      regions: zoomRegions,
+      keys: zoomKeysOf(doc),
+      annotations: annotationsOf(doc),
+      generators: generatorStates(doc, logs),
+      regionIndexAtPlayhead: zoomRegionIndexAt(sourceSec),
+      // Cloned, because `resolve` hands back the compiled timeline's **own** state
+      // object and overwrites it in place — a panel that kept the reference would be
+      // describing next frame's zoom.
+      resolvedZoom: {
+        amount: state.zoom.amount,
+        center: [state.zoom.center[0], state.zoom.center[1]],
+      },
+      generatedAt: generatedZoomAt(sourceSec),
+      sourceDurationSec: project.sourceDurationSec,
+    });
+  }
+
+  /** The handles over the picture. */
+  function renderStage(): void {
+    const doc = project.document;
+    const sourceSec = sourceTimeFor(host.loop.time);
+    const state = resolve(project.compiled, host.loop.time);
+    const current = selection;
+    const selected: AnnotationView | null =
+      current?.kind === 'annotation'
+        ? (annotationsOf(doc).find((view_) => view_.span.id === current.spanId) ?? null)
+        : null;
+    stage.render({
+      tool,
+      mapping: {
+        outputSize: doc.output.size,
+        sourceSize: sourceSize,
+        zoom: {
+          amount: state.zoom.amount,
+          center: [state.zoom.center[0], state.zoom.center[1]],
+        },
+      },
+      selected,
+      selectedVisible:
+        selected !== null && sourceSec >= selected.startSec && sourceSec <= selected.endSec,
+    });
   }
 
   /** What {@link paintPlayhead} last wrote, so that it can write only changes. */
   let paintedTimelineSec = Number.NaN;
   let paintedDurationSec = Number.NaN;
   let paintedPlaying: boolean | null = null;
+  /**
+   * The zoom the overlay's handles were last placed for.
+   *
+   * Three scalars rather than a tuple, for {@link paintPlayhead}'s rule: the
+   * assignment happens on every frame the zoom is animating, and a fresh
+   * `[amount, cx, cy]` there is an allocation on the path that has none.
+   */
+  let paintedAmount = Number.NaN;
+  let paintedCenterX = Number.NaN;
+  let paintedCenterY = Number.NaN;
+  /** The source instant the standing Zoom panel was last read at. */
+  let paintedPanelSourceSec = Number.NaN;
 
   /**
    * The cheap per-frame half: one style write, and text only when it changed.
@@ -404,7 +998,17 @@ async function start(): Promise<void> {
    */
   function paintPlayhead(): void {
     const timelineSec = host.loop.time;
-    timeline.setPlayhead(view, sourceTimeFor(timelineSec));
+    // One `resolve` for the whole frame — where the playhead is in *source* time and
+    // what the zoom is under it are two readings of one state object (0.08 µs, §3.6).
+    // The numbers are copied out rather than held by reference because that object is
+    // the compiled timeline's own and the next `resolve` — `renderStage`'s, below —
+    // overwrites it in place.
+    const state = resolve(project.compiled, timelineSec);
+    const sourceSec = state.sourceTime;
+    const amount = state.zoom.amount;
+    const centerX = state.zoom.center[0];
+    const centerY = state.zoom.center[1];
+    timeline.setPlayhead(view, sourceSec);
 
     const durationSec = project.compiled.durationSec;
     if (timelineSec !== paintedTimelineSec || durationSec !== paintedDurationSec) {
@@ -420,6 +1024,54 @@ async function start(): Promise<void> {
       paintedPlaying = playing;
       el.playpause.innerHTML = icon(playing ? 'pause' : 'play', 15);
       el.playpause.title = playing ? 'Pause' : 'Play';
+    }
+
+    // The stage is re-placed whenever the zoom moves, and **not** only when something
+    // is selected. Two things ride on `StageState.mapping`: the handles over a
+    // selected annotation, and `outputToSource` — the map every pointer on the picture
+    // crosses. Nothing is selected for most of this window's life, so guarding on a
+    // selection left the map holding whatever zoom was resolved at the last document,
+    // selection or tool change; scrubbing into a 2.2× segment and then dragging a blur
+    // wrote the redaction at the coordinates it would have had at 1×, which is the
+    // privacy defect `annotations.ts` anchors geometry in source space to prevent. The
+    // per-frame cost is unchanged in shape: three number comparisons guard the only
+    // thing that allocates.
+    if (amount !== paintedAmount || centerX !== paintedCenterX || centerY !== paintedCenterY) {
+      paintedAmount = amount;
+      paintedCenterX = centerX;
+      paintedCenterY = centerY;
+      renderStage();
+    }
+
+    // And the standing Zoom panel, split the same way rather than exempted from the
+    // rule: `Inspector.paintZoom` writes the two numbers when they change and answers
+    // `true` only when the *shape* of what that panel says has changed — which region
+    // covers the playhead, and whether *Take manual control* can be offered here.
+    //
+    // Guarded on the playhead's **source** instant, because that is what the shape is
+    // a function of. At rest nothing below this line runs at all; while the playhead
+    // moves it runs on every frame, which is why the two predicates it asks —
+    // `zoomRegionIndexAt` and `generatedZoomAt` — are indexed loops over indexed
+    // loops, and why `paintZoom` compares numbers and writes text rather than
+    // building anything. Nothing on this path allocates, moving or still. A document
+    // change reaches the panel through `renderControls`'s own five call sites, as it
+    // always did.
+    //
+    // Without this the panel described whatever moment the last edit happened at. The
+    // readout went stale after an ordinary scrub, and — worse — the button was
+    // withheld on exactly the path a person takes to reach it: scrub to the moment you
+    // want to change, then take control. A capability that is not offered where it is
+    // wanted reads as one that does not exist.
+    if (playheadMoved(paintedPanelSourceSec, sourceSec)) {
+      paintedPanelSourceSec = sourceSec;
+      const rebuild = inspector.paintZoom(
+        zoomRegionIndexAt(sourceSec),
+        generatedZoomAt(sourceSec) !== null,
+        amount,
+        centerX,
+        centerY,
+      );
+      if (rebuild) renderControls();
     }
   }
 
@@ -450,7 +1102,9 @@ async function start(): Promise<void> {
       'Trimming changes where the output starts and ends. Nothing is removed from the ' +
       'recording on disk — the material outside the handles is still there, and dragging ' +
       'them back brings it back. There is no sound in this preview yet.';
-    el.tlHint.textContent = 'Drag the handles to trim · space to play';
+    // The hint line belongs to the armed tool (`setTool` writes it), not to this
+    // function — it used to say one fixed sentence about trimming, and a tool rail
+    // whose instructions are somewhere else is a rail nobody reads.
 
     // Every number here is measured: the length from the parts on the recording
     // clock, the size from the part the encoder actually produced, the bytes from
@@ -494,13 +1148,26 @@ async function start(): Promise<void> {
   window.addEventListener('keydown', (event) => {
     // A key pressed inside a control belongs to that control — the trim handles
     // read arrows themselves, and stealing them here would make a focused handle
-    // scrub instead of nudge.
+    // scrub instead of nudge. The inspector's fields are the same rule one panel
+    // over: space in a text field is a space, and Delete is a character.
     if (event.target instanceof HTMLElement && event.target.closest('.handle') !== null) return;
+    if (event.target instanceof HTMLInputElement) return;
     const meta = event.metaKey || event.ctrlKey;
     if (meta && event.key.toLowerCase() === 'z') {
       event.preventDefault();
       if (event.shiftKey) project.redo();
       else project.undo();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setTool('select');
+      select(null);
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault();
+      deleteSelection();
       return;
     }
     const step = event.shiftKey ? 1 : 0.1;
@@ -566,9 +1233,73 @@ async function start(): Promise<void> {
   new ResizeObserver(fitStage).observe(el.mat);
   fitStage();
 
+  /**
+   * Delete whatever is selected, through the same op the panel's button sends.
+   *
+   * A keyframe is the one case that can be refused — a channel needs two keys to
+   * describe a change — and the refusal says what to do instead rather than doing
+   * nothing, which is how a key that will not delete becomes a bug report.
+   */
+  function deleteSelection(): void {
+    if (selection === null) return;
+    if (selection.kind === 'annotation') {
+      const ops = removeAnnotationOps(project.committed, selection.spanId);
+      if (ops === null) return;
+      project.commit(ops, 'Delete note');
+      select(null);
+      return;
+    }
+    if (selection.kind === 'zoom') {
+      const ops = removeZoomOps(project.committed, selection.index);
+      if (ops === null) return;
+      project.commit(ops, 'Remove zoom');
+      select(null);
+      return;
+    }
+    const ops = removeKeyOps(project.committed, selection.ref);
+    if (ops === null) {
+      trouble(
+        'A channel needs two keyframes to describe a change. Remove the whole zoom ' +
+          'instead, from the panel on the right.',
+      );
+      return;
+    }
+    project.commit(ops, 'Delete keyframe');
+    select(null);
+  }
+
   // ---- go ---------------------------------------------------------------------
+  setTool('select');
   onDocumentChanged();
   host.start();
+
+  /**
+   * The event logs, read once, in the background.
+   *
+   * Deliberately **not** awaited before the editor opens. Reading two NDJSON files
+   * over `loom://` is fast, but it is I/O on a path that has nothing to do with
+   * showing somebody their recording, and §10.2's rule is that a clear state beats a
+   * spinner: the window opens, the generator panel says what it knows, and it says
+   * more a moment later. A failure to read is a sentence in that panel and never a
+   * refusal to open the editor.
+   */
+  void readEventLogs(id, recording, { fetchText, digest: sha256 })
+    .then((read) => {
+      logs = read;
+      if (read.trouble !== null) trouble(read.trouble);
+      renderControls();
+    })
+    .catch((error: unknown) => {
+      // Unreadable, never absent: the read is over, so the panel must stop saying
+      // *reading…*, and what it says instead is that the logs could not be opened.
+      logs = unreadEventLogs();
+      trouble(
+        `This recording’s event logs could not be read: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      renderControls();
+    });
 
   // The read-only view `test/editor-gate.test.ts` measures this window through.
   // `probe.ts` argues why it exists and why it is not a capability.
@@ -594,6 +1325,48 @@ async function start(): Promise<void> {
     },
     get clips() {
       return project.document.clips;
+    },
+    get tool() {
+      return tool;
+    },
+    get selection() {
+      return selection;
+    },
+    // The resolved zoom, cloned. `resolve` hands back the compiled timeline's own
+    // state object and overwrites it in place, so a probe returning the live one
+    // would report whatever the next frame did.
+    get zoom() {
+      const state = resolve(project.compiled, host.loop.time);
+      return {
+        amount: state.zoom.amount,
+        center: [state.zoom.center[0], state.zoom.center[1]] as [number, number],
+      };
+    },
+    get regions() {
+      return zoomRegionsOf(project.document);
+    },
+    get annotations() {
+      return annotationsOf(project.document).map((view_) => ({
+        id: view_.span.id,
+        kind: view_.kind,
+        startSec: view_.startSec,
+        endSec: view_.endSec,
+      }));
+    },
+    get tracks() {
+      return project.document.tracks.map((track) => ({
+        id: track.id,
+        target: track.target,
+        origin: track.origin,
+        generated: track.generator !== undefined,
+        baked: track.origin === 'manual' && track.generatedFrom !== undefined,
+        activeRanges: track.activeRanges.map((range) => [range[0], range[1]] as [number, number]),
+        keyCount: Object.values(track.channels).reduce((sum, c) => sum + c.keys.length, 0),
+        spanCount: track.spans?.length ?? 0,
+      }));
+    },
+    get logsRead() {
+      return logs !== null;
     },
   };
 
