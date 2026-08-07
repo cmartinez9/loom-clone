@@ -153,7 +153,7 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
   const out: ZoomRegion[] = [];
   track.activeRanges.forEach((range, index) => {
     const [windowStart, windowEnd] = range;
-    const inside = amountKeys.filter((key) => key.t >= windowStart - 1e-9 && key.t <= windowEnd);
+    const inside = amountKeys.filter((key) => insideWindow(key.t, windowStart, windowEnd));
     if (inside.length < 2) return;
     const startSec = inside[0]?.t ?? windowStart;
     const endSec = inside[inside.length - 1]?.t ?? windowEnd;
@@ -191,9 +191,9 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
  *    same result, and no bound on where a key may go closes it, because the key is
  *    inside its own window the whole time.
  *
- * Either way the region reads back `[0.5, 0.5]`, and the next region-level edit —
- * {@link updateZoomOps} or {@link removeZoomOps}, which rebuild the track from
- * `asInput(current)` — writes the frame centre in over the user's framing, silently.
+ * Either way the region reads back `[0.5, 0.5]`, and a region-level edit that took the
+ * misreading for the truth would write the frame centre in over the user's framing,
+ * silently.
  *
  * ## What it asks instead
  *
@@ -209,32 +209,47 @@ export function zoomRegionsOf(doc: EditDocument): ZoomRegion[] {
  * between them), so on a track this editor wrote the user's key stays strictly between
  * the two identity keys however far either end is dragged.
  */
-function regionCenter(
-  keys: readonly Keyframe[],
-  region: {
-    startSec: Seconds;
-    endSec: Seconds;
-    windowStart: number;
-    windowEnd: number;
-  },
-): Vec2 {
+function regionCenter(keys: readonly Keyframe[], region: RegionExtent): Vec2 {
+  const value = keys[regionCentreKeyIndex(keys, region)]?.v;
+  if (!Array.isArray(value) || value.length < 2) return [0.5, 0.5];
+  return [value[0] ?? 0.5, value[1] ?? 0.5];
+}
+
+/** The four numbers a reader and a writer both need to talk about one region. */
+interface RegionExtent {
+  startSec: Seconds;
+  endSec: Seconds;
+  windowStart: number;
+  windowEnd: number;
+}
+
+/**
+ * *Which* key {@link regionCenter} reads, as an index — so the writer can rewrite
+ * exactly the key the reader will read back and nothing else.
+ *
+ * One predicate, both directions. `-1` when the region has no centre of its own left.
+ * Two copies of "which key is the framing" is the shape {@link regionCenter}'s own
+ * history warns about: a property split across two copies of a condition has no single
+ * place to be right.
+ */
+function regionCentreKeyIndex(keys: readonly Keyframe[], region: RegionExtent): number {
   const holdStart = region.startSec + ZOOM_RAMP_SEC;
-  let best: number[] | null = null;
+  let best = -1;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (const key of keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (key === undefined) continue;
     const value = key.v;
     if (!Array.isArray(value) || value.length < 2) continue;
-    if (key.t < region.windowStart - 1e-9 || key.t > region.windowEnd) continue;
-    if (Math.abs(key.t - region.startSec) <= 1e-9) continue;
-    if (Math.abs(key.t - region.endSec) <= 1e-9) continue;
+    if (!insideWindow(key.t, region.windowStart, region.windowEnd)) continue;
+    if (isAt(key.t, region.startSec) || isAt(key.t, region.endSec)) continue;
     const distance = Math.abs(key.t - holdStart);
     if (distance < bestDistance) {
-      best = value;
+      best = i;
       bestDistance = distance;
     }
   }
-  if (best === null) return [0.5, 0.5];
-  return [best[0] ?? 0.5, best[1] ?? 0.5];
+  return best;
 }
 
 /** The region covering `atSec`, or `null`. Windows never overlap, so there is at most one. */
@@ -267,6 +282,11 @@ export interface ZoomRegionInput {
  * region's ramp-in would be evaluated against the first's hold. §6.5 merges instead;
  * a hand-placed zoom has a person to ask, and refusing is the answer that does not
  * quietly move the thing they already placed.
+ *
+ * A new region's keys are {@link buildManualZoomTrack}'s canonical shape, which is
+ * right for a region nobody has touched. They are **inserted beside** whatever is
+ * already on the track rather than the track being rebuilt from every region's
+ * summary: placing a second zoom must not retime the first one's keys.
  */
 export function placeZoomOps(
   doc: EditDocument,
@@ -276,18 +296,22 @@ export function placeZoomOps(
   const region = clampRegion(input, sourceDurationSec);
   if (region === null) return null;
   const existing = manualZoomTrackOf(doc);
-  const windows = (existing?.activeRanges ?? []).map(
-    (range) => [range[0], range[1]] as [number, number],
-  );
+  const windows = windowsOf(existing);
   const tail = segmentSettleTailSec(DEFAULT_SPRING);
   const window: [number, number] = [region.startSec, region.endSec + tail];
   if (windows.some((other) => overlaps(other, window))) return null;
+  if (existing === null) {
+    return rewriteTrackOps(doc, null, buildManualZoomTrack([window], [region]));
+  }
 
-  const next = [...windows, window].sort((a, b) => a[0] - b[0]);
-  const regions = [...zoomRegionsOf(doc).map(asInput), region].sort(
-    (a, b) => a.startSec - b.startSec,
+  const fresh = regionKeyframes(region);
+  const next = assembleZoomTrack(
+    [...windows, window],
+    [...(existing.channels['amount']?.keys ?? []), ...fresh.amount],
+    [...(existing.channels['center']?.keys ?? []), ...fresh.center],
   );
-  return rewriteTrackOps(doc, existing, next, regions);
+  if (next === null) return null;
+  return rewriteTrackOps(doc, existing, next);
 }
 
 /**
@@ -295,8 +319,32 @@ export function placeZoomOps(
  *
  * Everything about a region is one edit: its amount, its centre, and where it starts
  * and ends. They travel together because they are one keyframe layout, and sending
- * "just the amount" would mean rewriting three of the four `amount` keys and leaving
- * `center`'s window untouched — which is the same batch with a worse name on it.
+ * "just the amount" would mean a batch that names one field and touches the same keys.
+ *
+ * ## It patches the keys that are there; it does not re-derive them
+ *
+ * The keys on this track are the **user's** — `isKeyEditable` says so, and the lane
+ * and the inspector both let a person drag one or set its value. Reading a region out
+ * of those keys and then writing the region back as {@link buildManualZoomTrack}'s
+ * canonical layout would throw away everything the summary cannot carry: a ramp key
+ * dragged later to lengthen the zoom-in, a hold retimed, an asymmetric value. The
+ * natural flow is exactly the one that lost work — lengthen a ramp by hand, then nudge
+ * the Amount slider — and the loss was silent, which is the *"your edit was
+ * overwritten"* shape §3.5 argues against one level out.
+ *
+ * So each verb touches only what it names. **Amount** rewrites the region's interior
+ * `amount` keys — its hold — and leaves the two ramp ends alone. **Centre** rewrites
+ * the one `center` key {@link regionCentreKeyIndex} identifies as the framing.
+ * **Start** and **end** move the region's boundary keys and its `activeRanges` entry,
+ * and every key between them keeps the time it was given; that is also why the extent
+ * is held off the region's own interior keys ({@link extentAroundOwnKeys}) rather than
+ * allowed to slide over them, since a boundary that crossed a hold key would break
+ * §2.6's strict order and take the region's readability with it.
+ *
+ * The ops are still one `track.remove` + `track.add` pair, for {@link rewriteTrackOps}'s
+ * reason — a dozen key ops have to pass validation at every intermediate step. What
+ * changed is that the replacement is this track's own keys with the edit applied, not
+ * a fresh layout that happens to share four numbers with it.
  */
 export function updateZoomOps(
   doc: EditDocument,
@@ -310,7 +358,9 @@ export function updateZoomOps(
   const current = regions.find((region) => region.index === index);
   if (current === undefined) return null;
 
-  const wanted = clampRegion({ ...asInput(current), ...patch }, sourceDurationSec);
+  const asked = clampRegion({ ...asInput(current), ...patch }, sourceDurationSec);
+  if (asked === null) return null;
+  const wanted = extentAroundOwnKeys(track, index, current, asked, sourceDurationSec);
   if (wanted === null) return null;
 
   const tail = segmentSettleTailSec(DEFAULT_SPRING);
@@ -318,12 +368,9 @@ export function updateZoomOps(
   const others = regions.filter((region) => region.index !== index);
   if (others.some((other) => overlaps([other.startSec, other.windowEndSec], window))) return null;
 
-  const nextRegions = [...others.map(asInput), wanted].sort((a, b) => a.startSec - b.startSec);
-  const nextWindows = nextRegions
-    .map((region) => [region.startSec, region.endSec + tail] as [number, number])
-    .sort((a, b) => a[0] - b[0]);
-  if (sameLayout(track, nextWindows, nextRegions)) return null;
-  return rewriteTrackOps(doc, track, nextWindows, nextRegions);
+  const next = patchRegion(track, index, current, wanted);
+  if (next === null || sameTrack(track, next)) return null;
+  return rewriteTrackOps(doc, track, next);
 }
 
 /**
@@ -335,20 +382,30 @@ export function updateZoomOps(
  * document, an entry in the stack, and a thing the next reader has to decide is
  * inert. `track.remove` is exactly invertible (`inverse.ts` restores it at its index),
  * so nothing is lost by saying so.
+ *
+ * When another region survives, this takes out **that region's window and that
+ * region's own keys** and leaves every other key exactly where it was, for
+ * {@link updateZoomOps}'s reason: removing one zoom is not licence to retime another.
  */
 export function removeZoomOps(doc: EditDocument, index: number): EditOp[] | null {
   const track = manualZoomTrackOf(doc);
   if (track === null) return null;
   const regions = zoomRegionsOf(doc);
   if (!regions.some((region) => region.index === index)) return null;
-  const rest = regions.filter((region) => region.index !== index);
-  if (rest.length === 0) return [{ op: 'track.remove', trackId: track.id }];
-  const tail = segmentSettleTailSec(DEFAULT_SPRING);
-  const inputs = rest.map(asInput).sort((a, b) => a.startSec - b.startSec);
-  const windows = inputs.map(
-    (region) => [region.startSec, region.endSec + tail] as [number, number],
+  if (regions.length === 1) return [{ op: 'track.remove', trackId: track.id }];
+
+  const windows = windowsOf(track);
+  const amountKeys = track.channels['amount']?.keys ?? [];
+  const centerKeys = track.channels['center']?.keys ?? [];
+  const goneAmount = new Set(ownKeyIndexes(amountKeys, windows, index));
+  const goneCenter = new Set(ownKeyIndexes(centerKeys, windows, index));
+  const next = assembleZoomTrack(
+    windows.filter((_window, at) => at !== index),
+    amountKeys.filter((_key, at) => !goneAmount.has(at)),
+    centerKeys.filter((_key, at) => !goneCenter.has(at)),
   );
-  return rewriteTrackOps(doc, track, windows, inputs);
+  if (next === null) return null;
+  return rewriteTrackOps(doc, track, next);
 }
 
 /**
@@ -611,7 +668,7 @@ export function keyBounds(
  */
 function windowContaining(track: Track, t: Seconds): readonly [number, number] | null {
   for (const range of track.activeRanges) {
-    if (t >= range[0] - 1e-9 && t <= range[1]) return [range[0], range[1]];
+    if (insideWindow(t, range[0], range[1])) return [range[0], range[1]];
   }
   return null;
 }
@@ -627,6 +684,219 @@ function windowContaining(track: Track, t: Seconds): readonly [number, number] |
 export const KEY_GAP_SEC = 0.001;
 
 // ---------------------------------------------------------------- internals
+
+/**
+ * How far outside an `activeRanges` entry a key may sit and still be counted inside it.
+ *
+ * One constant rather than a literal per reader, because the writer now has to agree
+ * with the reader to the float: the first key of a region sits *on* its window start,
+ * and a reader and a writer that disagreed by one float would drop a key from its own
+ * region — which is the corruption {@link moveKeyOps} describes.
+ */
+const WINDOW_EPS = 1e-9;
+
+function insideWindow(t: number, low: number, high: number): boolean {
+  return t >= low - WINDOW_EPS && t <= high;
+}
+
+/** Is this key at that instant, to the tolerance the windows are read with? */
+function isAt(t: number, at: number): boolean {
+  return Math.abs(t - at) <= WINDOW_EPS;
+}
+
+function windowsOf(track: Track | null): [number, number][] {
+  return (track?.activeRanges ?? []).map((range) => [range[0], range[1]] as [number, number]);
+}
+
+/**
+ * The keys that belong to region `index` and to no other window.
+ *
+ * Windows never overlap but they may *touch* — one region's window can end exactly
+ * where the next begins — so "inside this window" alone is not identity at a seam.
+ * A key that two windows would both claim belongs to neither for editing purposes,
+ * which is the conservative direction: it is left alone rather than moved or deleted
+ * by an edit to a region that may not own it.
+ */
+function ownKeyIndexes(
+  keys: readonly Keyframe[],
+  windows: readonly (readonly [number, number])[],
+  index: number,
+): number[] {
+  const own = windows[index];
+  if (own === undefined) return [];
+  const out: number[] = [];
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (key === undefined || !insideWindow(key.t, own[0], own[1])) continue;
+    const shared = windows.some(
+      (other, at) => at !== index && insideWindow(key.t, other[0], other[1]),
+    );
+    if (shared) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+/**
+ * The times of a region's own keys that are neither of its two boundaries.
+ *
+ * What a start/end edit may not slide over. `amount`'s boundaries are its first and
+ * last key in the window — §6.5's ramp ends — and `center`'s are the keys sitting on
+ * the region's `startSec` and `endSec`; everything else is the user's hold, and its
+ * times are theirs.
+ */
+function interiorKeyTimes(track: Track, index: number, current: ZoomRegion): number[] {
+  const windows = windowsOf(track);
+  const out: number[] = [];
+  const amountKeys = track.channels['amount']?.keys ?? [];
+  const ownAmount = ownKeyIndexes(amountKeys, windows, index);
+  for (let i = 1; i < ownAmount.length - 1; i++) {
+    const at = ownAmount[i];
+    const key = at === undefined ? undefined : amountKeys[at];
+    if (key !== undefined) out.push(key.t);
+  }
+  const centerKeys = track.channels['center']?.keys ?? [];
+  for (const at of ownKeyIndexes(centerKeys, windows, index)) {
+    const key = centerKeys[at];
+    if (key === undefined) continue;
+    if (isAt(key.t, current.startSec) || isAt(key.t, current.endSec)) continue;
+    out.push(key.t);
+  }
+  return out;
+}
+
+/**
+ * A requested extent held off the region's own interior keys.
+ *
+ * `keyBounds` stops a key being dragged out of its region; this is the same rule from
+ * the other side — a region's boundary may not be dragged *past* one of its own keys.
+ * Without it a start dragged later would land on or beyond the hold, which is a
+ * repeated `t` (§2.6, and `validateEditDocument` refuses it) or a key stranded outside
+ * the window that owns it. The alternative — dragging the interior keys along — is the
+ * defect this whole path exists to stop.
+ *
+ * `null` when there is nothing legal left, which needs a region whose keys are packed
+ * closer than {@link KEY_GAP_SEC} to the end of the recording.
+ */
+function extentAroundOwnKeys(
+  track: Track,
+  index: number,
+  current: ZoomRegion,
+  asked: ZoomRegionInput,
+  sourceDurationSec: Seconds,
+): ZoomRegionInput | null {
+  const interior = interiorKeyTimes(track, index, current);
+  let startSec = asked.startSec;
+  let endSec = asked.endSec;
+  for (const t of interior) {
+    startSec = Math.min(startSec, t - KEY_GAP_SEC);
+    endSec = Math.max(endSec, t + KEY_GAP_SEC);
+  }
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return null;
+  if (startSec < 0 || endSec > Math.max(0, sourceDurationSec) || startSec >= endSec) return null;
+  return { startSec, endSec, amount: asked.amount, center: asked.center };
+}
+
+/**
+ * One region's keys with the edit applied, and every other key left where it was.
+ *
+ * The whole of {@link updateZoomOps}'s promise, in the order its docblock states it:
+ * the two boundary keys carry the extent, the hold carries the amount, and the framing
+ * key carries the centre. Nothing else in either channel is read or written.
+ */
+function patchRegion(
+  track: Track,
+  index: number,
+  current: ZoomRegion,
+  wanted: ZoomRegionInput,
+): Track | null {
+  const windows = windowsOf(track);
+  const own = windows[index];
+  if (own === undefined) return null;
+
+  const amountKeys = track.channels['amount']?.keys ?? [];
+  const centerKeys = track.channels['center']?.keys ?? [];
+  const ownAmount = ownKeyIndexes(amountKeys, windows, index);
+  const firstAmount = ownAmount[0];
+  const lastAmount = ownAmount[ownAmount.length - 1];
+  if (firstAmount === undefined || lastAmount === undefined || ownAmount.length < 2) return null;
+
+  const amount = amountKeys.map((key) => ({ ...key }));
+  const rampIn = amount[firstAmount];
+  const rampOut = amount[lastAmount];
+  if (rampIn === undefined || rampOut === undefined) return null;
+  amount[firstAmount] = { ...rampIn, t: wanted.startSec };
+  amount[lastAmount] = { ...rampOut, t: wanted.endSec };
+  // The hold, and only the hold: the two ramp ends are what returns the picture to
+  // identity, so their values are not what "the amount" names.
+  for (const at of ownAmount.slice(1, -1)) {
+    const key = amount[at];
+    if (key === undefined) continue;
+    amount[at] = { ...key, v: wanted.amount };
+  }
+
+  const center = centerKeys.map((key) => ({ ...key }));
+  for (const at of ownKeyIndexes(centerKeys, windows, index)) {
+    const key = center[at];
+    if (key === undefined) continue;
+    if (isAt(key.t, current.startSec)) center[at] = { ...key, t: wanted.startSec };
+    else if (isAt(key.t, current.endSec)) center[at] = { ...key, t: wanted.endSec };
+  }
+  const framing = regionCentreKeyIndex(centerKeys, {
+    startSec: current.startSec,
+    endSec: current.endSec,
+    windowStart: own[0],
+    windowEnd: own[1],
+  });
+  const framingKey = framing < 0 ? undefined : center[framing];
+  if (framingKey !== undefined) {
+    center[framing] = { ...framingKey, v: [wanted.center[0], wanted.center[1]] };
+  }
+
+  const tail = segmentSettleTailSec(DEFAULT_SPRING);
+  const nextWindows = windows.map((window, at) =>
+    at === index ? ([wanted.startSec, wanted.endSec + tail] as [number, number]) : window,
+  );
+  return assembleZoomTrack(nextWindows, amount, center);
+}
+
+/**
+ * A manual zoom track from windows and keys that already exist, or `null` when they do
+ * not make a document that opens.
+ *
+ * The sorts are what let a caller hand over a region moved past its neighbour without
+ * also owning the ordering; the strict-increase check is §2.6's own rule, asked here
+ * rather than left to `validateEditDocument` because refusing an edit is survivable
+ * and an `edit.json` that stops opening is not.
+ */
+function assembleZoomTrack(
+  windows: readonly (readonly [number, number])[],
+  amount: readonly Keyframe[],
+  center: readonly Keyframe[],
+): Track | null {
+  const sortedAmount = [...amount].sort((a, b) => a.t - b.t);
+  const sortedCenter = [...center].sort((a, b) => a.t - b.t);
+  if (!strictlyIncreasing(sortedAmount) || !strictlyIncreasing(sortedCenter)) return null;
+  return manualZoomTrack({
+    id: MANUAL_ZOOM_TRACK_ID,
+    activeRanges: [...windows]
+      .sort((a, b) => a[0] - b[0])
+      .map((window) => [window[0], window[1]] as [number, number]),
+    amount: sortedAmount,
+    center: sortedCenter,
+    spring: { ...DEFAULT_SPRING },
+    amountClamp: [MIN_ZOOM_AMOUNT, MAX_ZOOM_AMOUNT],
+  });
+}
+
+function strictlyIncreasing(keys: readonly Keyframe[]): boolean {
+  let previous = Number.NEGATIVE_INFINITY;
+  for (const key of keys) {
+    if (!Number.isFinite(key.t) || !(key.t > previous)) return false;
+    previous = key.t;
+  }
+  return true;
+}
 
 function asInput(region: ZoomRegion): ZoomRegionInput {
   return {
@@ -695,13 +965,7 @@ function clampRegion(input: ZoomRegionInput, sourceDurationSec: Seconds): ZoomRe
  * which is §3.5's *"the user's manual zoom keyframes sit above"* — and it is the whole
  * of how the captain's manual option beats the generator without a stacking UI.
  */
-function rewriteTrackOps(
-  doc: EditDocument,
-  existing: Track | null,
-  windows: readonly [number, number][],
-  regions: readonly ZoomRegionInput[],
-): EditOp[] {
-  const track = buildManualZoomTrack(windows, regions);
+function rewriteTrackOps(doc: EditDocument, existing: Track | null, track: Track): EditOp[] {
   if (existing === null) return [{ op: 'track.add', track, at: doc.tracks.length }];
   const at = doc.tracks.indexOf(existing);
   return [
@@ -711,14 +975,38 @@ function rewriteTrackOps(
 }
 
 /**
- * The manual zoom track for a set of regions.
+ * §6.5 step 5's shape for **one** region, and the only place it is decided.
  *
- * §6.5 step 5's shape, region by region: four keys on `amount` (1 → A → A → 1) and
- * three on `center` (identity → the user's centre → identity), every one of them
- * `ease: 'spring'` over {@link DEFAULT_SPRING}. Springing the centre back to the
- * middle as the amount returns to 1 is what stops the frame sliding sideways while it
- * zooms out — `auto-zoom.ts` argues it and this is the same geometry.
+ * Four keys on `amount` (1 → A → A → 1) and three on `center` (identity → the user's
+ * centre → identity), every one of them `ease: 'spring'` over {@link DEFAULT_SPRING}.
+ * Springing the centre back to the middle as the amount returns to 1 is what stops the
+ * frame sliding sideways while it zooms out — `auto-zoom.ts` argues it and this is the
+ * same geometry.
+ *
+ * It answers what a region *nobody has touched* looks like, so it is what places one
+ * and never what updates one — see {@link updateZoomOps}.
  */
+function regionKeyframes(region: ZoomRegionInput): { amount: Keyframe[]; center: Keyframe[] } {
+  const holdStart = region.startSec + ZOOM_RAMP_SEC;
+  const holdEnd = Math.max(holdStart + MIN_HOLD_SEC, region.endSec - ZOOM_RAMP_SEC);
+  const amount: Keyframe[] = [];
+  const center: Keyframe[] = [];
+  push(amount, { t: region.startSec, v: 1, ease: { kind: 'spring' } });
+  push(amount, { t: holdStart, v: region.amount, ease: { kind: 'spring' } });
+  push(amount, { t: holdEnd, v: region.amount, ease: { kind: 'spring' } });
+  push(amount, { t: region.endSec, v: 1, ease: { kind: 'spring' } });
+
+  push(center, { t: region.startSec, v: [0.5, 0.5], ease: { kind: 'spring' } });
+  push(center, {
+    t: holdStart,
+    v: [region.center[0], region.center[1]],
+    ease: { kind: 'spring' },
+  });
+  push(center, { t: region.endSec, v: [0.5, 0.5], ease: { kind: 'spring' } });
+  return { amount, center };
+}
+
+/** The manual zoom track for a set of regions that have never been edited by hand. */
 export function buildManualZoomTrack(
   windows: readonly [number, number][],
   regions: readonly ZoomRegionInput[],
@@ -727,20 +1015,9 @@ export function buildManualZoomTrack(
   const amount: Keyframe[] = [];
   const center: Keyframe[] = [];
   for (const region of regions) {
-    const holdStart = region.startSec + ZOOM_RAMP_SEC;
-    const holdEnd = Math.max(holdStart + MIN_HOLD_SEC, region.endSec - ZOOM_RAMP_SEC);
-    push(amount, { t: region.startSec, v: 1, ease: { kind: 'spring' } });
-    push(amount, { t: holdStart, v: region.amount, ease: { kind: 'spring' } });
-    push(amount, { t: holdEnd, v: region.amount, ease: { kind: 'spring' } });
-    push(amount, { t: region.endSec, v: 1, ease: { kind: 'spring' } });
-
-    push(center, { t: region.startSec, v: [0.5, 0.5], ease: { kind: 'spring' } });
-    push(center, {
-      t: holdStart,
-      v: [region.center[0], region.center[1]],
-      ease: { kind: 'spring' },
-    });
-    push(center, { t: region.endSec, v: [0.5, 0.5], ease: { kind: 'spring' } });
+    const keys = regionKeyframes(region);
+    for (const key of keys.amount) push(amount, key);
+    for (const key of keys.center) push(center, key);
   }
   return manualZoomTrack({
     id: MANUAL_ZOOM_TRACK_ID,
@@ -761,13 +1038,9 @@ function push(keys: Keyframe[], key: Keyframe): void {
   keys.push(key);
 }
 
-/** Would rewriting produce the track that is already there? Then it is not an edit. */
-function sameLayout(
-  track: Track,
-  windows: readonly [number, number][],
-  regions: readonly ZoomRegionInput[],
-): boolean {
-  return JSON.stringify(track) === JSON.stringify(buildManualZoomTrack(windows, regions));
+/** Would the rewrite produce the track that is already there? Then it is not an edit. */
+function sameTrack(track: Track, next: Track): boolean {
+  return JSON.stringify(track) === JSON.stringify(next);
 }
 
 function sameValue(a: number | number[], b: number | number[]): boolean {

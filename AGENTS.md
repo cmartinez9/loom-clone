@@ -741,6 +741,19 @@ surface and the three seams a pure package cannot cross: reading `events/*.ndjso
 over `loom://`, hashing them for §3.5's fingerprint, and asking `recording.json`
 whether the click tap was ever live.
 
+**`buildManualZoomTrack` is what _creates_ a region and never what _updates_ one, and
+that distinction is the whole of § Sharp edges' region-edit entry.** A region is read out
+of keys the user is allowed to drag and retime, so writing it back as the canonical
+four-keys-plus-three layout discards everything the `ZoomRegionInput` summary cannot
+carry. `placeZoomOps` inserts a fresh region's keys beside whatever is already on the
+track; `updateZoomOps` and `removeZoomOps` **patch the keys that are there**. The ops are
+still one `track.remove` + `track.add` pair — a dozen key ops would each have to pass
+validation on the way through `applyOps` — but the replacement is this track's own keys
+with the edit applied. `a-region-edit-discards-a-hand-edited-keyframe` is the mutation,
+and its guard is `apps/renderer/test/editor-zoom.test.ts` rather than the gate, because
+the property is arithmetic over a document and nothing composited can be taken away from
+it.
+
 **The captain's own row of the capability table is _"Manual option too."_**, and it is
 `overrideZoomOps`: a manual region seeded with what `resolve` reports at that instant —
 so the picture does not jump when control changes hands — spanning the **generated
@@ -824,7 +837,7 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Seventeen entries in `npm run verify:mutation`
+committed. Eighteen entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the ones worth
 knowing are the three whose guard is deliberately a unit test and **not** this gate.
 `an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
@@ -868,9 +881,10 @@ and so does this paragraph. The gate gets **one** launch and that is unchanged; 
 attempts against a host that cannot serve the allocation is the move this project keeps
 refusing. Three `verify:mutation` entries were guarded solely by claims this gate
 withholds; **all three now carry a second guard that cannot withhold**, which is the
-remedy `WITHHOLDABLE_GUARDS` prescribes. They stay printed under the exposure warning
-because it is file-keyed — an over-report in the conservative direction, and
-`P15_GATE`'s docblock says so.
+remedy `WITHHOLDABLE_GUARDS` prescribes — and having taken it they are **no longer
+printed** under the exposure warning, because `warnSolelyWithholdable` selects a mutation
+only when _every_ file in its `mustFail` can withhold. That is the warning going quiet
+because the exposure closed, which is the only reason it ever should.
 
 **`the-zoom-panel-does-not-follow-the-playhead` was a fourth, and what it cost is worth
 inheriting: `runTests` can only read a _file_, and this gate withholds per _claim_.** So
@@ -885,9 +899,11 @@ sit inside a segment's hold and resolve to 2.500 and 2.499 — the same `2.50×`
 frozen panel agrees with itself across that pair, and only a reading where the generator
 has nothing to say can see it; `BETWEEN_SEC` carries the derivation. The richer claim —
 `yours`, and whether _Take manual control_ is offered — still needs a manual region, is
-still taken after export A, and is still withheld. The entry stays printed under the
-exposure warning because that warning is file-keyed: an over-report, in the conservative
-direction, and `P15_GATE`'s docblock says so.
+still taken after export A, and is still withheld. That half is carried by the same pure
+guard the other three took, so this entry is not printed under the exposure warning
+either. Were it listed on the gate alone it would be — the warning is file-keyed and this
+gate withholds per _claim_, so it would over-report a claim the gate does judge, which is
+the conservative direction and is what `P15_GATE`'s docblock records.
 
 **The other three were closed the same way the fourth's richer half still needs**, and
 the module is worth knowing about on its own: `apps/renderer/src/editor/gestures.ts`
@@ -1022,8 +1038,8 @@ the same way rather than widening anything.
   neighbours.** The neighbour bound leaves `lowSec` at 0 for the first key of the first
   region, so a drag could take it out of the `activeRanges` entry it belongs to;
   `zoomRegionsOf` then filters it out, the region reads back three keys and starting at
-  its hold, and the next region-level edit rebuilds the track from that misreading and
-  writes it in — data corruption with nothing on screen that says so. `keyBounds`
+  its hold, and the next region-level edit writes that misreading in — data corruption
+  with nothing on screen that says so. `keyBounds`
   intersects the two, inclusively at both ends because `zoomRegionsOf`'s own filter is
   inclusive: the first key of a region sits _on_ its window start, and a bound that
   disagreed with the reader by one float would drop a key from its own region.
@@ -1033,8 +1049,8 @@ the same way rather than widening anything.
   filtered by the **`amount`** channel's extent, which assumed a shape nobody
   guarantees: the moment that set gained a second member, the middle of two was the
   identity ramp-out key and the region read back `[0.5, 0.5]` — then the next
-  region-level edit rebuilt the track from `asInput(current)` and wrote the frame
-  centre in over the user's framing, silently. Two ordinary drags reach it, and this is
+  region-level edit took that misreading for the truth and wrote the frame centre in
+  over the user's framing, silently. Two ordinary drags reach it, and this is
   the half worth inheriting: **one of them is not a window question at all.** The last
   `amount` key dragged later pushes `endSec` past the ramp-out centre key so the filter
   admits it; the last `center` key dragged _earlier_ does the same while never leaving
@@ -1042,7 +1058,25 @@ the same way rather than widening anything.
   the writer's question instead — exclude the keys `buildManualZoomTrack` puts at the
   region's ends, take the candidate nearest `startSec + ZOOM_RAMP_SEC`, and answer
   `[0.5, 0.5]` when a region has no centre of its own left rather than refusing a
-  document this editor did not write.
+  document this editor did not write. `regionCentreKeyIndex` is that question asked
+  once and read two ways — the reader takes the value, the writer rewrites that key and
+  no other — because a property split across two copies of a condition has no single
+  place to be right.
+- **A region-level edit patches the keys that are there; it never re-derives them.**
+  The read-then-regenerate shape the two entries above each hit once is the class
+  itself: a region is _read out of_ keys the user may drag, retime and revalue, so
+  writing it back from a four-number summary silently discards whatever the summary
+  cannot carry. The natural flow reaches it — lengthen a ramp by hand, then nudge the
+  Amount slider — and losing the finer edit to the coarser one, with nothing on screen
+  saying so, is how a feature stops being trusted. So each verb touches only what it
+  names: amount rewrites the hold, centre rewrites the framing key, start and end move
+  the boundary keys and the `activeRanges` entry, and remove takes one region's window
+  and its own keys and leaves the others alone. Two consequences worth expecting. A
+  region's extent is now held off its **own** interior keys (`extentAroundOwnKeys`) —
+  `keyBounds` from the other side, because a boundary dragged past a hold key is a
+  repeated `t` §2.6 refuses — so dragging a start later stops at the hold rather than
+  pushing it along. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
+  a second region is _inserted_ beside the first's keys, not rebuilt with them.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —
@@ -1780,13 +1814,15 @@ same pass is not a check that harness runs.
   and no single run looks wrong when that repeats — so it is printed on **every** run
   straight off the registry, deterministic and identical on every host, rather than
   counted over time. The set gained `test/phase15-gate.test.ts` when that gate's export
-  claims became withholdable, so **five** mutations are printed today —
-  `export-writer-registered-after-it-opens` behind the phase-8 gate, and the four whose
-  only guard is the phase-15 gate, which the registry names beside the set — and the fix
-  for each is a second guard that cannot withhold, never a retry.
-  **The warning is keyed by _file_ and the phase-15 gate withholds per _claim_, so one of
-  those five is an over-report and the registry says which.** That direction is the safe
-  one for a warning about unproven coverage. The unsafe direction is the same mismatch
+  claims became withholdable, and the four entries that were then solely behind it have
+  each taken the fix — a second guard that cannot withhold, never a retry — so **one**
+  mutation is printed today: `export-writer-registered-after-it-opens`, behind the phase-8
+  gate. Read the count off a run rather than from here; what is durable is the rule, which
+  is that an entry appears exactly while _every_ file in its `mustFail` can withhold.
+  **The warning is keyed by _file_ and the phase-15 gate withholds per _claim_, so an
+  entry listed on that gate alone would be an over-report whenever the claim guarding it
+  is one the gate does judge.** That direction is the safe one for a warning about
+  unproven coverage. The unsafe direction is the same mismatch
   read by `runTests`, which caught this branch out: a mutation guarded by a claim that
   withheld, in a file whose other claims were judged, is reported `SURVIVED` rather than
   `no verdict` — a hole announced in a gate that never looked. `no verdict` is still

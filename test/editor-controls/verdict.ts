@@ -118,12 +118,20 @@ export function lostTheContext(reading: ExportReading): boolean {
  *
  * ## What is deliberately not on this list
  *
- * Everything that is not a reading of an export. `readings`, `disk`, `slider`,
- * `settled`, `lanes` and `tools` are readings of the **editor**, taken before the
- * export runs and on a healthy context — they are judged unconditionally, and counting
- * them here would make a run that measured the editor and lost the GPU judge its export
- * claims against nothing. That is not an incomplete enumeration; it is the per-claim
- * split this module exists for. Do not finish it.
+ * Everything that is not a reading of an **export**. `readings`, `disk`, `lanes` and
+ * `tools` are readings of the editor taken before the first export; `slider` and
+ * `settled` are readings of the editor taken *after* it. The dividing line is not
+ * *when* a reading was taken but *what it is of*: none of the six is evidence about a
+ * frame that reached a file, so none of them can stand in for the export claims, and
+ * counting them here would make a run that measured the editor and lost the GPU judge
+ * its export claims against nothing.
+ *
+ * That `slider` and `settled` sit after export A has a consequence worth being exact
+ * about rather than glossing: their own gate tests call `withholdIfInstrumentLost`,
+ * because a harness that died at export A never reached the gesture that produces
+ * them. So they are withheld with the export claims — they are simply not what decides
+ * whether to withhold. This is not an incomplete enumeration; it is the per-claim split
+ * this module exists for. Do not finish it.
  */
 export function exportReadingsTaken(report: ControlsReport): string[] {
   const readings: string[] = [];

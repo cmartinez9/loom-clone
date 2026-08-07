@@ -14,6 +14,8 @@
  * **JUDGED**, except the two that are the real thing.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   CONTEXT_LOST_SIGNATURE,
@@ -30,6 +32,27 @@ const REAL_CONTEXT_LOST =
   'rather than encoding frames nothing drew (architecture report §10.2). A lost context ' +
   'is silent — every GL call becomes a no-op and the canvas keeps its last contents — so ' +
   'continuing would write a file that passes every §7.5 check and shows nothing.';
+
+/** Where the sentence is actually written. The fence reads it rather than trusting a copy. */
+const RENDER_LOOP = fileURLToPath(
+  new URL('../apps/renderer/src/export/render-loop.ts', import.meta.url),
+);
+
+/**
+ * The production source with its string-literal seams closed and its whitespace flat.
+ *
+ * `CONTEXT_LOST_SIGNATURE` has to be pinned to what the product throws, not to a copy
+ * of it — but a template literal is free to be re-wrapped by prettier at any point,
+ * including through the middle of the phrase. So adjacent literals are joined and runs
+ * of whitespace collapse to one space: the assertion then fails when the sentence is
+ * **reworded**, which is what would silently send the gate back to judging every failed
+ * export, and never when it is merely reflowed.
+ */
+function flattenedSource(path: string): string {
+  return readFileSync(path, 'utf8')
+    .replaceAll(/['`]\s*\+\s*['`]/g, '')
+    .replaceAll(/\s+/g, ' ');
+}
 
 function anExport(overrides: Partial<ExportReading> = {}): ExportReading {
   return {
@@ -78,6 +101,20 @@ describe('the signature is the product’s own sentence, not a keyword', () => {
   it('matches `ExportContextLostError` verbatim', () => {
     expect(lostTheContext(anExport())).toBe(true);
     expect(REAL_CONTEXT_LOST).toContain(CONTEXT_LOST_SIGNATURE);
+  });
+
+  it('is pinned to the sentence `render-loop.ts` actually throws', () => {
+    // The one place this property can break. `verdict.ts` argues that a reworded
+    // message breaks in the safe direction — the gate goes back to judging every
+    // failed export — but that is precisely the CI state this branch exists to fix,
+    // and it would return with nothing going red. So the fence reads the source.
+    const source = flattenedSource(RENDER_LOOP);
+    expect(source, 'the export loop no longer throws the sentence the gate matches on').toContain(
+      CONTEXT_LOST_SIGNATURE,
+    );
+    // The control, so a search that matched anything would not pass: a reworded
+    // signature is exactly what this must be able to say no to.
+    expect(source).not.toContain('the WebGL context was mislaid while compositing');
   });
 
   it('does NOT match a failure that merely mentions a context', () => {

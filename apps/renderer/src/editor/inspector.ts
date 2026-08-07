@@ -170,13 +170,31 @@ export class Inspector {
    */
   #zoomAmountValue: HTMLElement | null = null;
   #zoomCenterValue: HTMLElement | null = null;
-  /** The shape {@link Inspector.#renderZoom} last built for. `NaN` until it has. */
-  #zoomRegionIndex = Number.NaN;
-  #zoomGenerated = false;
-  /** The numbers those two `<dd>`s last said, so that only changes are written. */
-  #zoomAmount = Number.NaN;
-  #zoomCenterX = Number.NaN;
-  #zoomCenterY = Number.NaN;
+  /**
+   * What the standing Zoom panel last said, and what it is being asked to say.
+   *
+   * Two {@link ZoomReadout}s allocated once with the `Inspector` and **mutated in
+   * place**, never rebuilt. {@link Inspector.paintZoom} runs on the playhead's own
+   * frame — every frame while it moves — and §4.3's first rule is that nothing on that
+   * path allocates, which is the same reason `zoomRegionIndexAt` and
+   * `generatedSegmentIndexAt` answer indexes rather than objects.
+   */
+  readonly #painted: ZoomReadout = {
+    regionIndex: -1,
+    generated: false,
+    amount: Number.NaN,
+    centerX: Number.NaN,
+    centerY: Number.NaN,
+  };
+  readonly #pending: ZoomReadout = {
+    regionIndex: -1,
+    generated: false,
+    amount: Number.NaN,
+    centerX: Number.NaN,
+    centerY: Number.NaN,
+  };
+  /** Has this panel ever been built? `#painted` means nothing until it has. */
+  #hasPainted = false;
 
   constructor(elements: InspectorElements, callbacks: InspectorCallbacks) {
     this.#elements = elements;
@@ -197,32 +215,38 @@ export class Inspector {
    * Inspector.render}: asking for a rebuild that is deliberately ignored, sixty times
    * a second, is worse than being one gesture behind.
    */
-  paintZoom(readout: ZoomReadout): boolean {
+  paintZoom(
+    regionIndex: number,
+    generated: boolean,
+    amount: number,
+    centerX: number,
+    centerY: number,
+  ): boolean {
+    // Scalars in, and the readout the decision reads is this instance's own — the
+    // caller runs on the playhead's frame, so a literal here or at the call site is an
+    // allocation per frame on the path whose whole rule is that there are none.
+    const pending = this.#pending;
+    pending.regionIndex = regionIndex;
+    pending.generated = generated;
+    pending.amount = amount;
+    pending.centerX = centerX;
+    pending.centerY = centerY;
     // The decision is `gestures.ts`'s and the doing is here. It was inline until a
     // lost GPU context showed that the only thing guarding it was a gate that
     // composites — see that module's header.
-    const previous: ZoomReadout | null = Number.isNaN(this.#zoomAmount)
-      ? null
-      : {
-          regionIndex: this.#zoomRegionIndex,
-          generated: this.#zoomGenerated,
-          amount: this.#zoomAmount,
-          centerX: this.#zoomCenterX,
-          centerY: this.#zoomCenterY,
-        };
-    switch (zoomPaintDecision(previous, readout, panelIsHeld(this.#gesture))) {
+    const previous = this.#hasPainted ? this.#painted : null;
+    switch (zoomPaintDecision(previous, pending, panelIsHeld(this.#gesture))) {
       case 'rebuild':
         return true;
       case 'nothing':
         return false;
       case 'write':
-        this.#zoomAmount = readout.amount;
-        this.#zoomCenterX = readout.centerX;
-        this.#zoomCenterY = readout.centerY;
-        if (this.#zoomAmountValue !== null)
-          this.#zoomAmountValue.textContent = amountText(readout.amount);
+        this.#painted.amount = amount;
+        this.#painted.centerX = centerX;
+        this.#painted.centerY = centerY;
+        if (this.#zoomAmountValue !== null) this.#zoomAmountValue.textContent = amountText(amount);
         if (this.#zoomCenterValue !== null)
-          this.#zoomCenterValue.textContent = centreText(readout.centerX, readout.centerY);
+          this.#zoomCenterValue.textContent = centreText(centerX, centerY);
         return false;
     }
   }
@@ -592,11 +616,12 @@ export class Inspector {
     );
     this.#zoomAmountValue = amountValue;
     this.#zoomCenterValue = centerValue;
-    this.#zoomAmount = state.resolvedZoom.amount;
-    this.#zoomCenterX = state.resolvedZoom.center[0] ?? 0.5;
-    this.#zoomCenterY = state.resolvedZoom.center[1] ?? 0.5;
-    this.#zoomRegionIndex = state.regionIndexAtPlayhead;
-    this.#zoomGenerated = state.generatedAt !== null;
+    this.#painted.amount = state.resolvedZoom.amount;
+    this.#painted.centerX = state.resolvedZoom.center[0] ?? 0.5;
+    this.#painted.centerY = state.resolvedZoom.center[1] ?? 0.5;
+    this.#painted.regionIndex = state.regionIndexAtPlayhead;
+    this.#painted.generated = state.generatedAt !== null;
+    this.#hasPainted = true;
 
     nodes.push(
       factList([

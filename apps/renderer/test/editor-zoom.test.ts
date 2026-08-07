@@ -284,6 +284,207 @@ describe('tuning a zoom that is already there', () => {
 });
 
 /**
+ * A region-level edit changes what it names, and nothing else.
+ *
+ * The keys on the manual track are the **user's** — `isKeyEditable` says so, and the
+ * lane and the inspector both let a person drag one and set its value. Reading a region
+ * out of those keys and then writing it back as `buildManualZoomTrack`'s canonical
+ * layout discarded everything the four-number summary could not carry, and the flow
+ * that reached it is the natural one: lengthen a ramp by hand, then nudge the Amount
+ * slider. The finer edit went silently, which is the *"your edit was overwritten"*
+ * shape §3.5 argues against one level out.
+ *
+ * So every one of the five region-level verbs is exercised over a document whose keys
+ * have been hand-edited **through the shipping ops** — `moveKeyOps` and
+ * `setKeyValueOps`, the real path a person takes — and each has to leave both edits
+ * standing. Covering `amount` alone would be the same bug with a smaller mouth.
+ *
+ * The consequence is asserted rather than the key list: the document still opens, and
+ * `zoomRegionsOf` still reads the region back as what was asked for.
+ */
+describe('a region-level edit keeps the keys the user placed', () => {
+  const FRAMED: [number, number] = [0.6, 0.4];
+  /** Where hand edit A puts the hold's first `amount` key — 0.9 s later than the writer. */
+  const DRAGGED_TO = 11.5;
+  /** What hand edit B gives the ramp-in key: a zoom that starts already slightly in. */
+  const RAMP_IN_VALUE = 1.4;
+
+  function amountKeys(document_: EditDocument): KeyView[] {
+    return zoomKeysOf(document_).filter((key) => key.channel === 'amount');
+  }
+
+  /** The times of region 0's two hold keys — what a boundary edit may not retime. */
+  function interiorOf(document_: EditDocument): number[] {
+    return amountKeys(document_)
+      .map((key) => key.t)
+      .slice(1, 3);
+  }
+
+  /** The times of the *other* region's keys, which no edit to region 0 may touch. */
+  function otherRegionOf(document_: EditDocument): number[] {
+    return amountKeys(document_)
+      .map((key) => key.t)
+      .slice(4);
+  }
+
+  /**
+   * Two regions, the first of them hand-edited exactly as a person would.
+   *
+   * Two edits rather than one, because they fail differently: a moved `t` is lost by a
+   * layout that is re-derived, and a set `v` is lost by a write that does not ask which
+   * keys it owns.
+   */
+  function handEdited(): EditDocument {
+    let doc = place(empty(), { startSec: 10, endSec: 18, amount: 2, center: FRAMED });
+    doc = place(doc, { startSec: 30, endSec: 38, amount: 2.5, center: [0.4, 0.6] });
+    const hold = amountKeys(doc)[1];
+    expect(hold, 'the fixture has no hold key to drag').toBeDefined();
+    doc = apply(doc, hold === undefined ? null : moveKeyOps(doc, hold, DRAGGED_TO));
+    const rampIn = amountKeys(doc)[0];
+    expect(rampIn, 'the fixture has no ramp-in key to revalue').toBeDefined();
+    doc = apply(doc, rampIn === undefined ? null : setKeyValueOps(doc, rampIn, RAMP_IN_VALUE));
+    // The preconditions, so a fixture that stopped hand-editing anything cannot make
+    // every assertion below pass by describing a region nobody touched.
+    expect(amountKeys(doc).map((key) => key.t)).toContain(DRAGGED_TO);
+    expect(amountKeys(doc)[0]?.key.v).toBe(RAMP_IN_VALUE);
+    expect(zoomRegionsOf(doc)).toHaveLength(2);
+    return doc;
+  }
+
+  function expectHandEditsSurvive(document_: EditDocument, why: string): void {
+    const keys = amountKeys(document_);
+    expect(
+      keys.map((key) => key.t),
+      `${why}: the dragged hold key was retimed`,
+    ).toContain(DRAGGED_TO);
+    const region = zoomRegionsOf(document_)[0];
+    expect(region, `${why}: the region stopped being readable at all`).toBeDefined();
+    const rampIn = keys.find((key) => Math.abs(key.t - (region?.startSec ?? -1)) < 1e-9);
+    expect(rampIn?.key.v, `${why}: the ramp-in key’s own value was overwritten`).toBe(
+      RAMP_IN_VALUE,
+    );
+  }
+
+  it('AMOUNT rewrites the hold and nothing else', () => {
+    const doc = handEdited();
+    const kept = interiorOf(doc);
+    const others = otherRegionOf(doc);
+    const next = apply(doc, updateZoomOps(doc, 0, { amount: 3 }, DURATION));
+    expectHandEditsSurvive(next, 'an amount edit');
+    expect(interiorOf(next), 'the hold keys were retimed by an amount edit').toEqual(kept);
+    expect(otherRegionOf(next), 'the other region was retimed').toEqual(others);
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.amount).toBeCloseTo(3, 6);
+    expect(region?.startSec).toBeCloseTo(10, 6);
+    expect(region?.endSec).toBeCloseTo(18, 6);
+    expect(region?.center[0]).toBeCloseTo(FRAMED[0], 6);
+  });
+
+  it('CENTRE rewrites the framing key and nothing else', () => {
+    const doc = handEdited();
+    const kept = interiorOf(doc);
+    const others = otherRegionOf(doc);
+    const next = apply(doc, updateZoomOps(doc, 0, { center: [0.35, 0.65] }, DURATION));
+    expectHandEditsSurvive(next, 'a centre edit');
+    expect(interiorOf(next), 'the hold keys were retimed by a centre edit').toEqual(kept);
+    expect(otherRegionOf(next), 'the other region was retimed').toEqual(others);
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.center[0]).toBeCloseTo(0.35, 6);
+    expect(region?.center[1]).toBeCloseTo(0.65, 6);
+    expect(region?.amount).toBeCloseTo(2, 6);
+  });
+
+  it('START moves the boundary keys and leaves everything between them alone', () => {
+    const doc = handEdited();
+    const kept = interiorOf(doc);
+    const others = otherRegionOf(doc);
+    const next = apply(doc, updateZoomOps(doc, 0, { startSec: 9 }, DURATION));
+    expectHandEditsSurvive(next, 'a start edit');
+    expect(interiorOf(next), 'the hold keys were dragged along with the start').toEqual(kept);
+    expect(otherRegionOf(next), 'the other region was retimed').toEqual(others);
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.startSec).toBeCloseTo(9, 6);
+    expect(region?.endSec).toBeCloseTo(18, 6);
+    expect(region?.center[0]).toBeCloseTo(FRAMED[0], 6);
+  });
+
+  it('END moves the boundary keys and leaves everything between them alone', () => {
+    const doc = handEdited();
+    const kept = interiorOf(doc);
+    const others = otherRegionOf(doc);
+    const next = apply(doc, updateZoomOps(doc, 0, { endSec: 20 }, DURATION));
+    expectHandEditsSurvive(next, 'an end edit');
+    expect(interiorOf(next), 'the hold keys were dragged along with the end').toEqual(kept);
+    expect(otherRegionOf(next), 'the other region was retimed').toEqual(others);
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.startSec).toBeCloseTo(10, 6);
+    expect(region?.endSec).toBeCloseTo(20, 6);
+    // The window still runs past the last keyframe by the spring's settle tail.
+    expect(region?.windowEndSec).toBeCloseTo(20 + segmentSettleTailSec(DEFAULT_SPRING), 6);
+  });
+
+  it('REMOVE takes one region out and leaves the other region’s keys exactly as they were', () => {
+    const doc = handEdited();
+    const kept = amountKeys(doc)
+      .map((key) => key.t)
+      .slice(0, 4);
+    const next = apply(doc, removeZoomOps(doc, 1));
+    expectHandEditsSurvive(next, 'removing the other region');
+    expect(amountKeys(next).map((key) => key.t)).toEqual(kept);
+    expect(zoomRegionsOf(next)).toHaveLength(1);
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.startSec).toBeCloseTo(10, 6);
+    expect(region?.endSec).toBeCloseTo(18, 6);
+    expect(region?.amount).toBeCloseTo(2, 6);
+    expect(region?.center[0]).toBeCloseTo(FRAMED[0], 6);
+    expect(region?.center[1]).toBeCloseTo(FRAMED[1], 6);
+  });
+
+  it('holds a boundary off the region’s own keys rather than dragging them along', () => {
+    // `keyBounds` from the other side. A start dragged past one of its own keys is a
+    // repeated `t` (§2.6, which `validateEditDocument` refuses) or a key stranded
+    // outside the window that owns it, and dragging the key along is the very
+    // re-derivation this whole path exists to stop. So the drag stops instead.
+    const doc = handEdited();
+    const kept = interiorOf(doc);
+    const next = apply(doc, updateZoomOps(doc, 0, { startSec: 14 }, DURATION));
+    expectHandEditsSurvive(next, 'a start dragged past the hold');
+    expect(interiorOf(next), 'the hold was dragged along instead of the drag being held').toEqual(
+      kept,
+    );
+    const region = zoomRegionsOf(next)[0];
+    expect(region?.startSec, 'the start did not move at all').toBeGreaterThan(10);
+    expect(
+      region?.startSec,
+      'the start was let past a key it would have collided with',
+    ).toBeLessThan(kept[0] ?? 0);
+  });
+
+  it('is exactly invertible, hand edits and all', () => {
+    const doc = handEdited();
+    const ops = updateZoomOps(doc, 0, { amount: 3, center: [0.3, 0.3] }, DURATION);
+    expect(roundTrip(doc, ops ?? [])).toEqual(withoutRevision(doc));
+  });
+
+  it('placing a second zoom does not retime the first one’s keys', () => {
+    // The same class one verb over: `placeZoomOps` inserts a fresh region's canonical
+    // keys beside what is already on the track rather than rebuilding every region.
+    const doc = handEdited();
+    const kept = amountKeys(doc)
+      .map((key) => key.t)
+      .slice(0, 4);
+    const next = place(doc, { startSec: 45, endSec: 50, amount: 2, center: [0.5, 0.5] });
+    expectHandEditsSurvive(next, 'placing a third region');
+    expect(
+      amountKeys(next)
+        .map((key) => key.t)
+        .slice(0, 4),
+    ).toEqual(kept);
+    expect(zoomRegionsOf(next)).toHaveLength(3);
+  });
+});
+
+/**
  * A generated track shaped like the one `generateAutoZoom` produces, without running
  * a generator.
  *

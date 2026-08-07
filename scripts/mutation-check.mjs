@@ -164,10 +164,11 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * control whose reading is taken after the first export — and **all three now carry a
  * second guard that cannot withhold**: {@link EDITOR_GESTURES}, over the pure decisions
  * in `apps/renderer/src/editor/gestures.ts`. That is the fix this warning prescribes,
- * and it is never a retry and never a widening of the predicate. They remain printed
- * below because the warning is file-keyed and this gate withholds per *claim* — an
- * over-report in the conservative direction, which is the right way for a warning about
- * unproven coverage to be wrong.
+ * and it is never a retry and never a widening of the predicate. Having taken it, they
+ * are **no longer printed** under the exposure warning: {@link warnSolelyWithholdable}
+ * selects a mutation only when *every* file in its `mustFail` can withhold, and
+ * `EDITOR_GESTURES` cannot. That is the warning going quiet because the exposure was
+ * closed, which is the only reason it ever should.
  *
  * Keep listing this gate **beside** the pure guard rather than instead of it: it proves
  * the wiring — a real thumb on a real slider, a real pointer on a real lane — that no
@@ -188,12 +189,12 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  *
  * One nuance the set cannot express, recorded rather than engineered around:
  * {@link WITHHOLDABLE_GUARDS} is keyed by **file**, and this gate withholds per
- * *claim*, so a mutation guarded solely by a claim this gate judges on every run is
- * reported as solely-withholdable when it is in fact proven. That over-reports, which is
- * the conservative direction for a warning whose whole job is to make an unproven
- * mutation impossible to overlook — and `the-zoom-panel-does-not-follow-the-playhead` is
- * now exactly that case, which is the honest reason its name is still printed under the
- * exposure warning below.
+ * *claim*, so a mutation guarded solely by a claim this gate judges on every run would
+ * be reported as solely-withholdable when it is in fact proven. That over-reports, which
+ * is the conservative direction for a warning whose whole job is to make an unproven
+ * mutation impossible to overlook. No entry is in that position today, because every
+ * mutation listing this gate also lists a guard that cannot withhold — but a future
+ * phase-15-only entry would be, and the over-report is the answer rather than a defect.
  */
 const P15_GATE = 'test/phase15-gate.test.ts';
 /** The fence around that withhold: every bad-run shape that must still be judged. */
@@ -1972,9 +1973,10 @@ export const MUTATIONS = [
       'three `center` keys — identity at `startSec`, the user’s framing at the hold, ' +
       'identity at `endSec` — and picking one by position rather than by the hold ' +
       'returns the identity ramp-out key the moment the set’s shape changes. The ' +
-      'region then reads back `[0.5, 0.5]` and the next region-level edit rebuilds ' +
-      'the track from `asInput(current)` and writes the frame centre over the user’s ' +
-      'framing, silently.\n' +
+      'region then reads back `[0.5, 0.5]` and the next region-level edit takes that ' +
+      'misreading for the truth and writes the frame centre over the user’s framing, ' +
+      'silently — the reader and the writer ask this one function, so a wrong answer ' +
+      'here is a wrong answer in both directions at once.\n' +
       '   Two ordinary drags reach it and only one is a window question, which is why ' +
       '`keyBounds` cannot be the guard: the last `amount` key dragged later pushes ' +
       '`endSec` past the ramp-out centre key, and the last `center` key dragged ' +
@@ -1982,6 +1984,30 @@ export const MUTATIONS = [
     file: 'apps/renderer/src/editor/zoom.ts',
     find: '    const distance = Math.abs(key.t - holdStart);',
     replace: '    const distance = -key.t;',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
+    name: 'a-region-edit-discards-a-hand-edited-keyframe',
+    breaks:
+      'the promise that a region-level edit changes only what it names. The keys on ' +
+      'the manual zoom track are the user’s — `isKeyEditable` says so, and both the ' +
+      'lane and the inspector let a person drag one and set its value — so a region ' +
+      'is *read out of* keys that may not be in the canonical layout at all. Amount ' +
+      'names the hold, which is the region’s interior `amount` keys; the two ramp ' +
+      'ends are what returns the picture to identity and their values are the user’s. ' +
+      'Writing the amount over all of them takes a hand-set ramp value with it, on ' +
+      'every region-level edit rather than only on an amount one, since each verb ' +
+      'sends the whole region.\n' +
+      '   The flow that reaches it is the ordinary one — lengthen a ramp by hand, ' +
+      'then nudge the Amount slider — and the loss is silent, which is the "your edit ' +
+      'was overwritten" shape §3.5 argues against one level out.\n' +
+      '   Guarded by a unit test rather than by the phase-15 gate on purpose: this is ' +
+      'arithmetic over a document, so nothing composited can take the reading away, ' +
+      'and a gate-only guard would leave it unproven on every host that loses the ' +
+      'WebGL context.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '  for (const at of ownAmount.slice(1, -1)) {',
+    replace: '  for (const at of ownAmount) {',
     mustFail: [EDITOR_ZOOM],
   },
   {

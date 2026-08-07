@@ -971,8 +971,16 @@ async function start(): Promise<void> {
   let paintedTimelineSec = Number.NaN;
   let paintedDurationSec = Number.NaN;
   let paintedPlaying: boolean | null = null;
-  /** `[amount, cx, cy]` the overlay's handles were last placed for. */
-  let paintedZoom: [number, number, number] = [Number.NaN, Number.NaN, Number.NaN];
+  /**
+   * The zoom the overlay's handles were last placed for.
+   *
+   * Three scalars rather than a tuple, for {@link paintPlayhead}'s rule: the
+   * assignment happens on every frame the zoom is animating, and a fresh
+   * `[amount, cx, cy]` there is an allocation on the path that has none.
+   */
+  let paintedAmount = Number.NaN;
+  let paintedCenterX = Number.NaN;
+  let paintedCenterY = Number.NaN;
   /** The source instant the standing Zoom panel was last read at. */
   let paintedPanelSourceSec = Number.NaN;
 
@@ -1028,8 +1036,10 @@ async function start(): Promise<void> {
     // privacy defect `annotations.ts` anchors geometry in source space to prevent. The
     // per-frame cost is unchanged in shape: three number comparisons guard the only
     // thing that allocates.
-    if (amount !== paintedZoom[0] || centerX !== paintedZoom[1] || centerY !== paintedZoom[2]) {
-      paintedZoom = [amount, centerX, centerY];
+    if (amount !== paintedAmount || centerX !== paintedCenterX || centerY !== paintedCenterY) {
+      paintedAmount = amount;
+      paintedCenterX = centerX;
+      paintedCenterY = centerY;
       renderStage();
     }
 
@@ -1054,13 +1064,13 @@ async function start(): Promise<void> {
     // wanted reads as one that does not exist.
     if (playheadMoved(paintedPanelSourceSec, sourceSec)) {
       paintedPanelSourceSec = sourceSec;
-      const rebuild = inspector.paintZoom({
-        regionIndex: zoomRegionIndexAt(sourceSec),
-        generated: generatedZoomAt(sourceSec) !== null,
+      const rebuild = inspector.paintZoom(
+        zoomRegionIndexAt(sourceSec),
+        generatedZoomAt(sourceSec) !== null,
         amount,
         centerX,
         centerY,
-      });
+      );
       if (rebuild) renderControls();
     }
   }
