@@ -477,9 +477,36 @@ interface Active {
   end: CaptureEndReport | null;
 }
 
+/**
+ * Raised when a recording is asked for while the app is quitting.
+ *
+ * `before-quit` deliberately keeps the IPC surface up until both producers have shut
+ * down, so `recorder.start` still answers — and the HUD is still on screen with its
+ * button live — for the length of the flush. {@link RecorderSession.shutdown} is
+ * `await enqueue(stop)` and then `uninstall()`, so a start that lands during that stop
+ * is chained *behind* it on the same queue and runs **after** the capture channels have
+ * been removed: a bundle created, a `.lock` taken and `state: "recording"` written for a
+ * capture whose `capture.ended` can never arrive. The next launch then reports a
+ * recovered recording the user never made.
+ *
+ * A quit is not a state a recording can begin in, so it is refused and named — the
+ * shape `ExportShuttingDownError` uses one producer over, for the same reason.
+ */
+export class RecorderShuttingDownError extends Error {
+  constructor() {
+    super('the app is shutting down; no new recording can be started');
+    this.name = 'RecorderShuttingDownError';
+  }
+}
+
 export class RecorderSession {
   private readonly options: Required<RecorderSessionOptions>;
   private phase: RecorderPhase = 'idle';
+  /**
+   * Whether {@link RecorderSession.shutdown} has begun. See
+   * {@link RecorderShuttingDownError}. Never cleared: the process is going away.
+   */
+  private shuttingDown = false;
   private active: Active | null = null;
   private lastError: string | null = null;
   /**
@@ -748,6 +775,9 @@ export class RecorderSession {
    * it in {@link enqueue} the way the IPC handler does if two could overlap.
    */
   async start(requested: Partial<CaptureOptions>): Promise<RecordingId> {
+    // Before the phase check, because a shutdown that has already stopped what was in
+    // flight leaves the phase `idle` — which is exactly when this is reachable.
+    if (this.shuttingDown) throw new RecorderShuttingDownError();
     if (this.phase !== 'idle') throw new Error(`cannot start while ${this.phase}`);
     const options: CaptureOptions = { ...DEFAULT_CAPTURE_OPTIONS, ...requested };
     this.phase = 'starting';
@@ -1002,6 +1032,8 @@ export class RecorderSession {
    * path that is actually tested.
    */
   async shutdown(): Promise<void> {
+    // First, and before the stop is enqueued, so nothing can join the queue behind it.
+    this.shuttingDown = true;
     try {
       // The ordinary stop, on the ordinary queue. `uninstall` comes *after*: it
       // removes the listener the capture page's "I have stopped" message arrives

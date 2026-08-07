@@ -41,7 +41,7 @@
  * anything a phase gate already owns. It is about one thing: the product opens.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { build as esbuild } from 'esbuild';
 import { build as viteBuild } from 'vite';
 import { spawn } from 'node:child_process';
@@ -70,8 +70,9 @@ const PROBE_TIMEOUT_MS = 120_000;
  * the click-tap probe and nothing else, `PermissionManager` catches it — and leaving
  * it out keeps this gate off `clang` and off the Accessibility grant.
  */
-async function buildApp(dir: string): Promise<string> {
+async function buildApp(dir: string): Promise<{ dist: string; harness: string }> {
   const dist = join(dir, 'dist');
+  const harness = join(dir, 'harness.cjs');
   const common = {
     bundle: true,
     platform: 'node' as const,
@@ -92,14 +93,54 @@ async function buildApp(dir: string): Promise<string> {
       entryPoints: [join(root, 'apps/main/src/preload.ts')],
       outfile: join(dist, 'preload', 'index.cjs'),
     }),
+    esbuild({
+      ...common,
+      entryPoints: [join(here, 'launch/main.ts')],
+      outfile: harness,
+    }),
     viteBuild({
       configFile: resolve(root, 'apps/renderer/vite.config.ts'),
       logLevel: 'warn',
       build: { outDir: join(dist, 'renderer'), emptyOutDir: true, sourcemap: false },
     }),
   ]);
-  return dist;
+  return { dist, harness };
 }
+
+/**
+ * The one build both scenarios run against, created on demand and removed once.
+ *
+ * Nothing the app does writes into `dist/` — the two scenarios differ only in the
+ * `settings.json` seeded into a scratch `userData`, which is why they can share it.
+ * A build per scenario is two esbuild passes and a whole vite build paid twice, on a
+ * shared macOS runner this project already has to keep quiet (§ Sharp edges: "never
+ * add a second macOS job that runs concurrently with `verify`").
+ *
+ * The promise is memoised rather than the directory, so two scenarios racing get one
+ * build; a build that throws removes its own scratch and leaves nothing for the other
+ * scenario to trip over.
+ */
+let sharedBuild: Promise<{ dir: string; dist: string; harness: string }> | null = null;
+function builtApp(): Promise<{ dir: string; dist: string; harness: string }> {
+  sharedBuild ??= (async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'loom-launch-gate-app-'));
+    try {
+      return { dir, ...(await buildApp(dir)) };
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true });
+      throw error;
+    }
+  })();
+  return sharedBuild;
+}
+
+afterAll(async () => {
+  const built = sharedBuild;
+  sharedBuild = null;
+  if (built === null) return;
+  const app = await built.catch(() => null);
+  if (app !== null) await rm(app.dir, { recursive: true, force: true });
+});
 
 /**
  * Run the probe once.
@@ -108,11 +149,15 @@ async function buildApp(dir: string): Promise<string> {
  * what every launch after the first sees; `'setup'` leaves the scratch userData
  * empty, which is a first run. Those are the two branches of the one line in
  * `main()` that decides what the user meets.
+ *
+ * The build is shared; **`HOME` and `--user-data-dir` are not**, and must not be. The
+ * branch under test is decided entirely by the `settings.json` in `userData`, so one
+ * scratch tree between the two scenarios would collapse them into a single reading.
  */
 async function runProbe(scenario: 'setup' | 'library'): Promise<LaunchReport> {
+  const { dist, harness } = await builtApp();
   const dir = await mkdtemp(join(tmpdir(), 'loom-launch-gate-'));
   try {
-    const dist = await buildApp(dir);
     const home = join(dir, 'home');
     const userData = join(dir, 'userData');
     const recordings = join(home, 'Movies', 'Loom Clone');
@@ -128,19 +173,6 @@ async function runProbe(scenario: 'setup' | 'library'): Promise<LaunchReport> {
         }),
       );
     }
-
-    const harness = join(dir, 'harness.cjs');
-    await esbuild({
-      bundle: true,
-      platform: 'node',
-      format: 'cjs',
-      target: 'node20',
-      external: ['electron'],
-      sourcemap: 'inline',
-      logLevel: 'warning',
-      entryPoints: [join(here, 'launch/main.ts')],
-      outfile: harness,
-    });
 
     const out = join(dir, 'report.json');
     const require = createRequire(import.meta.url);

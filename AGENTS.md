@@ -1807,6 +1807,29 @@ fix is one move — `unregisterIpc()` after both producers have shut down, in a
 `finally` so a producer that threw still takes the surface down — and
 `the-quit-disconnects-a-live-window-before-the-flush` is the mutation.
 
+**That ordering has a cost, and each producer pays it in the same shape: a surface that
+answers for the length of the flush is a surface work can still be _started_ through.**
+The early `unregisterIpc()` was hiding that, so both windows opened when it moved. An
+`export:start` landing inside `ExportSession.shutdown` — which snapshots `#jobs`, awaits
+a `cancelExport` per job and then clears the map — is cancelled by nothing and dropped by
+`clear()`, leaving its hidden window and its `wx+` scratch streams to outlive the quit.
+A `recorder.start` landing inside `RecorderSession.shutdown` is worse: `enqueue` is one
+chain, so it runs _behind_ the stop and therefore **after** `uninstall()`, creating a
+bundle, a `.lock` and `state: "recording"` for a capture whose `capture.ended` can never
+arrive — a recording the next launch offers to recover and the user never made. Both are
+closed the way this file already refuses a second export of one recording: a
+`#shuttingDown` flag set as the **first** statement of each `shutdown()` (so no `await`
+separates announcing the sweep from taking the list it acts on), and a typed, named
+refusal — `ExportShuttingDownError`, `RecorderShuttingDownError` — thrown before the
+first `await`. **The export one is asked twice**, because four awaits stand between
+`start`'s entry and `#jobs`: a quit beginning in any of them would otherwise find the job
+absent from the snapshot and present in the map that is then cleared, and the second ask
+sits where the existing `catch` hands back both the bundle hold and the claim. **Nothing
+read-only is refused** — `library.list` and its neighbours must keep answering, because a
+live window with dead IPC is the defect this branch fixed — and an export already running
+is still swept exactly as before, which is the control each guard's test carries.
+`an-export-can-start-during-the-shutdown-sweep` is the mutation.
+
 **A third thing was closed in the same pass because it is the same shape:
 `app.whenReady().then(main, onRejected)` does not catch a rejection from `main`** —
 the second argument of `then` handles a rejection of `whenReady()` and nothing that

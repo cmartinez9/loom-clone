@@ -94,13 +94,11 @@ function onDistWrite() {
     restartTimer = null;
     if (loop.restartDue() !== 'kill') return;
     console.log('[dev] dist/ changed — restarting the app');
-    if (app === null) {
-      // Nothing to kill, so there is no exit coming to carry the relaunch. Take the
-      // transition ourselves rather than waiting for one that cannot arrive.
-      if (loop.exited() === 'relaunch') startApp();
-      return;
-    }
-    app.kill('SIGTERM');
+    // `app` cannot be null here: `restartDue()` answers `kill` only from
+    // `restart-pending`, and the only thing that nulls `app` is the exit handler, which
+    // resolves the phase synchronously in the same turn — so a later `restartDue()` can
+    // only answer `ignore`.
+    app?.kill('SIGTERM');
   }, RESTART_DEBOUNCE_MS);
 }
 

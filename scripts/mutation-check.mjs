@@ -2311,6 +2311,21 @@ export const MUTATIONS = [
     replace: '  event.preventDefault();\n  shuttingDown = true;\n  unregisterIpc();\n',
     mustFail: [LAUNCH_GATE],
   },
+  {
+    name: 'an-export-can-start-during-the-shutdown-sweep',
+    breaks:
+      'the other half of that ordering. Keeping the IPC surface up for the length of ' +
+      'the flush is what stops a live window answering `No handler registered` — and it ' +
+      'also leaves `export:start` answering across `shutdown`’s awaits. That sweep ' +
+      'snapshots `#jobs`, cancels each job in it and then clears the map, so a job ' +
+      'admitted after the snapshot is cancelled by nothing and dropped by `clear()`: its ' +
+      'hidden window and its `wx+` scratch streams outlive the quit. Without this flag ' +
+      'neither refusal in `start` can fire.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    this.#shuttingDown = true;\n' + '    for (const job of [...this.#jobs.values()]) {',
+    replace: '    for (const job of [...this.#jobs.values()]) {',
+    mustFail: [EXPORT_SESSION],
+  },
 ];
 
 /**

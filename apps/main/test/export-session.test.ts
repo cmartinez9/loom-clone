@@ -56,6 +56,7 @@ import {
 import {
   ExportRecordingBusyError,
   ExportSession,
+  ExportShuttingDownError,
   bitrateFor,
   safeFileName,
 } from '../src/export/session.ts';
@@ -1170,6 +1171,101 @@ describe('two exports of one recording', () => {
     await expect(harness.session.start(other.id, { name: 'Theirs' })).resolves.toHaveProperty(
       'jobId',
     );
+  }, 60_000);
+});
+
+/**
+ * A quit that is already sweeping.
+ *
+ * `before-quit` takes the IPC surface down **after** both producers, because a window
+ * still on screen whose every call throws `No handler registered` is the defect that
+ * ordering exists to prevent. The cost is that `export:start` keeps answering for the
+ * length of the flush — and {@link ExportSession.shutdown} snapshots `#jobs`, awaits a
+ * `cancelExport` per job and then clears the map, so a job admitted between the
+ * snapshot and the clear is cancelled by nothing and dropped by `clear()`, leaving its
+ * hidden window and its `wx+` scratch streams to outlive the sweep.
+ *
+ * Both halves are here, because a guard that refuses everything is not a guard: the
+ * arrival is refused, and the export that was already running is still swept exactly as
+ * it was before.
+ */
+describe('a quit that is already sweeping', () => {
+  /** The jobs the stand-in window has actually been handed, so "live" is not a guess. */
+  function collectStarts(): ExportJob[] {
+    const started: ExportJob[] = [];
+    harness.window.on('command', (command: ExportCommand) => {
+      if (command.kind === 'start') started.push(command.job);
+    });
+    return started;
+  }
+
+  async function handedAJob(started: ExportJob[]): Promise<ExportJob> {
+    for (let i = 0; i < 400; i++) {
+      const job = started[0];
+      if (job !== undefined) return job;
+      await new Promise((done) => setTimeout(done, 5));
+    }
+    throw new Error('the export window was never handed a job');
+  }
+
+  it('refuses a job that arrives after the sweep has begun, and names why', async () => {
+    answerVerification();
+    const started = collectStarts();
+    // A second recording, so the refusal under test cannot be `ExportRecordingBusyError`
+    // wearing the wrong name: this one has never been exported and is free.
+    const other = await harness.store.create('Arrived late');
+    await writeFile(
+      join(other.paths.dir, 'edit.json'),
+      JSON.stringify({
+        ...newEditDocument(),
+        clips: [{ id: 'whole', sourceStart: 0, sourceEnd: FIXTURE_SEC, speed: 1 }],
+      }),
+      'utf8',
+    );
+
+    const first = await harness.session.start(harness.recordingId, { name: 'Sweeping' });
+    expect((await handedAJob(started)).jobId).toBe(first.jobId);
+
+    // Not awaited: the window this closes is the one *inside* `shutdown`, between the
+    // snapshot it takes and the `#jobs.clear()` at the end of it.
+    const sweeping = harness.session.shutdown();
+    const refusal = await harness.session
+      .start(other.id, { name: 'TooLate' })
+      .then(() => null)
+      .catch((error: unknown) => error);
+    await sweeping;
+
+    expect(refusal).toBeInstanceOf(ExportShuttingDownError);
+    expect(refusal).toBeInstanceOf(Error);
+    if (!(refusal instanceof ExportShuttingDownError)) return;
+    expect(refusal.recordingId).toBe(other.id);
+    expect(refusal.message).toContain(other.id);
+
+    // Refused, not admitted-then-dropped: no window was ever handed a second job, and
+    // nothing of it reached the Exports folder.
+    expect(started).toHaveLength(1);
+    expect(await exportsDirEntries()).toEqual([]);
+  }, 60_000);
+
+  it('CONTROL: a job already running when the sweep begins is still cancelled and swept', async () => {
+    // Without this the row above passes for a guard that refuses everything, including
+    // the sweep's own work — and the export in flight is what `shutdown` is *for*.
+    answerVerification();
+    const started = collectStarts();
+    const job = await harness.session.start(harness.recordingId, { name: 'Swept' });
+    expect((await handedAJob(started)).jobId).toBe(job.jobId);
+
+    await harness.session.shutdown();
+
+    const outcome = await settled();
+    expect(outcome.phase).toBe('cancelled');
+    expect(outcome.result).toBeUndefined();
+    // The window is closed and the scratch is gone — the two things a job dropped from
+    // `#jobs` without being cancelled would leave behind.
+    expect(harness.window.destroyed).toBe(true);
+    expect(await exportsDirEntries()).toEqual([]);
+    // A swept job is not a failed one, so nothing is recorded against the recording.
+    expect((await projectDoc(harness.recordingId)).exports).toEqual([]);
   }, 60_000);
 });
 
