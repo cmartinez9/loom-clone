@@ -832,6 +832,40 @@ draws and reads at one zoom, so an identity map still lands the mask inside the 
 It does **not** measure the frame budget or §4.5's per-pixel preview/export identity;
 phases 6 and 8 own those, and a second opinion about either is a weaker one.
 
+**This gate has three outcomes, and the third is not a pass — and it is withheld per
+CLAIM rather than per run.** Phases 6 and 8 each withhold a whole verdict when their
+instrument goes; this gate's instrument is the _export pipeline_, which comes back
+**refused**: `ExportRenderLoop` consults `Compositor.contextLost` before and after every
+composite and throws `ExportContextLostError` rather than encoding frames nothing drew
+(§10.2). That refusal is the product working. What was missing was this gate's ability
+to say so — three CI runs of one commit (31134549671, 31136423113, 31137779565) lost the
+context at export frame 72 and twelve assertions then failed on _missing readings_
+rather than wrong ones. `test/editor-controls/verdict.ts` is the answer, in phases 6 and
+8's own vocabulary: `exportInstrumentLost`, a **NOT JUDGED** banner carrying the measured
+evidence, and `skip()` rather than a pass.
+
+Per claim, because the export is step 4 of 8: the generator ran, the picture changed and
+the document reached the disk **before** the context died, so those claims are judged on
+every run and fail exactly as hard as before. Only the claims from the first export
+onward are withheld. The predicate is keyed on two measured facts and nothing else — the
+failure carries `ExportContextLostError`'s **own sentence** (`CONTEXT_LOST_SIGNATURE`, a
+substring of its most specific clause, so a reworded message sends the gate back to
+judging every failed export rather than withholding), and **no** export reading survives.
+A §7.5 verification failure, a decode stall, an encoder error, a muxer refusal: every one
+is judged and fails. `test/phase15-verdict.test.ts` is the fence and enumerates ten
+bad-run shapes that must still be judged, including a lost context that measured a delta
+anyway and a different error that merely mentions a context.
+
+**Be honest about the reach, because a skipped test must not read as coverage.** On the
+paravirtual CI runner this has happened on **every** attempt measured, so **the export
+claims of this gate are effectively never judged on CI and are only meaningful on a real
+Mac** — where they pass, and where the numbers above were measured. The banner says it
+and so does this paragraph. The gate gets **one** launch and that is unchanged; more
+attempts against a host that cannot serve the allocation is the move this project keeps
+refusing. Four `verify:mutation` entries are guarded solely by this gate and are
+therefore unproven on such a host; they are named at `WITHHOLDABLE_GUARDS`, and the fix
+for each is a second guard that cannot withhold.
+
 Two consequences worth expecting. Phase 14's gate now asserts
 `['Screen', 'Zoom', 'Notes']` — the annotation lane is an _effect_ lane like Zoom, owned
 by the document rather than declared by `recording.json`, so it is on every recording;
@@ -2242,7 +2276,7 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   only when the document actually carries a `text` span, and `exportTextAtlas`'s docblock
   says why that predicate is deliberately lax.
   **What is still not measured**: the golden gate proves preview and export agree about a
-  glyph *given the same atlas*. Nothing exercises `ExportSession`'s window **building**
+  glyph _given the same atlas_. Nothing exercises `ExportSession`'s window **building**
   one — that path has no gate, and the font-loading trap above is exactly the kind of
   defect it would hide.
 

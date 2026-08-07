@@ -146,6 +146,41 @@ const BUDGET_POLICY = 'test/budget-control.test.ts';
 const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
 
 /**
+ * Phase 15's gate: the controls, and that what they did reaches an exported file.
+ *
+ * **Withholdable, per claim** — and that is the one thing to know before listing it in
+ * a `mustFail`. Three CI runs of one commit (31134549671, 31136423113, 31137779565)
+ * lost the WebGL context compositing export frame 72, `ExportRenderLoop` refused rather
+ * than encoding frames nothing drew, and twelve assertions then failed on *missing
+ * readings* rather than wrong ones. This gate now says so: `verdict.ts`'s
+ * `exportInstrumentLost` withholds the claims from the first export onward, reports
+ * **skipped** under a NOT JUDGED banner, and leaves every claim measured *before* the
+ * export judged exactly as hard as before.
+ *
+ * The consequence for this registry: a mutation whose only guard is this gate and whose
+ * property lives past the first export is **unproven** on a host that loses the
+ * context, exactly as {@link WITHHOLDABLE_GUARDS} describes for phases 6 and 8 — so this
+ * gate is listed there too. **Four** entries are in that position today, every one of
+ * them a control whose reading is taken after the first export:
+ * `a-gesture-that-changes-nothing-strands-its-preview`,
+ * `the-amount-slider-commits-on-every-step`,
+ * `the-inspector-rebuilds-under-its-own-thumb` and
+ * `the-zoom-panel-does-not-follow-the-playhead`. The fix for each is a second guard that
+ * cannot withhold — never a retry, and never a widening of the predicate.
+ *
+ * One nuance the set cannot express, recorded rather than engineered around:
+ * {@link WITHHOLDABLE_GUARDS} is keyed by **file**, and this gate withholds per
+ * *claim* — its first two tests are measured before any export and are judged on every
+ * run. So a mutation guarded solely by one of those would be reported as
+ * solely-withholdable when it is in fact proven. That over-reports, which is the
+ * conservative direction for a warning whose whole job is to make an unproven mutation
+ * impossible to overlook; none of the four above is in that position anyway.
+ */
+const P15_GATE = 'test/phase15-gate.test.ts';
+/** The fence around that withhold: every bad-run shape that must still be judged. */
+const P15_VERDICT = 'test/phase15-verdict.test.ts';
+
+/**
  * Guards that can come back with **no verdict** rather than a pass or a fail.
  *
  * A gate that measures the machine can find its instrument gone: `test/phase8-gate.test.ts`
@@ -175,26 +210,10 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * The fix for anything listed is a **second guard that cannot withhold**, not a change
  * to the gate and not a retry.
  */
-const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6]);
+const WITHHOLDABLE_GUARDS = new Set([PHASE8, PHASE6, P15_GATE]);
 
 /** Phase 14's gate: open a recording, play it, trim it, and find the trim afterwards. */
 const EDITOR_GATE = 'test/editor-gate.test.ts';
-/**
- * Phase 15's gate: the controls, and that what they did reaches an exported file.
- *
- * Not withholdable. It composites and it encodes, so it uses a GPU process like the
- * two golden gates — but it judges *what changed between two of its own readings*
- * rather than an absolute number about the host, so a lost context costs it the
- * readings themselves and it fails on their absence.
- *
- * The second clause of that used to read "a run that loses its context produces no
- * report at all", and two CI runs disproved it: the report arrives saying `ok: false`
- * with the readings taken before the loss in it. The conclusion is unchanged — a gate
- * that fails on missing readings is one that answers — and the remedy for the loss is
- * `AGENTS.md` § The editor's controls, which took the editor's preview loop off the
- * GPU for the length of an export rather than teaching this gate to withhold.
- */
-const P15_GATE = 'test/phase15-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
 /** The pure halves of phase 15: manual zoom, annotations, and the generator controls. */
 const EDITOR_ZOOM = 'apps/renderer/test/editor-zoom.test.ts';
@@ -2033,6 +2052,34 @@ export const MUTATIONS = [
     find: "      patch: { origin: 'manual', generatedFrom: spec, remove: ['generator'] },",
     replace: "      patch: { origin: 'manual', generatedFrom: spec },",
     mustFail: [P15_GATE, EDITOR_GENERATORS, GENERATOR_STACKING],
+  },
+  {
+    name: 'the-phase15-verdict-withholds-on-any-failed-export',
+    breaks:
+      'the signature that separates the instrument being taken away from the product ' +
+      'being wrong. Without it **every** failed export withholds — a §7.5 verification ' +
+      'failure, a decode stall, an encoder error, a muxer refusal — so the one gate that ' +
+      'proves a manual zoom reaches a finished file reports *skipped* for the defects it ' +
+      'exists to catch. This is the disease a withheld verdict is one edit away from, ' +
+      'which is why the fence enumerates each shape rather than testing the happy case.',
+    file: 'test/editor-controls/verdict.ts',
+    find: '  if (!failed.every(lostTheContext)) return false;',
+    replace: '  if (failed.length === 0) return false;',
+    mustFail: [P15_VERDICT],
+  },
+  {
+    name: 'the-phase15-verdict-withholds-with-readings-in-hand',
+    breaks:
+      'the load-bearing half of the predicate — that a run carrying **any** export ' +
+      'reading is judged rather than withheld. It is what makes the branch safe to run ' +
+      "before the assertions instead of after them, and it is `mayDeleteSources`'s " +
+      'discipline applied to a verdict: refuse on what the record says, field by field. ' +
+      'Dropped, a run that lost the context on its second export after measuring a delta ' +
+      'on its first throws that delta away and declines to judge it.',
+    file: 'test/editor-controls/verdict.ts',
+    find: '  return exportReadingsTaken(report).length === 0;',
+    replace: '  return true;',
+    mustFail: [P15_VERDICT],
   },
 ];
 
