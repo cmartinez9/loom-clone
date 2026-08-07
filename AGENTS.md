@@ -854,15 +854,39 @@ instant — so the next `readPixels()` the probe asks for throws. The exposure i
 gate's alone in two ways: the `export` role is `show: false` at 1x1 (§1.2), which is a
 renderer Chromium backgrounds by definition and then deschedules behind a preview loop
 compositing `edit.output.size` at rate; and nothing here is timed, so unlike phases 6 and
-8 neither switch can flatter a reading. **What the switches are not is a diagnosis of
-that particular run**: it was never reproduced — SwiftShader reproduces the _symptom_
-exactly and the switches do not fix that configuration, six sequential exports in one
-process are clean on this machine, and the runner's own evidence had been thrown away.
-That last part is closed: the harness notes `child-process-gone`/`render-process-gone`,
-and `runProbe` prints the electron output when the report says the run failed instead of
-only when the JSON will not parse. **No retry was added.** A relaunch keyed on anything
-weaker than phase 6's and phase 8's `contextLost` would be a retry around an acceptance
-gate, and this gate has no such reading to key one on.
+8 neither switch can flatter a reading. **What the switches were not is a diagnosis of
+that particular run**, and the evidence that would have been one had been thrown away.
+That part is closed: the harness notes `child-process-gone`/`render-process-gone`, and
+`runProbe` prints the electron output when the report says the run failed instead of only
+when the JSON will not parse. **No retry was added.** A relaunch keyed on anything weaker
+than phase 6's and phase 8's `contextLost` would be a retry around an acceptance gate, and
+this gate has no such reading to key one on.
+
+**And the next two CI runs showed what the switches do not cover: the editor's preview
+loop was competing with the export for the host's GPU, and the fix is to take it off.**
+Both runs died identically and in the same place — `Failed to allocate texture` inside
+`Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error` and
+`abnormal-exit (exit 8704)`, **0.3 s after `export.html` loaded** — the GPU host-memory
+exhaustion § Sharp edges records against the phase-8 golden harness, reaching this gate as
+§10.2's named symptom because a software encoder produces nothing until the GPU hands the
+canvas back. Phase 8's answer was to reduce the GPU clients live at the peak, and here that
+peak was two
+renderers holding a WebGL2 context each with one of them doing work nobody reads:
+`PreviewLoop` renders every `requestAnimationFrame` **whether or not it is playing**, into
+a render target of `edit.output.size` — 1920×1080 on every bundle (§ Sharp edges — the
+editor) — against an export whose own composite is a 320×180 source into 640×360, and no
+reading is taken between `start` and the job's last progress update. `runExport` therefore
+**hides the editor for the length of each export** and shows it again in a `finally`,
+because a failed export must leave the gate able to say so. Hiding is what stops it and
+that is measured rather than assumed: a hidden window gets **no** `requestAnimationFrame`
+at all (121 frames/s visible, 1 then 0 across 2.5 s hidden, 146 again once shown), and the
+four switches above do not change it — they govern process priority and occlusion, not
+page visibility. The export window is untouched by the same measurement, because
+`ExportRenderLoop` is a `while` loop on timers rather than on frames, which is what lets it
+work at `show: false` and 1×1 at all. **This is not a fixture reduction and no reading
+moved**: the two exports still measure 53.596 inside the manual window and 0.000 outside
+it. A second gate wanting one export while another window previews should sequence them
+the same way rather than widening anything.
 
 ## Sharp edges — the editor
 

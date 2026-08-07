@@ -896,35 +896,74 @@ const EXPORT_WIDTH = 640;
 const EXPORT_HEIGHT = 360;
 const EXPORT_FPS = 30;
 
+/**
+ * One export, with the editor's preview loop **off the GPU for its length**.
+ *
+ * The hide/show is the whole of it, and it is a real CI failure rather than tidiness.
+ * `PreviewLoop` renders every `requestAnimationFrame` *whether or not it is playing* —
+ * "rendering continues while paused, so a seek shows" — into a render target of
+ * `edit.output.size`, which `newEditDocument()` makes **1920×1080 on every bundle**
+ * (`AGENTS.md` § Sharp edges — the editor: nothing sets it from the recording). So the
+ * editor was compositing 2.1 Mpx sixty times a second, with the decode and upload each
+ * of those carries, for the entire length of an export whose own composite is 0.23 Mpx
+ * of source into 640×360 — and none of that work is read by anything: no reading is
+ * taken between `start` and the job's last progress update.
+ *
+ * On a GitHub macOS host that idle load is what put the run over. Both CI runs of this
+ * gate died the same way and in the same place — `Failed to allocate texture` inside
+ * `Skia_Wrapped_YUVPlane`, then `Restarting GPU process due to unrecoverable error` and
+ * `abnormal-exit (exit 8704)`, **0.3 s after `export.html` loaded** — which is the GPU
+ * host-memory exhaustion `AGENTS.md` records against the phase-8 golden harness, reaching
+ * this gate as §10.2's named symptom because a software encoder produces nothing until
+ * the GPU hands the canvas back. Phase 8's own remedy was to reduce the GPU clients live
+ * at the peak, and this is that remedy here: the peak was two renderers holding a WebGL2
+ * context each, and one of them was doing work nobody asked for.
+ *
+ * Hiding is what stops it, and it is measured rather than assumed: a hidden window gets
+ * **no** `requestAnimationFrame` at all (121 frames/s visible, 1 then 0 across 2.5 s
+ * hidden, 146 again once shown), and the four backgrounding switches above do not change
+ * that — they govern process priority and occlusion, not page visibility. The export
+ * window is unaffected because `ExportRenderLoop` is a `while` loop on timers rather than
+ * on frames, which is why it works at `show: false` and 1×1 in the first place.
+ *
+ * `show()` is in a `finally` because the caller keeps driving this window after a failed
+ * export: an export that dies must leave the gate able to say so, not blind.
+ */
 async function runExport(
   session: ExportSession,
   progress: Map<string, ExportProgress>,
   id: string,
   name: string,
+  editor: BrowserWindow,
 ): Promise<ExportProgress> {
-  const { jobId } = await session.start(id, {
-    name,
-    width: EXPORT_WIDTH,
-    height: EXPORT_HEIGHT,
-    fps: EXPORT_FPS,
-    // The gate is about the editor, not about §7.5's retention: a verified export
-    // that deleted `media/` would take the recording out from under everything after
-    // it. Phase 9's own gate is where deletion is measured.
-    keepSources: true,
-  });
-  await until(
-    () => {
-      const latest = progress.get(jobId);
-      return Promise.resolve(
-        latest !== undefined && ['done', 'failed', 'cancelled'].includes(latest.phase),
-      );
-    },
-    `the export "${name}" never finished`,
-    240_000,
-  );
-  const final = progress.get(jobId);
-  if (final === undefined) throw new Error(`no progress for the export "${name}"`);
-  return final;
+  editor.hide();
+  try {
+    const { jobId } = await session.start(id, {
+      name,
+      width: EXPORT_WIDTH,
+      height: EXPORT_HEIGHT,
+      fps: EXPORT_FPS,
+      // The gate is about the editor, not about §7.5's retention: a verified export
+      // that deleted `media/` would take the recording out from under everything after
+      // it. Phase 9's own gate is where deletion is measured.
+      keepSources: true,
+    });
+    await until(
+      () => {
+        const latest = progress.get(jobId);
+        return Promise.resolve(
+          latest !== undefined && ['done', 'failed', 'cancelled'].includes(latest.phase),
+        );
+      },
+      `the export "${name}" never finished`,
+      240_000,
+    );
+    const final = progress.get(jobId);
+    if (final === undefined) throw new Error(`no progress for the export "${name}"`);
+    return final;
+  } finally {
+    editor.show();
+  }
 }
 
 // ---------------------------------------------------------------- the run
@@ -1088,7 +1127,7 @@ void app.whenReady().then(async () => {
     await readDisk(recordingsRoot, recording.id, 'after generating');
 
     // ---- export A: the generator alone --------------------------------------
-    const exportA = await runExport(exportSession, progress, recording.id, 'A-generated');
+    const exportA = await runExport(exportSession, progress, recording.id, 'A-generated', editor);
     note(`export A: ${exportA.phase} ${exportA.result?.path ?? exportA.error ?? ''}`);
     exports_.push({
       label: 'A-generated',
@@ -1168,7 +1207,7 @@ void app.whenReady().then(async () => {
     await readDisk(recordingsRoot, recording.id, 'after taking manual control');
 
     // ---- export B: the same recording with the override in it ---------------
-    const exportB = await runExport(exportSession, progress, recording.id, 'B-manual');
+    const exportB = await runExport(exportSession, progress, recording.id, 'B-manual', editor);
     note(`export B: ${exportB.phase} ${exportB.result?.path ?? exportB.error ?? ''}`);
     exports_.push({
       label: 'B-manual',
