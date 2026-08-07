@@ -2322,10 +2322,31 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   `OffscreenCanvas` 2d context lose its labels and keep its export. The atlas is built
   only when the document actually carries a `text` span, and `exportTextAtlas`'s docblock
   says why that predicate is deliberately lax.
-  **What is still not measured**: the golden gate proves preview and export agree about a
-  glyph _given the same atlas_. Nothing exercises `ExportSession`'s window **building**
-  one — that path has no gate, and the font-loading trap above is exactly the kind of
-  defect it would hide.
+  **What is still not measured is the window _building_ the atlas, and that is a hole in
+  the half this phase closed rather than a documentation nicety.** The golden gate proves
+  preview and export agree about a glyph _given the same atlas_; **no automated test
+  reaches `exportTextAtlas` in `apps/renderer/src/export/session.ts` or
+  `apps/renderer/src/glyphs.ts` at all.** The phase-15 gate's document carries a `mask`
+  and no `text` span, so that predicate short-circuits and the atlas is never built — so
+  nothing goes red if the `@loom/design/css/type.css` link, the `font-src 'self'` entry or
+  the `document.fonts.load()` forcing is dropped, and the trap above is exactly the defect
+  that would hide. **What _is_ established is a measurement, and it is what makes this
+  worth recording rather than an apology.** Taken on the shipping `export.html`, with its
+  real CSP and its real `loom://` origin: `document.fonts.ready` **alone** leaves
+  `document.fonts.check('600 72px "Mona Sans"')` `false` and measures the fallback face at
+  **449.93 px**; after the `document.fonts.load()` `glyphs.ts` performs it is `true` and
+  **525.03 px**. **A 17% difference** — that is the whole reason `glyphs.ts` exists, and
+  without it an export's labels are set in the wrong typeface, silently, on a page that
+  renders no text of its own. **The provenance is a hand measurement, not a test**: it was
+  taken by the phase-15 pipeline's own test step on **2026-08-07** against the real export
+  page, the way § The live drawing overlay's five readings came from an unpackaged dev run
+  rather than from the shipped check. **Where it is discharged**: a dedicated Electron
+  check over the export window's glyph path, **filed as its own task with an owner** —
+  filed, not left to a later phase, because a gap with an owner is not the same as a hope.
+  A `text` span was deliberately **not** added to the phase-15 gate to close it: that gate
+  withholds its export claims on a lost context and is in `WITHHOLDABLE_GUARDS`, so a span
+  sitting behind those claims would read as coverage in the file and establish nothing on
+  the host that keeps taking the instrument away. Firstmate's call, not the captain's.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 
