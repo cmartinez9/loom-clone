@@ -682,7 +682,7 @@ export class Inspector {
       const run = button(label, 'restart', () => {
         this.#callbacks.onGenerate(generator.type);
       });
-      (run as HTMLButtonElement).disabled = !generator.runnable;
+      (run as HTMLButtonElement).disabled = generator.status !== 'runnable';
       run.dataset['action'] = 'generate';
       buttons.push(run);
     }

@@ -80,6 +80,7 @@ import {
   bakeOps,
   fetchText,
   sha256,
+  unreadEventLogs,
   GENERATOR_TRACK_ID,
   type EventLogs,
   type RunnableGenerator,
@@ -96,6 +97,7 @@ import {
 } from './tools.ts';
 import {
   generatedSegmentAt,
+  generatedSegmentIndexAt,
   moveKeyOps,
   overrideZoomOps,
   placeZoomOps,
@@ -220,17 +222,6 @@ function facts(container: HTMLElement, entries: readonly (readonly [string, stri
     }),
   );
 }
-
-/**
- * What the generator panel reads before the logs have arrived.
- *
- * Not "no logs": `EventLogs.cursor` and `.clicks` are `null` here for the same reason
- * they are `null` for a recording that has none, and the panel says so — the
- * *difference* is `trouble`, which is `null` while a read is outstanding and a
- * sentence once one has failed. Phase 5 exists to keep "absent" and "empty" apart and
- * this is the same discipline one state further out.
- */
-const EMPTY_LOGS: EventLogs = { cursor: null, clicks: null, digests: {}, trouble: null };
 
 // ---------------------------------------------------------------- the editor
 
@@ -454,7 +445,9 @@ async function start(): Promise<void> {
    * `null` until then, which is a real state and not a placeholder: the generator
    * panel says *reading…* rather than *unavailable*, because those are different
    * answers and the second one would be a lie for the first few hundred milliseconds
-   * of every editor.
+   * of every editor. It is therefore handed to `generatorStates` **as `null`** — a
+   * stand-in `EventLogs` here would erase the distinction one line before the panel
+   * that exists to draw it.
    */
   let logs: EventLogs | null = null;
 
@@ -502,6 +495,12 @@ async function start(): Promise<void> {
     },
     onEditAnnotation: (spanId, geometry, phase) => {
       edit(moveAnnotationOps(project.committed, spanId, geometry), phase, 'Move note');
+    },
+    onCancelGesture: () => {
+      // The seventh caller of the one boundary, through its `null` branch: a gesture
+      // that ended where the picture is not is a gesture that produced no ops, and
+      // what must not survive it is the provisional document its last move left.
+      edit(null, 'end', 'Cancel gesture');
     },
     onPick: (at) => {
       if (at === null) {
@@ -726,11 +725,23 @@ async function start(): Promise<void> {
     else project.commit(ops, label);
   }
 
-  /** The generated zoom track whose window covers `atSec`, or `null`. */
+  /**
+   * The generated zoom track whose window covers `atSec`, or `null`.
+   *
+   * Indexed loops all the way down, for {@link zoomRegionIndexAt}'s reason: the
+   * standing Zoom panel asks this on the playhead's own frame — every frame during
+   * playback, not only at rest — and `for…of` over the track array takes an iterator
+   * per call. `generatedSegmentIndexAt` is the other half, and it answers an index so
+   * that a per-frame reader need not allocate a window it only tests for null.
+   */
   function generatedZoomAt(atSec: Seconds): Track | null {
-    for (const track of project.committed.tracks) {
+    const tracks = project.committed.tracks;
+    // eslint-disable-next-line @typescript-eslint/prefer-for-of
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      if (track === undefined) continue;
       if (track.target !== 'zoom' || track.origin !== 'generated' || !track.enabled) continue;
-      if (generatedSegmentAt(track, atSec) !== null) return track;
+      if (generatedSegmentIndexAt(track, atSec) >= 0) return track;
     }
     return null;
   }
@@ -909,7 +920,7 @@ async function start(): Promise<void> {
       regions: zoomRegions,
       keys: zoomKeysOf(doc),
       annotations: annotationsOf(doc),
-      generators: generatorStates(doc, logs ?? EMPTY_LOGS),
+      generators: generatorStates(doc, logs),
       regionIndexAtPlayhead: zoomRegionIndexAt(sourceSec),
       // Cloned, because `resolve` hands back the compiled timeline's **own** state
       // object and overwrites it in place — a panel that kept the reference would be
@@ -1021,9 +1032,13 @@ async function start(): Promise<void> {
     // covers the playhead, and whether *Take manual control* can be offered here.
     //
     // Guarded on the playhead's **source** instant, because that is what the shape is
-    // a function of: at rest nothing below this line runs, so nothing here allocates
-    // in the loop. A document change reaches the panel through `renderControls`'s own
-    // five call sites, as it always did.
+    // a function of. At rest nothing below this line runs at all; while the playhead
+    // moves it runs on every frame, which is why the two predicates it asks —
+    // `zoomRegionIndexAt` and `generatedZoomAt` — are indexed loops over indexed
+    // loops, and why `paintZoom` compares numbers and writes text rather than
+    // building anything. Nothing on this path allocates, moving or still. A document
+    // change reaches the panel through `renderControls`'s own five call sites, as it
+    // always did.
     //
     // Without this the panel described whatever moment the last edit happened at. The
     // readout went stale after an ordinary scrub, and — worse — the button was
@@ -1258,7 +1273,9 @@ async function start(): Promise<void> {
       renderControls();
     })
     .catch((error: unknown) => {
-      logs = EMPTY_LOGS;
+      // Unreadable, never absent: the read is over, so the panel must stop saying
+      // *reading…*, and what it says instead is that the logs could not be opened.
+      logs = unreadEventLogs();
       trouble(
         `This recording’s event logs could not be read: ${
           error instanceof Error ? error.message : String(error)

@@ -393,20 +393,38 @@ export function overrideZoomOps(
 }
 
 /**
- * The window of a generated zoom track that covers `atSec`, or `null`.
+ * Which `activeRanges` window of a generated zoom track covers `atSec`, or `-1`.
  *
  * A generated track's `activeRanges` **is** its segment list — §6.5 sets it to the
  * merged segments — so this is a read of the document rather than a re-derivation of
  * anything the generator decided.
+ *
+ * The index rather than the window, and an indexed loop rather than a `for…of`,
+ * because the standing Zoom panel asks this on the **playhead's own frame** and §4.3's
+ * first rule is that nothing on that path allocates: `for (const [a, b] of ranges)`
+ * takes an array iterator and destructures a pair per segment per frame, and returning
+ * a `{ startSec, endSec }` object allocates one more. {@link generatedSegmentAt} is
+ * this answer read out, for the callers that want the window and run at a person's
+ * rate.
  */
+export function generatedSegmentIndexAt(track: Track, atSec: Seconds): number {
+  const ranges = track.activeRanges;
+  for (let i = 0; i < ranges.length; i++) {
+    const range = ranges[i];
+    if (range === undefined) continue;
+    if (atSec >= range[0] && atSec <= range[1]) return i;
+  }
+  return -1;
+}
+
+/** The window of a generated zoom track that covers `atSec`, or `null`. */
 export function generatedSegmentAt(
   track: Track,
   atSec: Seconds,
 ): { startSec: Seconds; endSec: Seconds } | null {
-  for (const [start, end] of track.activeRanges) {
-    if (atSec >= start && atSec <= end) return { startSec: start, endSec: end };
-  }
-  return null;
+  const range = track.activeRanges[generatedSegmentIndexAt(track, atSec)];
+  if (range === undefined) return null;
+  return { startSec: range[0], endSec: range[1] };
 }
 
 // ---------------------------------------------------------------- keyframes

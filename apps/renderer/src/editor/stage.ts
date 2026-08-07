@@ -51,6 +51,15 @@ export interface StageDrag {
 export interface StageCallbacks {
   /** A tool drag finished and wants an annotation. `phase` is `'move'` while dragging. */
   onDraw: (kind: AnnotationKind, drag: StageDrag, phase: 'move' | 'end') => void;
+  /**
+   * A gesture ended somewhere it has no meaning, so whatever it showed must go.
+   *
+   * The other four callbacks are two-phase and end in a commit; this is the other
+   * outcome, and between them they are exhaustive — see {@link StageUi} on the
+   * invariant. The caller's answer is the same `null` branch its op builders already
+   * take, so a cancelled gesture and one that changed nothing are one code path.
+   */
+  onCancelGesture: () => void;
   /** The selected annotation was moved or resized. */
   onEditAnnotation: (
     spanId: string,
@@ -80,6 +89,18 @@ export interface StageState {
  * when the *document* moves, and the picture under them is the compositor's business.
  * The one exception is a live drag, which writes `style.left`/`width` directly on
  * nodes it already has, for the same reason `setPlayhead` exists beside `render`.
+ *
+ * ## A gesture that began provisionally ends in exactly one of commit or cancel
+ *
+ * Every `'move'` a gesture dispatches leaves a provisional document on
+ * `EditorProject`, and only the terminal `'end'` — or a cancel — clears it. So every
+ * exit from a live drag has to reach one of the two: a release on the letterbox, a
+ * `pointercancel`, a selection whose geometry cannot be read, and any branch a later
+ * kind of drag adds. That is why {@link StageUi.#apply} reports whether it dispatched
+ * and the pointer-up handler answers `onCancelGesture` when it did not, rather than
+ * each early return remembering for itself. Leaving one out is invisible: the preview
+ * and the inspector go on showing geometry that is in no `edit.json` until some later
+ * commit or undo happens by, with nothing on screen that says so.
  */
 export class StageUi {
   readonly #element: HTMLElement;
@@ -218,7 +239,10 @@ export class StageUi {
     };
     const end = (event: PointerEvent): void => {
       if (this.#drag === null) return;
-      this.#apply(event, 'end');
+      // Commit or cancel, never neither. `pointercancel` arrives here too, so a
+      // gesture the platform took away is the same one exit as one released off the
+      // picture.
+      if (!this.#apply(event, 'end')) this.#callbacks.onCancelGesture();
       this.#drag = null;
       this.#band?.remove();
       this.#band = null;
@@ -228,17 +252,25 @@ export class StageUi {
     this.#element.addEventListener('pointercancel', end);
   }
 
-  #apply(event: PointerEvent, phase: 'move' | 'end'): void {
+  /**
+   * One step of a live gesture. Answers **whether it dispatched a callback**.
+   *
+   * Every `return false` below is a reason this step said nothing — the pointer is on
+   * the letterbox and has no source coordinate, or the selection it is dragging has no
+   * geometry to move. On a `'move'` that costs the frame; on an `'end'` it would strand
+   * whatever the previous move showed, which is what the caller uses this answer for.
+   */
+  #apply(event: PointerEvent, phase: 'move' | 'end'): boolean {
     const state = this.#state;
     const drag = this.#drag;
-    if (state === null || drag === null) return;
+    if (state === null || drag === null) return false;
     const at = this.#sourceAt(event);
-    if (at === null) return;
+    if (at === null) return false;
 
     switch (drag.kind) {
       case 'zoom':
         this.#callbacks.onZoomTo(at, phase);
-        return;
+        return true;
       case 'draw': {
         const band = this.#band;
         if (band !== null) {
@@ -249,37 +281,37 @@ export class StageUi {
           );
         }
         this.#callbacks.onDraw(drag.tool, { from: drag.from, to: at }, phase);
-        return;
+        return true;
       }
       case 'endpoint':
         this.#callbacks.onEditAnnotation(drag.spanId, { [drag.which]: at }, phase);
-        return;
+        return true;
       case 'move': {
         const dx = at[0] - drag.grab[0];
         const dy = at[1] - drag.grab[1];
         if (drag.origin.kind === 'arrow') {
           const from = drag.origin.from;
           const to = drag.origin.to;
-          if (from === null || to === null) return;
+          if (from === null || to === null) return false;
           this.#callbacks.onEditAnnotation(
             drag.spanId,
             { from: [from[0] + dx, from[1] + dy], to: [to[0] + dx, to[1] + dy] },
             phase,
           );
-          return;
+          return true;
         }
         const center = drag.origin.center;
-        if (center === null) return;
+        if (center === null) return false;
         this.#callbacks.onEditAnnotation(
           drag.spanId,
           { center: [center[0] + dx, center[1] + dy] },
           phase,
         );
-        return;
+        return true;
       }
       case 'resize': {
         const box = boxOf(drag.origin);
-        if (box === null) return;
+        if (box === null) return false;
         // The opposite corner is the anchor, so a resize behaves the way every other
         // resize does: the corner you have hold of follows the pointer and the one
         // across from it does not move.
@@ -295,7 +327,7 @@ export class StageUi {
           },
           phase,
         );
-        return;
+        return true;
       }
     }
   }

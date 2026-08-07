@@ -824,11 +824,15 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Fifteen entries in `npm run verify:mutation`
-break the production source on disk and each names what must notice it; the one worth
-knowing is `an-annotation-is-placed-in-output-space`, whose guard is deliberately the
-unit test and **not** this gate, which was tried and measured surviving it (the gate
-draws and reads at one zoom, so an identity map still lands the mask inside the box).
+committed. Seventeen entries in `npm run verify:mutation`
+break the production source on disk and each names what must notice it; the ones worth
+knowing are the three whose guard is deliberately a unit test and **not** this gate.
+`an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
+gate draws and reads at one zoom, so an identity map still lands the mask inside the
+box); `a-gesture-ended-off-the-picture-strands-its-preview` and
+`the-generator-panel-blames-a-grant-while-it-is-still-reading` are shapes this gate has
+no reading of at all, and both are reachable before the first export — so a gate-only
+guard would leave them unproven on exactly the host that loses the context.
 It does **not** measure the frame budget or §4.5's per-pixel preview/export identity;
 phases 6 and 8 own those, and a second opinion about either is a weaker one.
 
@@ -952,6 +956,22 @@ the same way rather than widening anything.
   callbacks end at, so a seventh cannot be written without it. Only a gesture that ends
   on the value it started from reaches the branch, which is why the phase-15 gate
   drives one rather than trusting that six call sites each remembered.
+- **The invariant that generalises it: a gesture that began provisionally ends in
+  exactly one of commit or cancel, on _every_ exit path.** The entry above is that rule
+  where a gesture produced no ops; `StageUi` is where a gesture never reaches a callback
+  at all, and it slipped through the boundary that fixed the first. `#apply` refuses to
+  dispatch when `outputToSource` answers `null` — the letterbox, which every bundle has,
+  since nothing sets `edit.output.size` from the recording — while the pointer-up
+  handler dropped the drag regardless, so releasing a mask past the edge of the picture
+  left the last move's provisional document showing with nothing to clear it. **The
+  shape is what matters and not the branch**: `#apply` now answers _whether it
+  dispatched_ and the one pointer-up handler cancels when it did not, so a later drag
+  kind, a `pointercancel` and a selection whose geometry cannot be read are all covered
+  without each remembering. Guarded by `apps/renderer/test/editor-stage.test.ts` — a
+  unit test over a stubbed DOM, `vi.stubGlobal` as `export-encode.test.ts` already does
+  — deliberately **not** by the phase-15 gate: this shape is reachable before the first
+  export, the gate has no reading of it, and a gate-only guard would leave it unproven
+  on every host that loses the context (§ WITHHOLDABLE_GUARDS).
 - **A selection is checked against `project.committed`, never `project.document`.** The
   latter is the _provisional_ document while a drag is live, and a keyframe drag
   previews its key at the new `t` on every pointermove — so a guard reading it finds no
@@ -1047,6 +1067,26 @@ the same way rather than widening anything.
   names a log the document **promised** and could not be read. This is phase 5's
   absent-versus-empty discipline one layer out, and it was found by phase 14's gate
   going red on a `trouble` line over an editor where nothing was wrong.
+- **_Reading_ and _unavailable_ are different answers, and saying the second while the
+  first is true is not a cosmetic flicker.** `readEventLogs` is deliberately not awaited
+  before the editor opens, so for a few hundred milliseconds — longer on a twenty-minute
+  recording, which is megabytes of NDJSON plus a SHA-256 over it — nobody knows what the
+  logs hold. The generator panel therefore has **three** states
+  (`GeneratorAvailability`), and `main.ts` hands `generatorStates` its `logs` as `null`
+  rather than substituting an empty `EventLogs`, because that substitution is the whole
+  defect: the panel opened saying _"No clicks were captured — the Accessibility grant is
+  what a click log needs"_ over recordings that have a real click log. **The captain
+  granted Accessibility — the most invasive of the four — on the promise of that log,
+  and that promise had already been broken once**, so the sentence does not read as a
+  panel being behind; it reads as the permission having failed, on the first thing on
+  screen, every time an editor opens. Staleness is withheld for the same window and for
+  the same reason: it is a digest comparison and the digests are exactly what is
+  outstanding, so asked early it answers _"the log this was generated from is no longer
+  there"_ — the same lie one channel over, and the one the inspector shows in preference
+  to `reason`. **A log that could not be _opened_ is a third thing again**, neither
+  absent nor empty: `EventLogs.unreadable` names which, so each row blames the right
+  cause, and `unreadEventLogs()` is what a read that threw outright falls back to.
+  `the-generator-panel-blames-a-grant-while-it-is-still-reading` is the mutation.
 - **Two panels must not share a heading, and only a screenshot says so.** The
   selection panel titles itself after what is selected and the standing one is _Zoom_;
   the first version rendered _Zoom_ twice, one above the other. Nothing in `npm test`
@@ -1069,10 +1109,17 @@ the same way rather than widening anything.
   happens only when the **shape** of the answer changes — which region covers the
   playhead, and whether the button can be offered at all. The rule `main.ts`'s header
   states was never about avoiding text writes; it is about not tearing down DOM
-  structure on a timer, and this does not. Nothing on that path allocates at rest: it
-  is guarded on the playhead's own source instant, `zoomRegionIndexAt` is the one
-  predicate both the rebuild and the per-frame half ask, and the selection and
-  generator panels are untouched by it. **It survived a green suite and a completed
+  structure on a timer, and this does not. **Nothing on that path allocates — moving or
+  still**, which is the harder half and is the one a guard on "at rest" quietly misses:
+  at rest the whole block is skipped by a comparison on the playhead's own source
+  instant, and while the playhead moves it runs on _every_ frame, so both predicates it
+  asks are indexed loops over indexed loops — `zoomRegionIndexAt` (the one predicate the
+  rebuild and the per-frame half share) and `generatedZoomAt`, whose
+  `generatedSegmentIndexAt` answers an **index** precisely so a per-frame reader need
+  not allocate a `{ startSec, endSec }` it only tests for null. `for…of` over an array
+  takes an iterator and a destructured `[start, end]` allocates a pair per segment per
+  frame; §4.3's first rule is that nothing on a frame path does either. The selection
+  and generator panels are untouched by any of it. **It survived a green suite and a completed
   review, and a person looking at the `--shots` screenshots found it** — the document
   was right, `resolve` was right and the picture was right, so the defect lived
   entirely in the gap between what the model computed and what could be read on the

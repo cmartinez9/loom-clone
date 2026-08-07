@@ -83,6 +83,11 @@ export const GENERATOR_RANK: Record<RunnableGenerator, number> = {
   'auto-zoom-on-click': 1,
 };
 
+/** The two §2.5 logs a recording can declare, by the names `recording.json` uses. */
+export const EVENT_LOG_NAMES = ['cursor', 'clicks'] as const;
+
+export type EventLogName = (typeof EVENT_LOG_NAMES)[number];
+
 /**
  * The logs, parsed, with the digests §3.5's fingerprint is made of.
  *
@@ -97,8 +102,17 @@ export interface EventLogs {
   /** `{ cursor: 'sha256:…', clicks: 'sha256:…' }` — only for the logs that exist. */
   digests: Record<string, string>;
   /**
-   * A log the recording **declares** and this build could not read, phrased for a
-   * person — and `null` for a recording that simply has none.
+   * The logs the recording **declares** and this build could not read, by name.
+   *
+   * Named rather than only summed into {@link EventLogs.trouble}, because the panel
+   * answers per generator: a cursor log that would not load and a click log that was
+   * never captured are two different sentences on two different rows, and a single
+   * prose line cannot be split back into them.
+   */
+  unreadable: readonly EventLogName[];
+  /**
+   * The same fact as one sentence for a person — and `null` for a recording that
+   * simply has no logs.
    *
    * The distinction is phase 5's, applied one layer out. *"No cursor log"* and *"an
    * empty cursor log"* are required to mean different things (§7.3, research trap 2),
@@ -110,6 +124,28 @@ export interface EventLogs {
    * offers them, where the person is looking.
    */
   trouble: string | null;
+}
+
+/** The sentence a log that would not load earns, in one place so both callers agree. */
+export function describeUnreadable(names: readonly EventLogName[]): string {
+  return `This recording says it has ${names.join(' and ')} events, and they could not be read.`;
+}
+
+/**
+ * What the panel reads when the read itself threw, rather than when a log is absent.
+ *
+ * Every log **unreadable**, never absent. A failure to read is not evidence that
+ * nothing was captured, and the one sentence this window must never show is one
+ * blaming a permission the user granted for a log this build simply could not open.
+ */
+export function unreadEventLogs(): EventLogs {
+  return {
+    cursor: null,
+    clicks: null,
+    digests: {},
+    unreadable: EVENT_LOG_NAMES,
+    trouble: describeUnreadable(EVENT_LOG_NAMES),
+  };
 }
 
 /** What a renderer needs from the outside world to read a bundle's logs. */
@@ -137,9 +173,11 @@ export async function readEventLogs(
   const events = recording?.events;
   // A recording with no logs at all is not trouble; it is a recording nobody sampled.
   // Every generator's own `reason` says what that costs it.
-  if (events === undefined) return { cursor: null, clicks: null, digests: {}, trouble: null };
+  if (events === undefined) {
+    return { cursor: null, clicks: null, digests: {}, unreadable: [], trouble: null };
+  }
   const digests: Record<string, string> = {};
-  const unreadable: string[] = [];
+  const unreadable: EventLogName[] = [];
 
   let cursor: CursorSampleInput[] | null = null;
   const cursorFile = events.cursor?.file;
@@ -169,13 +207,11 @@ export async function readEventLogs(
     cursor,
     clicks,
     digests,
+    unreadable,
     // Only a log the document **promised**. A missing file where `recording.json`
     // says there is one is a damaged bundle and worth saying so; a document that
     // never claimed one is not.
-    trouble:
-      unreadable.length === 0
-        ? null
-        : `This recording says it has ${unreadable.join(' and ')} events, and they could not be read.`,
+    trouble: unreadable.length === 0 ? null : describeUnreadable(unreadable),
   };
 }
 
@@ -232,6 +268,21 @@ export function parseClickLog(text: string): ClickEventInput[] {
 }
 
 /**
+ * Whether a generator can be run — including the answer *"nobody knows yet"*.
+ *
+ * `reading` is a state and not a placeholder, and it is the one this type exists for.
+ * Reading two NDJSON files over `loom://` and hashing them takes a few hundred
+ * milliseconds on a long recording, and for that window the honest answer to *"is
+ * there a click log?"* is that the question has not been asked yet. Collapsing it into
+ * `unavailable` makes the panel open by saying *"No clicks were captured — the
+ * Accessibility grant is what a click log needs"* over a recording with a real click
+ * log, which reads as the most invasive of the four permissions having failed. Phase
+ * 5 keeps *absent* and *empty* apart at the log; this keeps *absent* and *not yet
+ * known* apart at the panel, and it is the same discipline for the same reason.
+ */
+export type GeneratorAvailability = 'reading' | 'runnable' | 'unavailable';
+
+/**
  * What the editor offers for one generator, and why.
  *
  * `reason` is a sentence rather than a code because it is shown to a person, and
@@ -243,42 +294,69 @@ export interface GeneratorState {
   label: string;
   /** The document's track for this generator, if it has one. */
   track: Track | null;
-  /** Can it be run at all — are its inputs there? */
-  runnable: boolean;
-  /** Is the existing track still a faithful function of its inputs (§3.5)? */
+  /** Can it be run at all — are its inputs there, and is that known yet? */
+  status: GeneratorAvailability;
+  /**
+   * Is the existing track still a faithful function of its inputs (§3.5)?
+   *
+   * `null` while the logs are being read, because staleness is a digest comparison
+   * and the digests are what is outstanding: asked against an empty set it answers
+   * `input-missing`, and *"the cursor log this was generated from is no longer
+   * there"* is the same lie one channel over.
+   */
   staleness: StalenessReport | null;
   /** A baked track is detached from regeneration and must never be offered one. */
   baked: boolean;
   reason: string;
 }
 
-/** Read the document and the logs into the state every generator control renders from. */
-export function generatorStates(doc: EditDocument, logs: EventLogs): GeneratorState[] {
+/**
+ * Read the document and the logs into the state every generator control renders from.
+ *
+ * `logs` is `EventLogs | null`, and the `null` is load-bearing: it is what the caller
+ * holds before {@link readEventLogs} resolves, and substituting an empty `EventLogs`
+ * for it there is exactly the erasure {@link GeneratorAvailability} exists to prevent.
+ */
+export function generatorStates(doc: EditDocument, logs: EventLogs | null): GeneratorState[] {
   return RUNNABLE_GENERATORS.map((type) => {
     const id = GENERATOR_TRACK_ID[type];
     const track = doc.tracks.find((t) => t.id === id) ?? null;
     const baked = track !== null && track.origin === 'manual' && track.generatedFrom !== undefined;
-    const needs = type === 'cursor-follow' ? logs.cursor : logs.clicks;
-    const runnable = needs !== null && needs.length > 0;
+    const needs = logs === null ? null : type === 'cursor-follow' ? logs.cursor : logs.clicks;
+    const status: GeneratorAvailability =
+      logs === null ? 'reading' : needs !== null && needs.length > 0 ? 'runnable' : 'unavailable';
     return {
       type,
       label: GENERATOR_LABEL[type],
       track,
-      runnable,
+      status,
       staleness:
-        track !== null && isRegenerable(track)
+        logs !== null && track !== null && isRegenerable(track)
           ? generatedTrackStaleness(track, logs.digests)
           : null,
       baked,
-      reason: runnable
-        ? ''
-        : type === 'cursor-follow'
-          ? 'This recording has no cursor samples to follow.'
-          : logs.clicks === null
-            ? 'No clicks were captured — the Accessibility grant is what a click log needs.'
-            : 'Nobody clicked during this recording.',
+      reason: reasonFor(type, status, logs),
     };
   });
+}
+
+/** The sentence one generator's row shows under its title, or `''` when it can run. */
+function reasonFor(
+  type: RunnableGenerator,
+  status: GeneratorAvailability,
+  logs: EventLogs | null,
+): string {
+  if (status === 'runnable') return '';
+  if (status === 'reading' || logs === null) return 'Reading this recording’s event logs…';
+  // A log the document promised and this build could not open is neither absent nor
+  // empty, and saying "no clicks were captured" about one blames a permission for a
+  // failure that has nothing to do with it.
+  const log: EventLogName = type === 'cursor-follow' ? 'cursor' : 'clicks';
+  if (logs.unreadable.includes(log)) return describeUnreadable([log]);
+  if (type === 'cursor-follow') return 'This recording has no cursor samples to follow.';
+  return logs.clicks === null
+    ? 'No clicks were captured — the Accessibility grant is what a click log needs.'
+    : 'Nobody clicked during this recording.';
 }
 
 /** What running a generator produced: the ops to send, and what to tell the user. */

@@ -34,6 +34,7 @@ import {
   parseCursorLog,
   readEventLogs,
   runGenerator,
+  unreadEventLogs,
   type EventLogs,
   type RunnableGenerator,
 } from '../src/editor/generators.ts';
@@ -150,6 +151,103 @@ describe('reading §2.5’s logs', () => {
   it('DOES say so when a log the document promised is not there', async () => {
     const logs = await readEventLogs('r1', recordingWith({ clicks: true }), reader({}));
     expect(logs.trouble).toMatch(/cursor and clicks/);
+    expect(logs.unreadable).toEqual(['cursor', 'clicks']);
+  });
+});
+
+/**
+ * *Not yet known* is a third answer, and the panel must give it.
+ *
+ * The captain granted Accessibility — the most invasive of the four — on the promise
+ * of a click log. A panel that opens by saying that grant is what a click log needs,
+ * over a recording that has one, is the app reporting that permission as having
+ * failed; that it is true for only a few hundred milliseconds does not help, because
+ * it is the first thing on screen and it is false. So the three states are required to
+ * be distinguishable all the way to the sentence a person reads, which is phase 5's
+ * absent-versus-empty discipline one layer further out.
+ */
+describe('reading, runnable and unavailable are three different answers', () => {
+  it('says it is READING while the logs are outstanding, and blames nothing', () => {
+    // `null` is what the editor holds before `readEventLogs` resolves. Substituting an
+    // empty `EventLogs` for it here is the erasure this whole state exists to prevent.
+    const states = generatorStates(newEditDocument(), null);
+    expect(states.map((s) => s.status)).toEqual(['reading', 'reading']);
+    for (const state of states) {
+      expect(state.reason).toMatch(/Reading/);
+      // The two sentences that would be lies about a recording nobody has looked at.
+      expect(state.reason).not.toMatch(/Accessibility/);
+      expect(state.reason).not.toMatch(/no cursor samples/);
+    }
+  });
+
+  it('and only THEN says a click log is missing, once that has been established', async () => {
+    const logs = await logsFor(null);
+    const auto = generatorStates(newEditDocument(), logs).find(
+      (s) => s.type === 'auto-zoom-on-click',
+    );
+    expect(auto?.status).toBe('unavailable');
+    expect(auto?.reason).toMatch(/Accessibility/);
+  });
+
+  it('withholds staleness while reading, rather than reporting the input as gone', async () => {
+    // Staleness is a digest comparison and the digests are exactly what is outstanding,
+    // so asking it against an empty set answers `input-missing` — *"the clicks log this
+    // was generated from is no longer there"*, which is the same lie one channel over
+    // and which the inspector shows in preference to `reason`.
+    const logs = await logsFor([4]);
+    const run = runGenerator('auto-zoom-on-click', newEditDocument(), logs, {
+      durationSec: DURATION,
+      recording: recordingWith({ clicks: true }),
+      generatedAt: '2026-08-06T00:00:00.000Z',
+    });
+    if ('error' in run) throw new Error(run.error);
+    const doc = apply(newEditDocument(), run.ops);
+
+    const reading = generatorStates(doc, null).find((s) => s.type === 'auto-zoom-on-click');
+    expect(reading?.staleness).toBeNull();
+    // The control: the very same document, once the logs are in, does report it fresh.
+    const read = generatorStates(doc, logs).find((s) => s.type === 'auto-zoom-on-click');
+    expect(read?.staleness?.stale).toBe(false);
+  });
+
+  it('calls a log it could not OPEN unreadable, never absent', async () => {
+    // The document promised both and neither loaded. "No clicks were captured" would
+    // blame the grant for a failure that has nothing to do with it, and "no cursor
+    // samples to follow" would report a damaged bundle as an ordinary one.
+    const logs = await readEventLogs('r1', recordingWith({ clicks: true }), reader({}));
+    for (const state of generatorStates(newEditDocument(), logs)) {
+      expect(state.status).toBe('unavailable');
+      expect(state.reason).toMatch(/could not be read/);
+      expect(state.reason).not.toMatch(/Accessibility/);
+    }
+  });
+
+  it('says the same of a read that threw outright', () => {
+    // `unreadEventLogs` is what the editor falls back to when `readEventLogs` itself
+    // rejects. The read is over, so the panel must stop saying *reading* — and what it
+    // says instead is still not a claim about what was captured.
+    for (const state of generatorStates(newEditDocument(), unreadEventLogs())) {
+      expect(state.status).toBe('unavailable');
+      expect(state.reason).toMatch(/could not be read/);
+      expect(state.reason).not.toMatch(/Accessibility/);
+    }
+  });
+
+  it('names the right log per row when only one of the two would not load', async () => {
+    // A single prose `trouble` line cannot be split back into two rows, which is why
+    // `EventLogs.unreadable` carries the names.
+    const logs = await readEventLogs(
+      'r1',
+      recordingWith({ clicks: true }),
+      reader({ 'clicks.ndjson': clickLog([4]) }),
+    );
+    const states = generatorStates(newEditDocument(), logs);
+    const cursor = states.find((s) => s.type === 'cursor-follow');
+    const auto = states.find((s) => s.type === 'auto-zoom-on-click');
+    expect(cursor?.status).toBe('unavailable');
+    expect(cursor?.reason).toMatch(/cursor events, and they could not be read/);
+    expect(auto?.status).toBe('runnable');
+    expect(auto?.reason).toBe('');
   });
 });
 
@@ -362,7 +460,7 @@ describe('§3.5’s three states, and which button each earns', () => {
     const states = generatorStates(newEditDocument(), logs);
     const auto = states.find((s) => s.type === 'auto-zoom-on-click');
     expect(auto?.track).toBeNull();
-    expect(auto?.runnable).toBe(true);
+    expect(auto?.status).toBe('runnable');
     expect(auto?.baked).toBe(false);
   });
 

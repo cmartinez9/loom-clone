@@ -219,6 +219,16 @@ const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
 const EDITOR_ZOOM = 'apps/renderer/test/editor-zoom.test.ts';
 const EDITOR_ANNOTATE = 'apps/renderer/test/editor-annotate.test.ts';
 const EDITOR_GENERATORS = 'apps/renderer/test/editor-generators.test.ts';
+/**
+ * `StageUi`'s control flow, over a stubbed DOM — deliberately not the gate.
+ *
+ * The gesture invariant it guards ("a drag that began provisionally ends in exactly
+ * one of commit or cancel") is reached by a release on the letterbox, which is a
+ * *pre*-export shape the phase-15 gate has no reading of; putting the only guard there
+ * would leave the property unproven on every host that loses the context. This one
+ * cannot withhold, so it stays out of {@link WITHHOLDABLE_GUARDS}.
+ */
+const EDITOR_STAGE = 'apps/renderer/test/editor-stage.test.ts';
 /** §3.5's stack, over real generated tracks. */
 const GENERATOR_STACKING = 'packages/edl/test/generator-stacking.test.ts';
 /** Who may open an editor, and what closing one does to the bundle lock. */
@@ -1884,6 +1894,47 @@ export const MUTATIONS = [
     find: '  return replaces ? { type } : { type, at: insertionIndexFor(doc, type) };',
     replace: '  return { type, at: insertionIndexFor(doc, type) };',
     mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'the-generator-panel-blames-a-grant-while-it-is-still-reading',
+    breaks:
+      'the third answer a generator row can give. `null` logs mean *not read yet* and ' +
+      'collapsing that into *unavailable* makes the Automatic panel open by saying ' +
+      '"No clicks were captured — the Accessibility grant is what a click log needs" ' +
+      'over a recording that has a real click log. The most invasive of the four ' +
+      'permissions, reported as having failed, on every editor that opens — and the ' +
+      'promise behind that grant has already been broken once, so it reads as the fix ' +
+      'not having worked rather than as a panel being a few hundred milliseconds ' +
+      'behind.\n' +
+      "   Phase 5's absent-versus-empty discipline one layer out: *not yet known* and " +
+      '*known to be absent* have to stay different answers all the way to the sentence ' +
+      'a person reads.',
+    file: 'apps/renderer/src/editor/generators.ts',
+    find:
+      "      logs === null ? 'reading' : needs !== null && needs.length > 0 " +
+      "? 'runnable' : 'unavailable';",
+    replace: "      needs !== null && needs.length > 0 ? 'runnable' : 'unavailable';",
+    mustFail: [EDITOR_GENERATORS],
+  },
+  {
+    name: 'a-gesture-ended-off-the-picture-strands-its-preview',
+    breaks:
+      'the stage half of the invariant `a-gesture-that-changes-nothing-strands-its-' +
+      'preview` guards at the other end: a drag that began provisionally must end in ' +
+      'exactly one of commit or cancel, on **every** exit path. `#apply` refuses to ' +
+      'dispatch when the pointer has no source coordinate — a release on the ' +
+      'letterbox, which every bundle has, since nothing sets `edit.output.size` from ' +
+      'the recording — and without this the pointer-up handler drops the drag anyway. ' +
+      'The provisional document the last move left is then in no `edit.json`, showing ' +
+      'in the preview and in the inspector, until some later commit or undo happens ' +
+      'by.\n' +
+      '   Guarded by a unit test rather than by the gate on purpose: this shape is ' +
+      'reachable before the first export and the gate has no reading of it, so the ' +
+      'gate alone would leave it unproven on any host that loses the context.',
+    file: 'apps/renderer/src/editor/stage.ts',
+    find: "      if (!this.#apply(event, 'end')) this.#callbacks.onCancelGesture();",
+    replace: "      this.#apply(event, 'end');",
+    mustFail: [EDITOR_STAGE],
   },
   {
     name: 'a-region-centre-is-read-by-position',
