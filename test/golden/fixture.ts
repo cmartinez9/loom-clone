@@ -32,6 +32,16 @@ export const SOURCE_SIZE: readonly [number, number] = [1280, 720];
 export const OUTPUT_SIZE: readonly [number, number] = [1024, 640];
 
 export const DURATION_SEC = 12;
+/**
+ * The document's output frame rate, which is also the rate the export loop is built
+ * at.
+ *
+ * It reaches no pixel: `ExportRenderLoop.renderAt` takes a **timeline instant**, not a
+ * frame number, precisely so a golden harness does not have to round §4.5's 24 fixed
+ * timestamps onto a CFR grid. It is exported so the harness constructs the loop from
+ * the same number the document declares rather than a second literal beside it.
+ */
+export const OUTPUT_FPS = 30;
 /** §4.5: *"a fixture project at 24 fixed timestamps"*. */
 export const TIMESTAMP_COUNT = 24;
 
@@ -348,7 +358,11 @@ export function fixtureDocument(
   return {
     schema: 'loom.edit/1',
     revision: 1,
-    output: { size: [OUTPUT_SIZE[0], OUTPUT_SIZE[1]], fps: 30, background: { kind: 'none' } },
+    output: {
+      size: [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
+      fps: OUTPUT_FPS,
+      background: { kind: 'none' },
+    },
     clips: [{ id: 'c1', sourceStart: 0, sourceEnd: DURATION_SEC, speed: 1 }],
     tracks: [
       zoomTrack(),

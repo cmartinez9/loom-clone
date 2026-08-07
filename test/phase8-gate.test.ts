@@ -13,22 +13,24 @@
  *
  * ## Its relationship to phase 11's golden gate
  *
- * Phase 11 ships `test/golden/`, which checks the other half of §4.5 and does it
- * over a *synthetic* source frame with a two-line stand-in where the export loop
- * belongs: that annotations actually change the picture, in the right places, and
- * that the mask and the blur are effects on pixels rather than draw calls. Neither
- * gate subsumes the other and they must not be merged into one:
+ * Phase 11 ships `test/golden/`, which checks the other half of §4.5 over a
+ * *synthetic* source frame: that annotations actually change the picture, in the right
+ * places, and that the mask and the blur are effects on pixels rather than draw calls.
+ * It drives {@link ExportRenderLoop.renderAt} exactly as this gate does — its
+ * `exportFrame` was a two-line stand-in only while phase 8 was being built, and that
+ * fold has happened with every one of its assertions left where it was. Neither gate
+ * subsumes the other and they must not be merged into one:
  *
  * | | `test/golden/` (phase 11) | this file (phase 8) |
  * |---|---|---|
  * | source | one painted `VideoFrame` | a real decoded H.264 stream, VFR |
- * | export path | `resolve` + `render`, inline | the shipping `ExportRenderLoop` |
+ * | export path | the shipping `ExportRenderLoop` | the shipping `ExportRenderLoop` |
  * | contexts | one `Compositor`, both paths | two contexts, two readers, two rings |
  * | also proves | annotations are not vacuous | the encoded file carries the pixels |
  *
- * The seam phase 11's header asks for is {@link ExportRenderLoop.renderAt}: its
- * `exportFrame` becomes a call into it, and its assertions stay where they are. That
- * substitution is a follow-up, not a merge of the two gates.
+ * So what separates them is no longer the export path but everything around it: this
+ * gate is the only one with a real decoded VFR source, two GL contexts and two frame
+ * rings, and the only one that demuxes and decodes the finished MP4 back out again.
  *
  * ## What makes this a pass rather than a coincidence
  *
@@ -59,8 +61,9 @@
  * — frame selection and the zoom state — each with a control that must go non-zero.
  * The other two, **the webcam bubble and the cursor**, have no compositor pass on
  * `main`: `Compositor.render` throws when handed a `webcam` or a `cursor` frame, and
- * `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }`, so neither path draws
- * anything for them and a per-pixel delta of 0 between two blanks says nothing.
+ * `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null, textAtlas: null }` and
+ * carries neither key, so neither path draws anything for them and a per-pixel delta
+ * of 0 between two blanks says nothing.
  * Building those passes is separate scheduled work.
  *
  * So the report carries `coverage` — printed on every run, passing or not — and a

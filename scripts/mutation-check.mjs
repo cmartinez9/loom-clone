@@ -1034,6 +1034,46 @@ export const MUTATIONS = [
     mustFail: [PHASE11, EDL_ANNOTATIONS],
   },
 
+  // ---- phase 11's gate, folded onto phase 8's export seam -------------------
+  //
+  // Phase 11's harness carried a documented two-line stand-in for the export path
+  // while phase 8 was still building it. It now calls `ExportRenderLoop.renderAt`,
+  // and these two are what keep it there. They are the only entries in this registry
+  // whose subject is *which code the gate runs* rather than a property of the
+  // product — which they have to be, because every other reading phase 11 takes is a
+  // reading of pixels and a stand-in produces exactly the same pixels. That is what
+  // made the stand-in viable, and it is what would make a slide back to one silent.
+  {
+    name: 'phase11-golden-reaches-the-export-loop',
+    breaks:
+      'the export path resolving the timeline at the instant it was asked for. ' +
+      'Pinned at 0 it composites the first frame of the recording for every output ' +
+      'frame — a file that plays, is the right length, and shows one still picture. ' +
+      'It is registered here for a second reason: a phase-11 gate still calling a ' +
+      'stand-in for the export path would not notice this at all, so a green ' +
+      'phase-11 run under this mutation means the fold onto ' +
+      '`ExportRenderLoop.renderAt` has come undone.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    const state = resolve(this.#timeline, timelineTimeSec);',
+    replace: '    const state = resolve(this.#timeline, 0);',
+    mustFail: [PHASE11, EXPORT_LOOP],
+  },
+  {
+    name: 'the-export-path-draws-text-from-no-atlas',
+    breaks:
+      'the exporter being handed the *same* glyph atlas the preview draws from. ' +
+      '`PreviewLoopOptions.textAtlas` has always said the export path has to be ' +
+      'given the same object, and until phase 11’s gate folded onto ' +
+      '`ExportRenderLoop` nothing could be. Dropped, every `text` annotation is ' +
+      'skipped and counted on the export side only: not a refusal — text failing is ' +
+      'cosmetic and visible where a redaction failing is invisible — but a §4.5 ' +
+      'divergence, and an exported video missing words the editor showed.',
+    file: 'apps/renderer/src/export/render-loop.ts',
+    find: '    this.#frames.textAtlas = options.textAtlas ?? null;',
+    replace: '    this.#frames.textAtlas = null;',
+    mustFail: [PHASE11],
+  },
+
   // ---- phase 12: the live drawing overlay ----------------------------------
 
   {

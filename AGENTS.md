@@ -820,8 +820,8 @@ while `#running` stayed true, which makes `start()` an early return and the loop
 unrevivable, and that is a wedge rather than a safety property.
 
 **The gate is `test/phase11-golden.test.ts`**, §4.5's golden-frame test extended:
-24 fixed timestamps, the shipping `PreviewLoop` against a fixed-timestamp export loop,
-max per-pixel delta **0**. Equality alone is not the gate — a preview and an export
+24 fixed timestamps, the shipping `PreviewLoop` against the shipping
+`ExportRenderLoop`, max per-pixel delta **0**. Equality alone is not the gate — a preview and an export
 that both draw nothing agree perfectly — so every timestamp also renders a third frame
 with the annotation tracks disabled and requires that the annotations changed the
 picture, that every changed pixel is inside a box `test/golden/fixture.ts` computes
@@ -831,8 +831,11 @@ centre is exactly the mask's colour, that the blur destroyed the region's varian
 and that a parked track drew nothing while a crossfading one drew _linearly in its
 window weight_ — the `blendMs` half, which a "did it draw" check cannot see. Six
 `annotation-*` entries in `npm run verify:mutation` break the production source on
-disk and require the gate to notice. The export _pipeline_ is phase 8's; the gate's
-export loop is two lines written out rather than imported, on purpose.
+disk and require the gate to notice. **The export path is phase 8's own**: the two-line
+stand-in this gate carried while phase 8 was being built has been folded onto
+`ExportRenderLoop.renderAt`, with every assertion left where it was — see § Sharp
+edges' _"two golden-frame gates"_ for what each covers and what keeps this one on the
+real loop.
 
 ## The live drawing overlay, in one paragraph
 
@@ -1601,11 +1604,21 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   WebGL2 contexts with **two** readers, and then decodes the finished MP4 to check the
   pictures reached the file. Phase 11's `test/phase11-golden.test.ts` (harness in
   `test/golden/`) checks the other axis — that annotations are not vacuous — over one
-  painted frame with a two-line stand-in where the export loop belongs. The seam
-  between them is `ExportRenderLoop.renderAt`, which takes a timeline instant rather
-  than a frame number for exactly that reason. They also declare separate window
-  globals — `window.exportGolden` and `window.golden` — because both harnesses are in
-  one TypeScript program and one name cannot hold two shapes.
+  painted frame. **Both now drive the same export path**: `ExportRenderLoop.renderAt`,
+  which takes a timeline instant rather than a frame number precisely so a golden
+  harness need not round §4.5's timestamps onto a CFR grid. Phase 11 carried a
+  documented two-line stand-in there until phase 8 landed; folding it on changed no
+  assertion, because they were written against that seam from the start. They still
+  declare separate window globals — `window.exportGolden` and `window.golden` —
+  because both harnesses are in one TypeScript program and one name cannot hold two
+  shapes.
+  **What keeps phase 11 on the real path is a mutation, not a comment.** Every other
+  reading it takes is a reading of pixels, and a stand-in produces exactly the same
+  pixels — which is what made the stand-in viable and what would make a slide back to
+  one silent. So `phase11-golden-reaches-the-export-loop` in `npm run verify:mutation`
+  pins `renderAt` at `t = 0` and requires phase 11 to go red, and the gate reads
+  `ExportRenderLoop`'s own `framesRendered`/`drawnFrames`/`heldFrames` out of the
+  report — the one thing in it a stand-in cannot produce.
 - **The phase-8 gate has three outcomes, and the third is not a pass.** Where **every**
   launch had its WebGL contexts taken away before anything was compared, §4.5's
   per-pixel zero was neither met nor missed — it was not measured — so the run reports
@@ -1658,7 +1671,8 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   so.** Frame selection and the zoom state are each perturbed by a control that must go
   non-zero; **the webcam bubble and the cursor are not exercised at all**, because
   neither has a compositor pass — `Compositor.render` throws when handed a `webcam` or
-  a `cursor` frame and `ExportRenderLoop`'s `CompositorFrames` is `{ screen: null }` —
+  a `cursor` frame and `ExportRenderLoop`'s `CompositorFrames` is
+  `{ screen: null, textAtlas: null }`, which carries neither key —
   so both paths draw nothing and agreeing about nothing is not evidence. The split is
   `COVERAGE` in `test/export-golden/harness.ts`, printed on every run including a
   passing one, and it is kept honest by a **tripwire**: `probeCoverage` hands the real
@@ -1670,16 +1684,23 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   Building either pass makes the gate go red, in the same change that makes the
   coverage list wrong. Do not "fix" that by deleting the assertion; extend the gate to
   perturb the row instead.
-- **An export draws annotation shapes and redactions; annotation _text_ is not wired
-  to it yet.** `Compositor.render` takes annotations off the `ResolvedState` both
-  loops already compute, so blur, mask and the four shapes reach an export with no
-  export-side wiring at all. Glyphs are the exception: they need a `TextAtlas` on
-  `CompositorFrames`, `ExportRenderLoop` builds its frames without one, and a `text`
-  span with no atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`)
-  rather than refused — `PreviewLoop` reports that count through `onError` and the
-  export loop does not read it. Nothing authors an annotation today — the editor shell
-  has no annotation tools, and they are `loom-p15`'s — so hand the export window the
-  same atlas object before anything can.
+- **An export draws annotation shapes and redactions with no export-side wiring;
+  annotation _text_ needs one object handed across, and half of that is now in place.**
+  `Compositor.render` takes annotations off the `ResolvedState` both loops already
+  compute, so blur, mask and the four shapes reach an export for free. Glyphs are the
+  exception: they need a `TextAtlas` on `CompositorFrames`, and a `text` span with no
+  atlas is skipped and counted (`AnnotationPass.textSpansWithoutAtlas`) rather than
+  refused — `PreviewLoop` reports that count through `onError` and the export loop does
+  not read it. **`ExportRenderLoop` now takes a `textAtlas` option** — the seam
+  `PreviewLoopOptions.textAtlas`'s docstring always assumed and nothing could satisfy —
+  and phase 11's golden gate hands both paths the same object, so §4.5's per-pixel zero
+  now covers glyphs. **What is still missing is the export _window_ building one**:
+  `apps/renderer/src/export/main.ts` rasterises nothing, so a real export job still
+  passes no atlas. Nothing authors an annotation today — the editor shell has no
+  annotation tools, and they are `loom-p15`'s — so whatever ships the first one has to
+  give `ExportSession`'s window the preview's atlas and pass it through that option.
+  `the-export-path-draws-text-from-no-atlas` in `npm run verify:mutation` guards the
+  half that exists.
 
 ## Carried forward: four closed, six still open, one from phase 2 and one from the event logs
 

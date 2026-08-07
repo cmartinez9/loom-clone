@@ -1,7 +1,9 @@
 /**
  * The export loop's scheduling rules, without a GPU.
  *
- * The *pixels* are phase 8's gate (`test/phase8-gate.test.ts`, in a real renderer).
+ * The *pixels* are the two golden gates', both in a real renderer and both driving
+ * this class's `renderAt`: `test/phase8-gate.test.ts` over a decoded VFR source, and
+ * `test/phase11-golden.test.ts` over one painted frame with annotations on it.
  * What is checkable here is the half §4.5 calls scheduling, and it is the half where
  * an export differs from a preview on purpose:
  *
