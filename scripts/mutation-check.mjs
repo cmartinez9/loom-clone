@@ -184,8 +184,15 @@ const EDITOR_GATE = 'test/editor-gate.test.ts';
  *
  * Not withholdable. It composites and it encodes, so it uses a GPU process like the
  * two golden gates — but it judges *what changed between two of its own readings*
- * rather than an absolute number about the host, and a run that loses its context
- * produces no report at all rather than an empty one.
+ * rather than an absolute number about the host, so a lost context costs it the
+ * readings themselves and it fails on their absence.
+ *
+ * The second clause of that used to read "a run that loses its context produces no
+ * report at all", and two CI runs disproved it: the report arrives saying `ok: false`
+ * with the readings taken before the loss in it. The conclusion is unchanged — a gate
+ * that fails on missing readings is one that answers — and the remedy for the loss is
+ * `AGENTS.md` § The editor's controls, which took the editor's preview loop off the
+ * GPU for the length of an export rather than teaching this gate to withhold.
  */
 const P15_GATE = 'test/phase15-gate.test.ts';
 const EDITOR_TRIM = 'apps/renderer/test/editor-trim.test.ts';
