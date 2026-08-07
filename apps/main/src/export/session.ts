@@ -569,8 +569,23 @@ export class ExportSession {
    * One predicate rather than the condition written out at each of {@link
    * ExportSession.start}'s two asks: a property split across two copies of a condition
    * has no single place to be right, and these two have to agree about what "the sweep
-   * has begun" means. What the *call sites* answer for is different at each — which
-   * sequence each one closes — so they stay separately breakable.
+   * has begun" means.
+   *
+   * **Only the late ask is proven, and the two are not equally covered.** Deleting the
+   * late call site is `a-job-parked-when-the-sweep-began-is-still-admitted` and
+   * `apps/main/test/export-session.test.ts` goes red on it. Deleting the **entry** call
+   * site alone leaves that suite green, because the asks overlap rather than partition:
+   * a press arriving after the sweep began runs on past the entry, `#screenIndex`
+   * answers `null` rather than throwing for a media-less bundle, `compile` succeeds over
+   * the seeded `edit.json`, and the late ask then refuses with the same
+   * {@link ExportShuttingDownError} the test asserts on. What the entry ask nevertheless
+   * earns is not redundancy: it is taken **before `openProject`**, which is this file's
+   * own discipline for the sibling {@link ExportRecordingBusyError} — a refusal must not
+   * leave a bundle hold behind — so without it a press at quit time takes a bundle lock,
+   * does disk I/O and releases it again on its way to being refused. That property has
+   * nowhere to break today. Closing it is a test asserting a refused start took **no**
+   * bundle hold, plus a third registry entry keyed on the entry call site; recorded here
+   * rather than left silent, because an unproven claim is worse than a stated gap.
    */
   #refuseIfShuttingDown(id: RecordingId): void {
     if (this.#shuttingDown) throw new ExportShuttingDownError(id);
