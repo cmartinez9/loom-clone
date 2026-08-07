@@ -866,9 +866,11 @@ claims of this gate are effectively never judged on CI and are only meaningful o
 Mac** — where they pass, and where the numbers above were measured. The banner says it
 and so does this paragraph. The gate gets **one** launch and that is unchanged; more
 attempts against a host that cannot serve the allocation is the move this project keeps
-refusing. Three `verify:mutation` entries are guarded solely by claims this gate
-withholds and are therefore unproven on such a host; they are named at
-`WITHHOLDABLE_GUARDS`, and the fix for each is a second guard that cannot withhold.
+refusing. Three `verify:mutation` entries were guarded solely by claims this gate
+withholds; **all three now carry a second guard that cannot withhold**, which is the
+remedy `WITHHOLDABLE_GUARDS` prescribes. They stay printed under the exposure warning
+because it is file-keyed — an over-report in the conservative direction, and
+`P15_GATE`'s docblock says so.
 
 **`the-zoom-panel-does-not-follow-the-playhead` was a fourth, and what it cost is worth
 inheriting: `runTests` can only read a _file_, and this gate withholds per _claim_.** So
@@ -886,6 +888,27 @@ has nothing to say can see it; `BETWEEN_SEC` carries the derivation. The richer 
 still taken after export A, and is still withheld. The entry stays printed under the
 exposure warning because that warning is file-keyed: an over-report, in the conservative
 direction, and `P15_GATE`'s docblock says so.
+
+**The other three were closed the same way the fourth's richer half still needs**, and
+the module is worth knowing about on its own: `apps/renderer/src/editor/gestures.ts`
+holds the four decisions those entries break — what a two-phase gesture does with `null`
+ops, what a slider's `input`/`change`/`blur` mean, whether a repaint rebuilds or writes,
+and whether the playhead moved — lifted out of DOM handlers and a `requestAnimationFrame`
+closure into pure functions. `apps/renderer/test/editor-gestures.test.ts` judges them on
+any host with no GPU, no window and no Electron. **None of the four ever needed a frame
+composited**, which is the whole argument for the seam: a panel that does not follow the
+playhead, a slider that commits on every step, an inspector that rebuilds under its own
+thumb and a gesture that strands its preview are all decidable from numbers. The gate
+keeps its entry beside the unit test on each, because it proves the **wiring** — a real
+thumb on a real slider — that no pure test can.
+
+One thing that took a second pass and should be inherited: `Inspector.render` and
+`paintZoom` carried **independent copies** of the mid-gesture condition. Breaking one
+left the other covering for it, so `the-inspector-rebuilds-under-its-own-thumb` survived
+the gate while pointing at a line that genuinely mattered. `panelIsHeld` is now the one
+predicate both ask. A property split across two copies of a condition is a property with
+no single place to break, which is the same thing `regionCenter` and the seam-S4 adapter
+each cost a round to learn.
 
 Two consequences worth expecting. Phase 14's gate now asserts
 `['Screen', 'Zoom', 'Notes']` — the annotation lane is an _effect_ lane like Zoom, owned

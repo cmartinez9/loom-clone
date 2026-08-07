@@ -62,6 +62,7 @@ import { openVideoTrack } from '../media/track-reader.ts';
 import { TimelineUi } from './timeline.ts';
 import { clampZoom, zoomAbout, type TimelineView } from './timeline-geometry.ts';
 import { readTrim, trimOp, type Trim } from './trim.ts';
+import { applyGesture, playheadMoved } from './gestures.ts';
 import {
   annotationsOf,
   annotationAt,
@@ -717,12 +718,18 @@ async function start(): Promise<void> {
    * nothing costs nothing and repeated ones cost nothing after the first.
    */
   function edit(ops: readonly EditOp[] | null, phase: 'move' | 'end', label: string): void {
-    if (ops === null) {
-      project.cancelPreview();
-      return;
-    }
-    if (phase === 'move') provisional(ops);
-    else project.commit(ops, label);
+    // The decision is `gestures.ts`'s `applyGesture`; the three verbs are this
+    // window's. It was inline until a lost GPU context showed that the only thing
+    // guarding it was a gate that composites — see that module's header.
+    applyGesture(ops, phase, label, {
+      preview: provisional,
+      commit: (batch, name) => {
+        project.commit(batch, name);
+      },
+      cancel: () => {
+        project.cancelPreview();
+      },
+    });
   }
 
   /**
@@ -1045,7 +1052,7 @@ async function start(): Promise<void> {
     // withheld on exactly the path a person takes to reach it: scrub to the moment you
     // want to change, then take control. A capability that is not offered where it is
     // wanted reads as one that does not exist.
-    if (sourceSec !== paintedPanelSourceSec) {
+    if (playheadMoved(paintedPanelSourceSec, sourceSec)) {
       paintedPanelSourceSec = sourceSec;
       const rebuild = inspector.paintZoom({
         regionIndex: zoomRegionIndexAt(sourceSec),

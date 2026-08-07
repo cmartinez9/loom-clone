@@ -160,12 +160,20 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
  * The consequence for this registry: a mutation whose only guard is this gate and whose
  * property lives past the first export is **unproven** on a host that loses the
  * context, exactly as {@link WITHHOLDABLE_GUARDS} describes for phases 6 and 8 — so this
- * gate is listed there too. **Three** entries are in that position today, every one of
- * them a control whose reading is taken after the first export:
- * `a-gesture-that-changes-nothing-strands-its-preview`,
- * `the-amount-slider-commits-on-every-step` and
- * `the-inspector-rebuilds-under-its-own-thumb`. The fix for each is a second guard that
- * cannot withhold — never a retry, and never a widening of the predicate.
+ * gate is listed there too. Three entries were in that position — every one of them a
+ * control whose reading is taken after the first export — and **all three now carry a
+ * second guard that cannot withhold**: {@link EDITOR_GESTURES}, over the pure decisions
+ * in `apps/renderer/src/editor/gestures.ts`. That is the fix this warning prescribes,
+ * and it is never a retry and never a widening of the predicate. They remain printed
+ * below because the warning is file-keyed and this gate withholds per *claim* — an
+ * over-report in the conservative direction, which is the right way for a warning about
+ * unproven coverage to be wrong.
+ *
+ * Keep listing this gate **beside** the pure guard rather than instead of it: it proves
+ * the wiring — a real thumb on a real slider, a real pointer on a real lane — that no
+ * unit test can. And when adding a phase-15 entry, prefer a property decidable without
+ * an export; if one genuinely is not, say so at the entry rather than listing a guard
+ * that may never run.
  *
  * `the-zoom-panel-does-not-follow-the-playhead` was the fourth and is **the worked
  * example of that fix**, because CI run 31148316397 is what the position costs: the
@@ -190,6 +198,16 @@ const GOLDEN_VERDICT = 'test/golden-verdict.test.ts';
 const P15_GATE = 'test/phase15-gate.test.ts';
 /** The fence around that withhold: every bad-run shape that must still be judged. */
 const P15_VERDICT = 'test/phase15-verdict.test.ts';
+/**
+ * The four editor-control decisions a GPU can take away, as a guard that cannot.
+ *
+ * Every one of them was guarded only by {@link P15_GATE} until CI run 31148316397
+ * showed what that costs: a per-claim withhold is not a whole-file one, so `runTests`
+ * scored a mutation nothing had judged as SURVIVED and reported an unmeasured hole.
+ * `apps/renderer/src/editor/gestures.ts` is the seam and this is its test; the gate
+ * keeps its own entry on each, because it proves the wiring these cannot.
+ */
+const EDITOR_GESTURES = 'apps/renderer/test/editor-gestures.test.ts';
 
 /**
  * Guards that can come back with **no verdict** rather than a pass or a fail.
@@ -1979,10 +1997,10 @@ export const MUTATIONS = [
       '   Only a gesture that *ends where it started* reaches the branch, which is why ' +
       'the phase-15 gate drives one: a slider taken away and brought back, with the ' +
       'editor then asked what it is showing against what it committed.',
-    file: 'apps/renderer/src/editor/main.ts',
-    find: '    if (ops === null) {\n      project.cancelPreview();\n      return;\n    }',
-    replace: '    if (ops === null) {\n      return;\n    }',
-    mustFail: [P15_GATE],
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  if (ops === null) {\n    io.cancel();\n    return;\n  }',
+    replace: '  if (ops === null) {\n    return;\n  }',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
   },
   {
     name: 'a-keyframe-drag-leaves-its-own-window',
@@ -2008,10 +2026,10 @@ export const MUTATIONS = [
       'the captain named himself ("Manual option too.", decision-editor-scope.md). ' +
       'It also recompiles on each one — it is `EditorProject.preview` that ' +
       "debounces on §3.6's 100 ms and `commit` that clears that debounce.",
-    file: 'apps/renderer/src/editor/inspector.ts',
-    find: "    spec.onChange(parsed, 'move');",
-    replace: "    spec.onChange(parsed, 'end');",
-    mustFail: [P15_GATE],
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: "    return { gesture: true, value: parsed, phase: 'move' };",
+    replace: "    return { gesture: true, value: parsed, phase: 'end' };",
+    mustFail: [EDITOR_GESTURES, P15_GATE],
   },
   {
     name: 'the-inspector-rebuilds-under-its-own-thumb',
@@ -2022,10 +2040,10 @@ export const MUTATIONS = [
       'cheaper check still reports the right number because the last value it was ' +
       'given did land. Only a gesture of more than one event can see it, which is ' +
       'why the gate drags the slider rather than dispatching one `input`.',
-    file: 'apps/renderer/src/editor/inspector.ts',
-    find: '    if (this.#gesture !== null) return;',
-    replace: "    if (this.#gesture === 'no-field-is-called-this') return;",
-    mustFail: [P15_GATE],
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  return gesture !== null;',
+    replace: '  return false;',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
   },
   {
     name: 'the-zoom-panel-does-not-follow-the-playhead',
@@ -2044,10 +2062,10 @@ export const MUTATIONS = [
       '   The reading that catches it on **every** host is the one taken before the ' +
       'first export, between the two generated segments: this claim needs no manual ' +
       'region, so it is judged where a lost export instrument cannot take it away.',
-    file: 'apps/renderer/src/editor/main.ts',
-    find: '    if (sourceSec !== paintedPanelSourceSec) {',
-    replace: '    if (sourceSec === paintedPanelSourceSec) {',
-    mustFail: [P15_GATE],
+    file: 'apps/renderer/src/editor/gestures.ts',
+    find: '  return sourceSec !== paintedSourceSec;',
+    replace: '  return sourceSec === paintedSourceSec;',
+    mustFail: [EDITOR_GESTURES, P15_GATE],
   },
   {
     name: 'a-keyframe-drag-lands-on-its-neighbour',

@@ -64,6 +64,13 @@
 
 import { formatTimecodeCentis, icon } from '@loom/design';
 import type { Seconds, Track, Vec2 } from '@loom/format';
+import {
+  panelIsHeld,
+  sliderStep,
+  zoomPaintDecision,
+  type ControlPhase,
+  type ZoomReadout,
+} from './gestures.ts';
 import type { AnnotationKind } from '@loom/edl';
 import { ANNOTATION_TOOLS, type AnnotationView } from './annotate.ts';
 import { describeStaleness, type GeneratorState, type RunnableGenerator } from './generators.ts';
@@ -107,7 +114,7 @@ export interface InspectorState {
  * slider drag and a handle drag are the same kind of thing and a second vocabulary for
  * it would be a second interaction model.
  */
-export type ControlPhase = 'move' | 'end';
+export type { ControlPhase, ZoomReadout } from './gestures.ts';
 
 /**
  * What the standing *Zoom* panel reads on the playhead's own frame.
@@ -119,16 +126,6 @@ export type ControlPhase = 'move' | 'end';
  * overwrites it in place — a tuple here would either be that object's or a fresh
  * allocation on a path that must not have one.
  */
-export interface ZoomReadout {
-  /** The manual region covering the playhead, by `ZoomRegion.index`, or `-1`. */
-  regionIndex: number;
-  /** Whether a generated zoom track covers the playhead — what *override* acts on. */
-  generated: boolean;
-  amount: number;
-  centerX: number;
-  centerY: number;
-}
-
 /** Everything the panels do. One callback per edit; none of them applies one itself. */
 export interface InspectorCallbacks {
   onPlaceZoom: () => void;
@@ -175,7 +172,7 @@ export class Inspector {
   #zoomCenterValue: HTMLElement | null = null;
   /** The shape {@link Inspector.#renderZoom} last built for. `NaN` until it has. */
   #zoomRegionIndex = Number.NaN;
-  #zoomGenerated: boolean | null = null;
+  #zoomGenerated = false;
   /** The numbers those two `<dd>`s last said, so that only changes are written. */
   #zoomAmount = Number.NaN;
   #zoomCenterX = Number.NaN;
@@ -201,23 +198,33 @@ export class Inspector {
    * a second, is worse than being one gesture behind.
    */
   paintZoom(readout: ZoomReadout): boolean {
-    if (this.#gesture !== null) return false;
-    if (readout.regionIndex !== this.#zoomRegionIndex || readout.generated !== this.#zoomGenerated)
-      return true;
-    if (
-      readout.amount !== this.#zoomAmount ||
-      readout.centerX !== this.#zoomCenterX ||
-      readout.centerY !== this.#zoomCenterY
-    ) {
-      this.#zoomAmount = readout.amount;
-      this.#zoomCenterX = readout.centerX;
-      this.#zoomCenterY = readout.centerY;
-      if (this.#zoomAmountValue !== null)
-        this.#zoomAmountValue.textContent = amountText(readout.amount);
-      if (this.#zoomCenterValue !== null)
-        this.#zoomCenterValue.textContent = centreText(readout.centerX, readout.centerY);
+    // The decision is `gestures.ts`'s and the doing is here. It was inline until a
+    // lost GPU context showed that the only thing guarding it was a gate that
+    // composites — see that module's header.
+    const previous: ZoomReadout | null = Number.isNaN(this.#zoomAmount)
+      ? null
+      : {
+          regionIndex: this.#zoomRegionIndex,
+          generated: this.#zoomGenerated,
+          amount: this.#zoomAmount,
+          centerX: this.#zoomCenterX,
+          centerY: this.#zoomCenterY,
+        };
+    switch (zoomPaintDecision(previous, readout, panelIsHeld(this.#gesture))) {
+      case 'rebuild':
+        return true;
+      case 'nothing':
+        return false;
+      case 'write':
+        this.#zoomAmount = readout.amount;
+        this.#zoomCenterX = readout.centerX;
+        this.#zoomCenterY = readout.centerY;
+        if (this.#zoomAmountValue !== null)
+          this.#zoomAmountValue.textContent = amountText(readout.amount);
+        if (this.#zoomCenterValue !== null)
+          this.#zoomCenterValue.textContent = centreText(readout.centerX, readout.centerY);
+        return false;
     }
-    return false;
   }
 
   render(state: InspectorState): void {
@@ -226,7 +233,7 @@ export class Inspector {
     // hold of — the drag stops after one step, which is the control not working
     // rather than the control needing polish. The provisional document a drag shows
     // reaches the picture through `PreviewHost`; this panel catches up on release.
-    if (this.#gesture !== null) return;
+    if (panelIsHeld(this.#gesture)) return;
 
     // What has focus, and where the caret is, so a rebuild does not eat a number
     // somebody is halfway through typing. Keyed by the field's `name`, which is
@@ -914,27 +921,24 @@ function range(spec: {
   readout.textContent = spec.format(spec.value);
   // Written here rather than by a rebuild, which is what lets the panel stand still
   // for the length of the gesture without anything a person is looking at going stale.
+  // The three handlers are one decision each, and the decision is `gestures.ts`'s:
+  // `input` is a *move* and `change` is an *end*, the guard is armed before the value
+  // is reported and disarmed before the commit, and `blur` is the backstop for a
+  // gesture the window interrupted. That module's header says why it is not inline.
+  const step = (event: 'input' | 'change' | 'blur'): void => {
+    const action = sliderStep(event, control.value);
+    if (action.gesture !== null) spec.onGesture(action.gesture);
+    if (action.value !== null) readout.textContent = spec.format(action.value);
+    if (action.value !== null && action.phase !== null) spec.onChange(action.value, action.phase);
+  };
   control.addEventListener('input', () => {
-    const parsed = Number.parseFloat(control.value);
-    if (!Number.isFinite(parsed)) return;
-    readout.textContent = spec.format(parsed);
-    // Armed **before** the callback, because the callback is what re-renders.
-    spec.onGesture(true);
-    spec.onChange(parsed, 'move');
+    step('input');
   });
   control.addEventListener('change', () => {
-    const parsed = Number.parseFloat(control.value);
-    // Disarmed **before** the commit, so the rebuild it causes actually happens: the
-    // panel has to come back in step with the document the gesture produced.
-    spec.onGesture(false);
-    if (!Number.isFinite(parsed)) return;
-    readout.textContent = spec.format(parsed);
-    spec.onChange(parsed, 'end');
+    step('change');
   });
-  // A backstop rather than the mechanism: a gesture interrupted by the window going
-  // away never gets its `change`, and a guard left armed would freeze this panel.
   control.addEventListener('blur', () => {
-    spec.onGesture(false);
+    step('blur');
   });
   wrapper.append(control, readout);
   return field(spec.label, wrapper);
