@@ -2340,7 +2340,7 @@ ONE_MINUS_SRC_ALPHA, ZERO, ONE)` is the fix and the golden gate is what found it
   **525.03 px**. **A 17% difference** — that is the whole reason `glyphs.ts` exists, and
   without it an export's labels are set in the wrong typeface, silently, on a page that
   renders no text of its own. **The provenance is a hand measurement, not a test**: it was
-  taken by the phase-15 pipeline's own test step on **2026-08-07** against the real export
+  taken by the phase-15 pipeline's own test step on **2026-08-06** against the real export
   page, the way § The live drawing overlay's five readings came from an unpackaged dev run
   rather than from the shipped check. **Where it is discharged**: a dedicated Electron
   check over the export window's glyph path, **filed as its own task with an owner** —
@@ -2675,3 +2675,5 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file or command instead.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve this bar for all agents and keep entries concise.
+Every date here is **local**, never UTC — CI log timestamps are UTC and are the usual
+source of a date written a day ahead of the work it records.
