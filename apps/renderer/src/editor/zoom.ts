@@ -910,20 +910,25 @@ function patchRegion(
   const tail = segmentSettleTailSec(DEFAULT_SPRING);
   const nextWindow: [number, number] = [wanted.startSec, wanted.endSec + tail];
 
-  const amount = withExtent(amountKeys, amountRoles, wanted, nextWindow);
+  const amount = withExtent(amountKeys, amountRoles, current, wanted, nextWindow);
   // The hold, and only the hold: the two ramp ends are what returns the picture to
   // identity, so their values are not what "the amount" names. An asymmetric hold —
   // two interior keys a person gave different values — is flattened to the one the
   // slider names, and that is the edit rather than a side effect of it: the hold *is*
   // what "the amount" means, so there is no way to change it that leaves the hold's
   // values alone. It is the one write here a hand-set value does not survive.
+  //
+  // KNOWN, and owned by the follow-up task rather than by this file today: that
+  // argument covers the AMOUNT verb, and this loop runs on all five, because each
+  // sends the whole region through `asInput(current)`. So editing the centre or the
+  // start of a region with an asymmetric hold also flattens it.
   for (const at of amountRoles.interior) {
     const key = amount[at];
     if (key === undefined) continue;
     amount[at] = { ...key, v: wanted.amount };
   }
 
-  const center = withExtent(centerKeys, centerRoles, wanted, nextWindow);
+  const center = withExtent(centerKeys, centerRoles, current, wanted, nextWindow);
   const framing = regionCentreKeyIndex(centerKeys, centerRoles, current);
   const framingKey = framing < 0 ? undefined : center[framing];
   if (framingKey !== undefined) {
@@ -952,24 +957,28 @@ function patchRegion(
  * tail**, which is a place a person can legitimately want it. Writing `wanted.endSec`
  * over it returned it to the region's end on the next Amount-slider nudge, silently.
  *
- * So the carrier keeps its time exactly when both halves hold, which is
- * {@link regionKeyRoles}'s own qualification asked of the extent the region is about to
- * have rather than a rule invented for the tail:
+ * So the carrier keeps its time exactly when both halves hold:
  *
- *  1. it would **still** carry that end afterwards ({@link carriesStart} /
- *     {@link carriesEnd} against `wanted`) — otherwise leaving it silently demotes it to
- *     an interior key, where {@link regionCentreKeyIndex} can then read it as the user's
- *     framing and answer identity;
+ *  1. the user put it there — it lies in the region's **settle-tail slack**
+ *     ({@link inSettleSlack}), the one part of the window that is not between the
+ *     region's own extents and therefore the only place a key can sit *past* an extent
+ *     and still be reached. Asked of the extent the region **currently has**, not the
+ *     one it is about to get: "would it be at or past the new end" is trivially true of
+ *     any shrink, which turned every `Ends` edit smaller than the tail into a silent
+ *     no-op that still spent a revision;
  *  2. it still lies inside the region's new window — otherwise it belongs to no region
  *     at all, which is the corruption {@link moveKeyOps} describes.
  *
- * The two halves are what make the start and end sides differ without either being a
- * special case: a window is `[startSec, endSec + tail]`, so there is slack past the end
- * a key may sit in and none before the start.
+ * The slack is what makes the start and end sides differ without either being a special
+ * case, and without the two asking different questions: a window is
+ * `[startSec, endSec + tail]`, so there is slack past the end and **none** before the
+ * start — a start carrier is therefore never in it and always follows the edit, which is
+ * what an unconditional write already did there.
  */
 function withExtent(
   keys: readonly Keyframe[],
   roles: RegionKeyRoles,
+  current: RegionExtent,
   wanted: ZoomRegionInput,
   window: readonly [number, number],
 ): Keyframe[] {
@@ -978,17 +987,30 @@ function withExtent(
   if (startKey !== undefined) {
     next[roles.startAt] = {
       ...startKey,
-      t: carriedTime(startKey.t, carriesStart(startKey.t, wanted), wanted.startSec, window),
+      t: carriedTime(startKey.t, inSettleSlack(startKey.t, current), wanted.startSec, window),
     };
   }
   const endKey = roles.endAt < 0 ? undefined : next[roles.endAt];
   if (endKey !== undefined) {
     next[roles.endAt] = {
       ...endKey,
-      t: carriedTime(endKey.t, carriesEnd(endKey.t, wanted), wanted.endSec, window),
+      t: carriedTime(endKey.t, inSettleSlack(endKey.t, current), wanted.endSec, window),
     };
   }
   return next;
+}
+
+/**
+ * Is this key in the region's settle-tail slack — past the extent it carries, and so
+ * somewhere only a person could have put it?
+ *
+ * The region occupies `[startSec, endSec]` and its window runs `segmentSettleTailSec`
+ * further, so `(endSec, endSec + tail]` is the only stretch of the window that is not
+ * between the extents. A key at either extent is where {@link buildManualZoomTrack}
+ * put it and follows an edit; a key beyond one was dragged there.
+ */
+function inSettleSlack(t: Seconds, extent: RegionExtent): boolean {
+  return t > extent.endSec + WINDOW_EPS;
 }
 
 /** Where a carrier lands: where the user left it, or the extent it carries. */

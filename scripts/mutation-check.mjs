@@ -2055,6 +2055,30 @@ export const MUTATIONS = [
     mustFail: [EDITOR_ZOOM],
   },
   {
+    name: 'a-sub-tail-end-edit-is-a-silent-no-op',
+    breaks:
+      'the other side of that same conditional write, and it is the one a matrix of ' +
+      'one magnitude cannot see. `inSettleSlack` asks whether a carrier lies past the ' +
+      'extent the region **currently** has — the settle-tail slack, the only stretch ' +
+      'of a window that is not between the extents, so the only place a person could ' +
+      'have put a key past an end. Asking instead whether it would be at or past the ' +
+      '**new** end is trivially true of any shrink, so the ordinary ramp-out key — the ' +
+      'one sitting exactly where `buildManualZoomTrack` put it — stays put whenever the ' +
+      'region is shortened by less than `segmentSettleTailSec(DEFAULT_SPRING)`.\n' +
+      '   What the user sees: type a value into the inspector’s `Ends` field, the keys ' +
+      'do not move, `zoomRegionsOf` re-reads the old end off the amount channel, and ' +
+      'the field reverts — while the window alone shrank, so the edit still spent a ' +
+      'revision and an undo step. Shrinks larger than the tail work, so the control ' +
+      'looks functional and fails on the ordinary nudge.\n' +
+      '   The guard is the matrix’s `END shrinks by less than the settle tail` case, ' +
+      'added for this: every other END edit there moves by seconds, well past the tail, ' +
+      'and passes under this mutation.',
+    file: 'apps/renderer/src/editor/zoom.ts',
+    find: '      t: carriedTime(endKey.t, inSettleSlack(endKey.t, current), wanted.endSec, window),',
+    replace: '      t: carriedTime(endKey.t, carriesEnd(endKey.t, wanted), wanted.endSec, window),',
+    mustFail: [EDITOR_ZOOM],
+  },
+  {
     name: 'a-gesture-that-changes-nothing-strands-its-preview',
     breaks:
       'the shared end of a two-phase gesture. Every op builder answers `null` for ' +

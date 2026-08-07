@@ -837,7 +837,7 @@ single `input` passes over a slider that is destroyed by its own first event, be
 the last value it was given still lands. It also drives one gesture that **ends where
 it started**, which is the only shape that reaches the "this changes nothing" branch
 every two-phase callback has, and asks the editor what it is showing against what it
-committed. Twenty entries in `npm run verify:mutation`
+committed. Twenty-one entries in `npm run verify:mutation`
 break the production source on disk and each names what must notice it; the ones worth
 knowing are the three whose guard is deliberately a unit test and **not** this gate.
 `an-annotation-is-placed-in-output-space` was tried here and measured _surviving_ (the
@@ -1146,10 +1146,21 @@ the same way rather than widening anything.
   `segmentSettleTailSec` past the region's end) must not turn every control into a
   silent no-op. And `buildManualZoomTrack` is reachable from `placeZoomOps` alone;
   a second region is _inserted_ beside the first's keys, not rebuilt with them.
-  Three registry entries hold the promise, one per half of it: one breaks a hand-set
-  **value**, one a hand-dragged **time**, and one a carrier the user moved into the
-  **settle tail** — because a single entry breaking more than one would leave whichever
-  half its guard noticed second unproven.
+  Four registry entries hold the promise, one per half of it: one breaks a hand-set
+  **value**, one a hand-dragged **time**, one a carrier the user moved into the **settle
+  tail**, and one the ordinary carrier that must still follow the edit — because a
+  single entry breaking more than one would leave whichever half its guard noticed
+  second unproven.
+  **The inheritable lesson is about the test, not the condition: a region-level edit
+  _smaller than the settle tail_ is the size the matrix could not see.** Every verb in
+  `editor-zoom.test.ts`'s interior × boundary × five-verb grid moved by one magnitude and
+  mostly one direction — END only ever by seconds — so the round that made the carrier
+  write conditional turned every `Ends` shrink under `segmentSettleTailSec` into a silent
+  no-op that still spent a revision, and the grid passed. A matrix wide in verbs and one
+  deep in magnitude is thinner than it looks; the sub-tail case is now in it and derives
+  the tail from `DEFAULT_SPRING` so a spring change cannot make it vacuous. The other
+  four verbs are still single-magnitude and that is recorded at the site rather than
+  fixed here.
 - **The editor reads its picture through `media/track-reader.ts`, not through anything
   of its own.** That is seam S4's bridge — `SourceReader` knows one part in
   **part-relative** time while `ResolvedState.sourceTime` spans the recording clock —

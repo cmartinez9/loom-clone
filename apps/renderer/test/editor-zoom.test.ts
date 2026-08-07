@@ -322,6 +322,13 @@ describe('a region-level edit keeps the keys the user placed', () => {
   const RAMP_IN_DRAGGED_TO = 10.5;
   /** What the boundary fixture gives the ramp-out key, so its value is the user's too. */
   const RAMP_OUT_VALUE = 1.2;
+  /**
+   * An `Ends` edit that shortens both fixtures' region by **less than the settle tail**.
+   *
+   * Derived from the spring rather than written down, so a change to `DEFAULT_SPRING`
+   * cannot silently move this back outside the tail and make the case vacuous again.
+   */
+  const SUB_TAIL_END = 18 - segmentSettleTailSec(DEFAULT_SPRING) / 2;
 
   function amountKeys(document_: EditDocument): KeyView[] {
     return zoomKeysOf(document_).filter((key) => key.channel === 'amount');
@@ -465,6 +472,27 @@ describe('a region-level edit keeps the keys the user placed', () => {
       },
     },
     {
+      // The magnitude the rest of this matrix cannot express. Every other verb here
+      // moves by one size and mostly in one direction — AMOUNT only 2 → 3, CENTRE only
+      // the one pair, START only 1 s earlier, END only 2 s later, REMOVE only the other
+      // region — and a shrink *smaller than the settle tail* is exactly what walked
+      // past it: `carriedTime` asked whether the ramp-out key would be at or past the
+      // **new** end, which is true of any shrink, so the keys stayed, `zoomRegionsOf`
+      // re-read the old `endSec`, and the Ends field reverted in front of the user
+      // while still spending a revision. Recorded rather than fixed: widening the other
+      // four is a later round's, and this comment is so the thinness is inherited.
+      label: 'END shrinks by less than the settle tail',
+      ops: (document_) => updateZoomOps(document_, 0, { endSec: SUB_TAIL_END }, DURATION),
+      endSec: SUB_TAIL_END,
+      regions: 2,
+      expectRegion: (region) => {
+        expect(region?.windowEndSec).toBeCloseTo(
+          SUB_TAIL_END + segmentSettleTailSec(DEFAULT_SPRING),
+          6,
+        );
+      },
+    },
+    {
       label: 'REMOVE takes the other region out',
       ops: (document_) => removeZoomOps(document_, 1),
       regions: 1,
@@ -475,6 +503,16 @@ describe('a region-level edit keeps the keys the user placed', () => {
       },
     },
   ];
+
+  it('the sub-tail END case really is smaller than the settle tail', () => {
+    // Without this the case degrades into another 2 s shrink the moment the spring
+    // changes, and the matrix goes back to being blind to the size that broke.
+    const shrink = 18 - SUB_TAIL_END;
+    expect(shrink, 'the sub-tail END case stopped shrinking the region at all').toBeGreaterThan(0);
+    expect(shrink, 'the sub-tail END case is no longer inside the settle tail').toBeLessThan(
+      segmentSettleTailSec(DEFAULT_SPRING),
+    );
+  });
 
   for (const fixture of FIXTURES) {
     describe(fixture.label, () => {
