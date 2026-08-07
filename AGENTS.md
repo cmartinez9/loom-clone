@@ -1739,9 +1739,11 @@ same pass is not a check that harness runs.
   that can withhold is unproven rather than caught whenever that host's instrument fails,
   and no single run looks wrong when that repeats — so it is printed on **every** run
   straight off the registry, deterministic and identical on every host, rather than
-  counted over time. One mutation is on that list today
-  (`export-writer-registered-after-it-opens`, guarded only by the phase-8 gate) and the
-  fix for it is a second guard that cannot withhold, never a retry.
+  counted over time. The set gained `test/phase15-gate.test.ts` when that gate's export
+  claims became withholdable, so **five** mutations are on the list today —
+  `export-writer-registered-after-it-opens` behind the phase-8 gate, and the four the
+  phase-15 gate alone guards, which the registry names beside the set — and the fix for
+  each is a second guard that cannot withhold, never a retry.
 - **Playability is checked with `/usr/bin/avconvert`**, which is AVFoundation and
   ships with macOS, so the check runs on a CI runner with no ffmpeg. ffprobe is used
   additionally when the machine happens to have it.
