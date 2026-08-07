@@ -20,13 +20,13 @@
  *
  * ## The three readings
  *
- * 1. **A window a person could see.** `BrowserWindow.isVisible()` is main's opinion;
- *    `document.visibilityState` is the renderer's, and it is the one that separates
- *    "constructed" from "on screen" — a role is created `show: false` and revealed
- *    on `ready-to-show`, so a `ready-to-show` that never fires leaves a window main
- *    is perfectly happy about and nobody can see. The control is a window this
- *    harness creates `show: false` on the same page: it must read `hidden`, or
- *    `visible` is not a measurement.
+ * 1. **A window a person could see.** `BrowserWindow.isVisible()` — a role is
+ *    created `show: false` and revealed on `ready-to-show`, so that is what a
+ *    `ready-to-show` which never fires, or a `reveal()` that is not reached, fails
+ *    on. The control is a window this harness creates `show: false` on the same
+ *    page: it must read `false`, or `true` is not a measurement. The renderer's own
+ *    `document.visibilityState` was reached for first and that same control retired
+ *    it — see `WindowReading.visibilityState` in `./report.ts`.
  * 2. **IPC that answers, from inside the page.** Every call the library makes at
  *    load, made through the real preload bridge. `library.delete` with a nonsense id
  *    is beside them and must **reject**, so a row of `ok: true` is evidence rather
@@ -131,11 +131,12 @@ function wait(ms: number): Promise<void> {
 /**
  * The reading taken inside the page.
  *
- * `visibilityState` is the load-bearing one. The heading is the other half: a window
- * that is on screen and painted nothing is a window whose renderer bundle did not
- * load over `loom://`, which is the failure a "the window exists" assertion cannot
- * see. Both pages carry an `<h1>`, so one script serves the setup window and the
- * library.
+ * The heading is the load-bearing one: a window that is on screen and painted
+ * nothing is a window whose renderer bundle did not load over `loom://`, which is
+ * the failure a "the window exists" assertion cannot see. Both pages carry an
+ * `<h1>`, so one script serves the setup window and the library. `visibilityState`
+ * rides along recorded rather than asserted — `WindowReading.visibilityState` in
+ * `./report.ts` says why it is not an instrument.
  */
 const PAGE_SCRIPT = `(() => {
   const heading = document.querySelector('h1');
@@ -252,8 +253,10 @@ async function awaitFirstWindow(deadlineMs: number): Promise<BrowserWindow> {
  * The control for the visibility instrument.
  *
  * Same page, same preload, same protocol — created `show: false` and never revealed,
- * which is the state a window whose `ready-to-show` never fired is left in. It has
- * to read `hidden`, or `visible` above is a constant rather than a measurement.
+ * which is the state a window whose `ready-to-show` never fired is left in. Its
+ * `isVisible` has to read `false`, or the subject's `true` above is a constant rather
+ * than a measurement — while its `visibilityState` reads `visible` anyway, which is
+ * the measurement that retired that second instrument.
  */
 async function readHiddenControl(subject: BrowserWindow): Promise<WindowReading> {
   const control = new BrowserWindow({

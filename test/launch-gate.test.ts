@@ -22,10 +22,12 @@
  *
  * 1. **A window a person could see**, in both branches of the launch path — the
  *    setup window on a first run and the library on every run after. The reading is
- *    `document.visibilityState` inside the page, because that is what separates a
- *    window that was constructed from one that was revealed, and the **control** is
- *    a window the harness creates `show: false` on the same page: it must read
- *    `hidden`, or `visible` is a constant rather than a measurement.
+ *    `BrowserWindow.isVisible()`, and the **control** is a window the harness creates
+ *    `show: false` on the same page: it must read `false`, or `true` is a constant
+ *    rather than a measurement. `document.visibilityState` was the obvious first
+ *    choice and that same control retired it — it reads `visible` for the unrevealed
+ *    window too — so it is recorded, and asserted on the control alone to pin the
+ *    finding. `WindowReading.visibilityState` in `test/launch/report.ts` owns it.
  * 2. **Its IPC answers**, called from inside the page through the real preload
  *    bridge — the four calls the library makes as it loads. Beside them,
  *    `library.delete` with a nonsense id must **reject**: a row of `ok: true` from a

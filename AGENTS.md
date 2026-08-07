@@ -1824,11 +1824,18 @@ refusal — `ExportShuttingDownError`, `RecorderShuttingDownError` — thrown be
 first `await`. **The export one is asked twice**, because four awaits stand between
 `start`'s entry and `#jobs`: a quit beginning in any of them would otherwise find the job
 absent from the snapshot and present in the map that is then cleared, and the second ask
-sits where the existing `catch` hands back both the bundle hold and the claim. **Nothing
-read-only is refused** — `library.list` and its neighbours must keep answering, because a
-live window with dead IPC is the defect this branch fixed — and an export already running
-is still swept exactly as before, which is the control each guard's test carries.
-`an-export-can-start-during-the-shutdown-sweep` is the mutation.
+sits where the existing `catch` hands back both the bundle hold and the claim. **Only the
+late ask is proven, and the two asks overlap rather than partition** — deleting the entry
+one alone leaves the suite green, because a press that runs past it is refused by the late
+one; what it earns instead is that a refusal at quit time takes no bundle hold, and that
+has nowhere to break today. `#refuseIfShuttingDown`'s docblock owns that gap and what
+would close it; do not restate it here. **Nothing read-only is refused** — `library.list`
+and its neighbours must keep answering, because a live window with dead IPC is the defect
+this branch fixed — and an export already running is still swept exactly as before, which
+is the control each guard's test carries.
+`an-export-can-start-during-the-shutdown-sweep` breaks the flag and
+`a-job-parked-when-the-sweep-began-is-still-admitted` the late ask, separately, because a
+single entry breaking both would leave whichever half its guard noticed second unproven.
 
 **A third thing was closed in the same pass because it is the same shape:
 `app.whenReady().then(main, onRejected)` does not catch a rejection from `main`** —

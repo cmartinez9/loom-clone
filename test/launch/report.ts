@@ -88,9 +88,10 @@ export interface LaunchReport {
    * The control for the visibility instrument: a window this harness creates with
    * `show: false`, loading the same page through the same preload.
    *
-   * Without it, `visibilityState === 'visible'` is a reading nobody has watched come
-   * back any other way — the same discipline `kill-mid-write.test.ts`'s naive writer
-   * and the content-protection control window exist for.
+   * Without it, `isVisible === true` is a reading nobody has watched come back any
+   * other way — the same discipline `kill-mid-write.test.ts`'s naive writer and the
+   * content-protection control window exist for. It is also what retired
+   * {@link WindowReading.visibilityState}.
    */
   hiddenControl: WindowReading | null;
   ipc: IpcReading[];

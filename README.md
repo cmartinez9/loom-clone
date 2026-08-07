@@ -244,9 +244,9 @@ which change the picture everywhere.
 `npm run verify:mutation` proves those gates are real by breaking the production source
 on disk — one property at a time, in the real file rather than a copy of it — and
 requiring a test to fail each time. `scripts/mutation-check.mjs`'s registry is what it
-breaks and where that list lives. The one property it deliberately leaves uncovered,
-because no test in `npm test` can catch it, is named in `AGENTS.md` rather than papered
-over.
+breaks and where that list lives. The properties it deliberately leaves uncovered,
+because no test in `npm test` can catch them, are named in `AGENTS.md` rather than
+papered over.
 
 ## Requirements
 
