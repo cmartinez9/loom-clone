@@ -47,7 +47,9 @@ his.
 ```bash
 npm run build       # esbuild main + preload, vite renderer, clang the sampler -> dist/
 npm start           # build, then run the app
-npm run dev         # rebuild on change and restart Electron
+npm run dev         # rebuild on change and restart Electron. Waits for a build the
+                    # app can be launched against, and says why it exits — see
+                    # § The launch and the quit
 npm run verify      # typecheck + lint + format:check + test  (what CI runs)
 npm test            # vitest
 npm run verify:mutation   # break the production source one way per entry in
@@ -1761,6 +1763,112 @@ one — moving them there would dilute what that list means. For the same reason
 `apps/main/src/verify/permissions-harness.ts`'s checks, and a surface waiting on the
 same pass is not a check that harness runs.
 
+## The launch and the quit — the paths no gate had ever run
+
+**The first time a person ran this app end to end, it opened nothing.** Every phase
+gate was green and twenty-four commits were merged. `main()`'s startup path had never
+been executed by a test, because every gate builds the piece it is about — a window
+role, a compositor, an export loop — and none of them ever ran
+`apps/main/src/index.ts`. **That gap is the finding**; the two defects under it are
+below, and `test/launch-gate.test.ts` plus `test/dev-loop.test.ts` are what close it.
+
+**Separate the initiating trigger, the masking condition and the visible symptom. The
+first two diagnoses of this conflated them and were wrong both times.**
+
+**The launch failure was `scripts/dev.mjs`, and the product was never at fault.** The
+trigger: the loop launched Electron as soon as the **`dist/` directory existed**, and
+on a cold tree (`npm ci` on a fresh clone — how a person meets this app) that
+directory is created by whichever build step runs first while vite and `clang` are
+still going. The tail of that build then wrote under an `fs.watch` armed moments
+earlier — measured at 50 ms after arming, on every run — which scheduled a restart.
+The mask: the restart cleared its own debounce timer **before** sending the
+`SIGTERM`, and the app's `exit` handler read that timer to tell "we killed it" from
+"it quit". `null` means both, so a restart it had itself just requested was
+classified as the app quitting: the build watcher was killed and the dev session
+called `process.exit(0)`. `SIGTERM` makes the code `0` and neither path printed a
+word. **No window, no error, exit status 0, about one second in.** Deterministic —
+`rm -rf dist && npm run dev` reproduced it every time. `scripts/dev-loop.mjs` is
+those two decisions, extracted and pure, because that is where both defects lived;
+`dev.mjs` is the wiring, and it now says something on every exit.
+
+**The `No handler registered for 'loom.library.list'` in the captain's log is a
+second, unrelated defect, in the _quit_.** `before-quit` called `unregisterIpc()` as
+its **first** act, and that removes every channel in `CHANNEL` — including the capture
+channels. `RecorderSession.shutdown`'s own docblock states the rule from the inside
+(_"`uninstall` comes **after**: it removes the listener the capture page's 'I have
+stopped' message arrives on"_) and `index.ts` broke it from the outside. What it cost
+is legible in the bundle the captain's run left behind: `capture.ended` had nowhere to
+arrive, `stop()` waited out its whole 5 s `stopTimeoutMs`, and the recording was
+finalized **with no end report** — `measuredSampleRate` falling back to the nominal
+48000 (the one §5.4 field twenty minutes of drift lives in), `endReason: "crash"` on
+every part of a recording that did not crash, and no frame or drop counts. Meanwhile
+the library window stayed on screen for those seconds with every call throwing. The
+fix is one move — `unregisterIpc()` after both producers have shut down, in a
+`finally` so a producer that threw still takes the surface down — and
+`the-quit-disconnects-a-live-window-before-the-flush` is the mutation.
+
+**That ordering has a cost, and each producer pays it in the same shape: a surface that
+answers for the length of the flush is a surface work can still be _started_ through.**
+The early `unregisterIpc()` was hiding that, so both windows opened when it moved. An
+`export:start` landing inside `ExportSession.shutdown` — which snapshots `#jobs`, awaits
+a `cancelExport` per job and then clears the map — is cancelled by nothing and dropped by
+`clear()`, leaving its hidden window and its `wx+` scratch streams to outlive the quit.
+A `recorder.start` landing inside `RecorderSession.shutdown` is worse: `enqueue` is one
+chain, so it runs _behind_ the stop and therefore **after** `uninstall()`, creating a
+bundle, a `.lock` and `state: "recording"` for a capture whose `capture.ended` can never
+arrive — a recording the next launch offers to recover and the user never made. Both are
+closed the way this file already refuses a second export of one recording: a
+`#shuttingDown` flag set as the **first** statement of each `shutdown()` (so no `await`
+separates announcing the sweep from taking the list it acts on), and a typed, named
+refusal — `ExportShuttingDownError`, `RecorderShuttingDownError` — thrown before the
+first `await`. **The export one is asked twice**, because four awaits stand between
+`start`'s entry and `#jobs`: a quit beginning in any of them would otherwise find the job
+absent from the snapshot and present in the map that is then cleared, and the second ask
+sits where the existing `catch` hands back both the bundle hold and the claim. **Only the
+late ask is proven, and the two asks overlap rather than partition** — deleting the entry
+one alone leaves the suite green, because a press that runs past it is refused by the late
+one; what it earns instead is that a refusal at quit time takes no bundle hold, and that
+has nowhere to break today. `#refuseIfShuttingDown`'s docblock owns that gap and what
+would close it; do not restate it here. **Nothing read-only is refused** — `library.list`
+and its neighbours must keep answering, because a live window with dead IPC is the defect
+this branch fixed — and an export already running is still swept exactly as before, which
+is the control each guard's test carries.
+`an-export-can-start-during-the-shutdown-sweep` breaks the flag and
+`a-job-parked-when-the-sweep-began-is-still-admitted` the late ask, separately, because a
+single entry breaking both would leave whichever half its guard noticed second unproven.
+
+**A third thing was closed in the same pass because it is the same shape:
+`app.whenReady().then(main, onRejected)` does not catch a rejection from `main`** —
+the second argument of `then` handles a rejection of `whenReady()` and nothing that
+happens inside. So a throw anywhere past `main`'s first `await` was an unhandled
+rejection with no window and nothing printed, which is exactly the symptom this branch
+started from. It is `.then(main).catch(failedToStart)` now. **It has no mutation
+entry**, deliberately: nothing in the suite makes `main()` throw, so an entry would
+claim a guard that does not exist.
+
+**What the launch gate is, and the two readings that turned out not to be
+instruments.** `test/launch/main.ts` opens no window of its own: it `require`s the
+shipping `dist/main/index.cjs` and watches it take the single-instance lock, install
+`loom://`, register its channels, recover, and show a window. The only thing arranged
+around it is `HOME` and `--user-data-dir`, which is what puts `store.recordingsRoot`
+and `settings.json` in a scratch tree — **there is no test flag in production for this
+and there must not be one**; `os.homedir()` reading `$HOME` is what makes it possible.
+Both branches of the one line that decides what a user meets are covered (setup on a
+first run, library after). Two readings were tried and retired by their own controls,
+and both are recorded rather than dropped so nobody reaches for them again:
+`document.visibilityState` inside the page reports **`visible` for an Electron window
+created `show: false` and never revealed**, so the renderer's own opinion of whether
+it is on screen measures nothing; and `capturePage()` returns a full picture for that
+same unrevealed window, so a colour count is a "did it paint" reading and not a
+visibility one. What discriminates is `BrowserWindow.isVisible()`, with the hidden
+control beside it. The quit reading is taken from a `before-quit` listener registered
+**after** the app's, so it observes what that listener left synchronously — and it is
+the claim that failed against the code this gate was written for.
+
+**Both new gates are fast and neither can withhold** (3.5 s and 2 ms), so they are
+outside `WITHHOLDABLE_GUARDS` and outside the "never run a second macOS job beside
+`verify`" hazard: nothing in either times the machine.
+
 ## Sharp edges
 
 - **Audio and video capture clocks do not share an epoch.** Measured by
@@ -2245,6 +2353,30 @@ same pass is not a check that harness runs.
   "caught". **Never add a second macOS job that runs concurrently with `verify`**:
   these three gates cannot tell a busy host apart from the defect they exist to catch,
   and a job we start on purpose is a busy host we chose.
+- **`fileParallelism: false` keeps two test _files_ off each other and does not keep a
+  file off what the file before it started — and that gap had the phase-6 gate as its
+  only victim.** The two are different claims, and between them sit a spawned process
+  (`/usr/bin/avconvert`, an Electron launch, a SIGKILL round) and the writeback of
+  whatever that file put on disk, both of which outlive the `it()` that began them.
+  Only one file in this suite can see it: phase 6 judges its **single worst frame with
+  no allowance**, so one pre-empted frame fails it, and its own host control samples
+  154 spins against 450 frames — too coarse to have been holding the thread at that
+  instant and withhold the verdict. Everything else compares against something measured
+  in its own window (`rate-control.ts`) or has minutes of budget (`av-sync.test.ts`).
+  Measured on run 31195372445: `apps/main/test/recorder-session.test.ts` — 5.4 s of real
+  fragment writing with two `avconvert` playability transcodes in it — finished **100 ms**
+  before the gate launched its Electron, because vitest sorts by file size and 47,707
+  bytes lands directly above 38,630. The gate reported one 33.10 ms play frame against a
+  27.93 ms envelope with a p99 of 4.20 ms, and the host stalled its own pure-arithmetic
+  spin to 25.40 ms in the slow-compositor phase against 8.40 ms on each of the four runs
+  before it. That is the same pairing `ci.yml` already answered **across** jobs with
+  `needs: verify` — the gate measured beside `mutation`'s `avconvert` transcodes — and it
+  was still live **inside** the run, decided by a byte count. `vitest.config.ts`'s
+  `StopwatchGateFirst` hands that one gate the box before this suite has started
+  anything. **Only that one**: hoisting all three stopwatch gates would make them each
+  other's noise, which is what `fileParallelism: false` exists to prevent. Nothing about
+  the gate moved — no assertion, no threshold, no retry; §8's number is still judged on
+  the worst single frame.
 - **An annotation pass must not blend the destination alpha, and `half` is a reserved
   word.** The first is load-bearing: the annotation passes run over a target the screen
   pass wrote opaque, and an ordinary `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` also

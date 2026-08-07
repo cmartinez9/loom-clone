@@ -204,6 +204,34 @@ export class ExportRecordingBusyError extends Error {
 }
 
 /**
+ * Raised when a job is asked for while the app is quitting.
+ *
+ * The IPC surface deliberately outlives both producers during `before-quit` — a live
+ * window whose every call throws `No handler registered` is the defect that ordering
+ * exists to prevent — so `export:start` still answers for the length of the flush.
+ * {@link ExportSession.shutdown} snapshots `#jobs`, awaits a `cancelExport` per job and
+ * then clears the map, so a job admitted between the snapshot and the clear is swept by
+ * neither: it is dropped from `#jobs` without ever being cancelled, and its hidden
+ * window and `wx+` scratch streams survive to `app.quit()`.
+ *
+ * A quit is not a state a job can be started in, so it is refused rather than raced
+ * with — {@link ExportRecordingBusyError}'s shape, for the same reason: a refusal a
+ * caller *hears* beats a silent no-op, and the only alternative is holding an invariant
+ * across a sweep, a `rename(2)` and a process that is going away.
+ */
+export class ExportShuttingDownError extends Error {
+  readonly recordingId: RecordingId;
+  constructor(recordingId: RecordingId) {
+    super(
+      `the app is shutting down; recording ${recordingId} cannot start a new export ` +
+        'while the quit flush is running',
+    );
+    this.name = 'ExportShuttingDownError';
+    this.recordingId = recordingId;
+  }
+}
+
+/**
  * How the two passes share the progress bar.
  *
  * Audio is seconds of work and video is minutes (§5.7), so a 50/50 split would sit
@@ -315,6 +343,13 @@ export class ExportSession {
    * still "the first". `#run`'s `finally` gives it back on every exit path.
    */
   readonly #exporting = new Map<RecordingId, string>();
+  /**
+   * Whether {@link ExportSession.shutdown} has begun. See {@link ExportShuttingDownError}.
+   *
+   * Never cleared: a shutdown is the end of the process, and a flag that could be
+   * taken back would be an invariant with a second way out of it.
+   */
+  #shuttingDown = false;
 
   constructor(options: ExportSessionOptions) {
     this.#options = options;
@@ -400,6 +435,14 @@ export class ExportSession {
    * trusted to decline a capability. It is taken **before `openProject`** so a refusal
    * cannot leave a bundle hold behind, and before the first `await` so two presses in
    * one turn cannot both find the recording idle.
+   *
+   * The third is {@link ExportShuttingDownError}, and it is what keeps the quit's
+   * ordering — the IPC surface outliving both producers — from being a way to start
+   * work the sweep has already looked past. {@link ExportSession.#refuseIfShuttingDown}
+   * is asked at **two** points, and they close different sequences: at entry, for a
+   * press that arrives after the sweep began; and again at the last instant before
+   * `#jobs`, for a press that was already past the first ask when the sweep began and
+   * resumes from one of the awaits between them.
    */
   async start(id: RecordingId, overrides: ExportSettingsOverride): Promise<{ jobId: string }> {
     if ('outputDir' in overrides) {
@@ -408,6 +451,7 @@ export class ExportSession {
           'through export:chooseFolder',
       );
     }
+    this.#refuseIfShuttingDown(id);
     const heldBy = this.#exporting.get(id);
     if (heldBy !== undefined) throw new ExportRecordingBusyError(id, heldBy);
     const jobId = (this.#options.newJobId ?? randomUUID)();
@@ -459,6 +503,13 @@ export class ExportSession {
         index: await this.#screenIndex(id, opened.recording),
       });
       const hasAudio = audioSources(id, opened.recording).length > 0;
+      // The second of the predicate's two asks, and the one the entry ask cannot make:
+      // four awaits stand between them, and a sweep that begins in any of them would
+      // find this job absent from its snapshot and present in the map it then clears.
+      // `#newJob` is synchronous, so nothing can interleave between here and the
+      // `#jobs.set` below. The `catch` is what makes it safe to refuse this late —
+      // the bundle hold and the claim both go back before the throw leaves.
+      this.#refuseIfShuttingDown(id);
       job = this.#newJob({ jobId, id, settings, outputPath, timeline, eligibility, hasAudio });
     } catch (error) {
       await this.#options.store.releaseProject(id).catch(() => undefined);
@@ -513,6 +564,34 @@ export class ExportSession {
   }
 
   /**
+   * Refuse a job the quit has already begun sweeping past.
+   *
+   * One predicate rather than the condition written out at each of {@link
+   * ExportSession.start}'s two asks: a property split across two copies of a condition
+   * has no single place to be right, and these two have to agree about what "the sweep
+   * has begun" means.
+   *
+   * **Only the late ask is proven, and the two are not equally covered.** Deleting the
+   * late call site is `a-job-parked-when-the-sweep-began-is-still-admitted` and
+   * `apps/main/test/export-session.test.ts` goes red on it. Deleting the **entry** call
+   * site alone leaves that suite green, because the asks overlap rather than partition:
+   * a press arriving after the sweep began runs on past the entry, `#screenIndex`
+   * answers `null` rather than throwing for a media-less bundle, `compile` succeeds over
+   * the seeded `edit.json`, and the late ask then refuses with the same
+   * {@link ExportShuttingDownError} the test asserts on. What the entry ask nevertheless
+   * earns is not redundancy: it is taken **before `openProject`**, which is this file's
+   * own discipline for the sibling {@link ExportRecordingBusyError} — a refusal must not
+   * leave a bundle hold behind — so without it a press at quit time takes a bundle lock,
+   * does disk I/O and releases it again on its way to being refused. That property has
+   * nowhere to break today. Closing it is a test asserting a refused start took **no**
+   * bundle hold, plus a third registry entry keyed on the entry call site; recorded here
+   * rather than left silent, because an unproven claim is worse than a stated gap.
+   */
+  #refuseIfShuttingDown(id: RecordingId): void {
+    if (this.#shuttingDown) throw new ExportShuttingDownError(id);
+  }
+
+  /**
    * Give the recording back, if this job is the one holding it.
    *
    * Keyed by job id and not by recording alone, so a release can only ever free the
@@ -534,6 +613,9 @@ export class ExportSession {
 
   /** Every job still running, so shutdown can stop them. */
   async shutdown(): Promise<void> {
+    // First, and before the snapshot below, so there is no `await` between announcing
+    // the sweep and taking the list it acts on. See {@link ExportShuttingDownError}.
+    this.#shuttingDown = true;
     for (const job of [...this.#jobs.values()]) {
       job.cancelled = true;
       this.#abandonWaits(job, new ExportCancelled());

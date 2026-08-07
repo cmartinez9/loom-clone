@@ -285,6 +285,18 @@ const PHASE13_RECOVERY = 'apps/main/test/recovery-notice.test.ts';
 const IPC_DISK = 'packages/ipc/test/disk.test.ts';
 
 /**
+ * The launch path — the one thing no gate had ever run.
+ *
+ * `LAUNCH_GATE` requires the shipping `dist/main/index.cjs` to put a window on screen
+ * that a person could read and that answers IPC, and it takes the reading at the quit
+ * too. `DEV_LOOP` is `npm run dev`'s two decisions, pure. Neither can withhold — one
+ * launches a window and reads its own pixels back, the other is arithmetic over a state
+ * machine — so neither belongs in {@link WITHHOLDABLE_GUARDS}.
+ */
+const LAUNCH_GATE = 'test/launch-gate.test.ts';
+const DEV_LOOP = 'test/dev-loop.test.ts';
+
+/**
  * Each mutation is a one-line edit that breaks exactly one of the properties the
  * gate rests on, plus the tests that must notice.
  */
@@ -2257,6 +2269,76 @@ export const MUTATIONS = [
     find: '  return exportReadingsTaken(report).length === 0;',
     replace: '  return true;',
     mustFail: [P15_VERDICT],
+  },
+  {
+    name: 'the-dev-loop-reads-its-own-restart-as-the-app-quitting',
+    breaks:
+      'the one decision `npm run dev` turns on: telling an exit we asked for from the ' +
+      'user quitting. With it wrong, the first write the tail of a cold build lands in ' +
+      '`dist/` schedules a restart, the SIGTERM that restart sends is read as the app ' +
+      'quitting, and the whole dev session calls `process.exit(0)` — silently, about a ' +
+      'second after launch. That is the defect the first person to run this app hit: no ' +
+      'window, no error, exit status 0.',
+    file: 'scripts/dev-loop.mjs',
+    find: "      this.#phase = 'waiting';\n      return 'relaunch';",
+    replace: "      this.#phase = 'stopped';\n      return 'end';",
+    mustFail: [DEV_LOOP],
+  },
+  {
+    name: 'the-dev-loop-launches-against-a-half-built-dist',
+    breaks:
+      'waiting for a build the app can actually be launched against. `dist/` existing is ' +
+      'not that — on a cold tree the directory is made by the first build step and the ' +
+      'renderer pages arrive later — so without this the app is launched over a bundle ' +
+      'that is still being written, and every remaining write is a restart.',
+    file: 'scripts/dev-loop.mjs',
+    find: '  return LAUNCH_REQUIREMENTS.filter((path) => !exists(path));',
+    replace: '  return [];',
+    mustFail: [DEV_LOOP],
+  },
+  {
+    name: 'the-quit-disconnects-a-live-window-before-the-flush',
+    breaks:
+      "the shutdown's ordering. `unregisterIpc` removes every channel in `CHANNEL`, and " +
+      '`RecorderSession.shutdown` states from the inside why its own teardown comes ' +
+      'after the stop: `capture.ended` is the message that stop waits for. Taken down ' +
+      'first, the stop waits out its 5 s timeout and the recording is finalized with no ' +
+      'end report — nominal `measuredSampleRate` in place of the measured one, ' +
+      '`endReason: "crash"` on every part of a recording that did not crash — while the ' +
+      'library window stays on screen answering `No handler registered` to every call.',
+    file: 'apps/main/src/index.ts',
+    find: '  event.preventDefault();\n  shuttingDown = true;\n',
+    replace: '  event.preventDefault();\n  shuttingDown = true;\n  unregisterIpc();\n',
+    mustFail: [LAUNCH_GATE],
+  },
+  {
+    name: 'an-export-can-start-during-the-shutdown-sweep',
+    breaks:
+      'the other half of that ordering. Keeping the IPC surface up for the length of ' +
+      'the flush is what stops a live window answering `No handler registered` — and it ' +
+      'also leaves `export:start` answering across `shutdown`’s awaits. That sweep ' +
+      'snapshots `#jobs`, cancels each job in it and then clears the map, so a job ' +
+      'admitted after the snapshot is cancelled by nothing and dropped by `clear()`: its ' +
+      'hidden window and its `wx+` scratch streams outlive the quit. Without this flag ' +
+      'neither refusal in `start` can fire.',
+    file: 'apps/main/src/export/session.ts',
+    find: '    this.#shuttingDown = true;\n' + '    for (const job of [...this.#jobs.values()]) {',
+    replace: '    for (const job of [...this.#jobs.values()]) {',
+    mustFail: [EXPORT_SESSION],
+  },
+  {
+    name: 'a-job-parked-when-the-sweep-began-is-still-admitted',
+    breaks:
+      'the *second* of `start`’s two asks, which is the one the entry ask structurally ' +
+      'cannot make. Four awaits stand between them, so a press already past the entry ' +
+      'when the quit begins resumes into `#jobs.set` with the sweep’s snapshot already ' +
+      'taken: cancelled by nothing, dropped by `#jobs.clear()`, and its hidden window ' +
+      'and `wx+` scratch left to outlive `app.quit()`. Its own entry rather than the ' +
+      'flag’s, because a property with one place to break has half of itself unproven.',
+    file: 'apps/main/src/export/session.ts',
+    find: '      this.#refuseIfShuttingDown(id);\n' + '      job = this.#newJob({',
+    replace: '      job = this.#newJob({',
+    mustFail: [EXPORT_SESSION],
   },
 ];
 

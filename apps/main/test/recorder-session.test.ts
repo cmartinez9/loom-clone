@@ -26,7 +26,7 @@ import {
   type RecordingId,
 } from '@loom/format';
 import { ProjectStore } from '../src/project-store.ts';
-import { RecorderSession } from '../src/recorder/session.ts';
+import { RecorderSession, RecorderShuttingDownError } from '../src/recorder/session.ts';
 import type { WindowRegistry, WindowRole } from '../src/windows.ts';
 import {
   loadEncodedFixture,
@@ -1128,5 +1128,44 @@ describe('a source that ends by itself (§7.3)', () => {
     harness.screenAccess = 'denied';
     const doc = await recordThenEndSource();
     expect(doc.tracks.screen?.parts[0]?.frameCount).toBe(10);
+  });
+});
+
+/**
+ * A quit that is already flushing.
+ *
+ * `before-quit` takes the IPC surface down **after** both producers, so `recorder.start`
+ * still answers — and the HUD is still on screen with its button live — for the whole of
+ * {@link RecorderSession.shutdown}. That shutdown is `await enqueue(stop)` and then
+ * `uninstall()`, and `enqueue` is one chain: a start arriving during the stop runs
+ * *behind* it, which is **after** the capture channels have gone. What that produces is
+ * a bundle, a `.lock` and `state: "recording"` for a capture whose `capture.ended` can
+ * never arrive — a recording the next launch offers to recover and the user never made.
+ */
+describe('a quit that is already flushing', () => {
+  it('refuses a recording that arrives after the shutdown has begun', async () => {
+    // Not awaited: the window under test is the one inside `shutdown`, and the flag it
+    // sets is its first statement precisely so there is no `await` before it.
+    const flushing = recorder.shutdown();
+    const refusal = await recorder
+      .start({})
+      .then(() => null)
+      .catch((error: unknown) => error);
+    await flushing;
+
+    expect(refusal).toBeInstanceOf(RecorderShuttingDownError);
+    expect(refusal).toBeInstanceOf(Error);
+    // Refused before `store.create`, so the quit leaves no bundle behind at all.
+    expect(await store.list()).toEqual([]);
+  });
+
+  it('CONTROL: the same call starts a recording when nothing is shutting down', async () => {
+    // Without this the row above passes for a `start` that refuses unconditionally,
+    // which would be the record button broken for the life of the app.
+    const id = await recorder.start({});
+    const summaries = await store.list();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.id).toBe(id);
+    expect(summaries[0]?.state).toBe('recording');
   });
 });
