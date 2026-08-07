@@ -147,9 +147,10 @@ apps/renderer/     renderer windows. First-run setup, library — including the 
                    manual zoom regions and keyframe ops, `annotate.ts` for annotation
                    ops and the pointer's map into normalized source space,
                    `generators.ts` for reading `events/` and §3.5's regenerate/bake,
-                   `tools.ts`, `stage.ts` (the handles over the picture) and
-                   `inspector.ts`. The first three are pure and are where the arithmetic
-                   that is wrong invisibly lives.
+                   `tools.ts`, `stage.ts` (the handles over the picture),
+                   `inspector.ts` and `gestures.ts` (what a two-phase gesture and a
+                   moving playhead should cause). The first three and `gestures.ts` are
+                   pure and are where the arithmetic that is wrong invisibly lives.
 test/              gates that span more than one package, in a real Electron renderer.
 ```
 
@@ -749,10 +750,10 @@ carry. `placeZoomOps` inserts a fresh region's keys beside whatever is already o
 track; `updateZoomOps` and `removeZoomOps` **patch the keys that are there**. The ops are
 still one `track.remove` + `track.add` pair — a dozen key ops would each have to pass
 validation on the way through `applyOps` — but the replacement is this track's own keys
-with the edit applied. `a-region-edit-discards-a-hand-edited-keyframe` is the mutation,
-and its guard is `apps/renderer/test/editor-zoom.test.ts` rather than the gate, because
-the property is arithmetic over a document and nothing composited can be taken away from
-it.
+with the edit applied. `a-region-edit-discards-a-hand-edited-keyframe` is one of the four
+mutations that hold it — § Sharp edges' region-edit entry names all four — and their
+guard is `apps/renderer/test/editor-zoom.test.ts` rather than the gate, because the
+property is arithmetic over a document and nothing composited can be taken away from it.
 
 **The captain's own row of the capability table is _"Manual option too."_**, and it is
 `overrideZoomOps`: a manual region seeded with what `resolve` reports at that instant —
@@ -1094,14 +1095,21 @@ the same way rather than widening anything.
   region begins or ends. The qualification is the half that position alone cannot give:
   delete a region's ramp-in `center` key and its outermost survivor sits strictly inside,
   so it is interior, keeps its time, and a start edit does not drag the framing to the
-  edge. `carriesStart`/`carriesEnd` are that qualification named, so `withExtent` can ask
-  it of the extent the region is **about to** have: a carrier keeps its time only while
-  it would still carry that end _and_ still lies inside the region's new window. Both
-  halves are load-bearing — drop the first and an outward key is demoted to interior
-  where the framing reader takes it for the user's centre; drop the second and it is
-  stranded in no region at all. That the start and end sides then behave differently is
-  the window's own asymmetry (`[startSec, endSec + tail]`) rather than a case for the
-  tail.
+  edge. `carriesStart`/`carriesEnd` are that qualification named, and `regionKeyRoles`
+  asks them of the extent the region **currently** has. `withExtent` keeps a carrier's
+  time only while its own two conditions both hold: the key sits in the region's
+  **settle-tail slack** (`inSettleSlack` — the one stretch of the window that is not
+  between the current extents, so the only place a person could have dragged a key past
+  an end) _and_ it still lies inside the region's new window. Asking the first of the
+  extent the region is **about to** have instead — _would it still carry that end_ — is
+  trivially true of any shrink, which turned every `Ends` edit smaller than the tail into
+  a silent no-op; `a-sub-tail-end-edit-is-a-silent-no-op` is that mutation. Both halves
+  are load-bearing — drop the first and no carrier follows an edit at all, so the
+  ordinary ramp-out key keeps a time the region no longer ends at, is read back as
+  interior, and the framing reader takes it for the user's centre; drop the second and a
+  key the region no longer reaches is stranded in no region at all. That the start and
+  end sides then behave differently is the window's own asymmetry
+  (`[startSec, endSec + tail]`) rather than a case for the tail.
 
 - **The sweep that closed that list, so the next reader can see what was looked at.**
   Four shapes were hunted across `zoom.ts` and `annotate.ts`: a position in a list,
